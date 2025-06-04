@@ -41,8 +41,6 @@ and GNU Make.
 * macOS: `brew install gforth`
 * Ubuntu Linux / Debian: `sudo apt-get install gforth build-essential`
 
-Certainly! Here's the proofread and refined version of your text, optimized for inclusion in a user manual:
-
 To run eForth on MUXLEQ, simply type:
 ```shell
 $ make run
