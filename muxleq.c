@@ -1,9 +1,9 @@
 /*
  * A MUXLEQ virtual machine implementation.
  *
- * This program reads instructions from a memory array and executes them.
- * It supports input, output, MUX operations, and SUBLEQ (Subtract and Branch
- * if Less or Equal to Zero) instructions.
+ * This program executes a two-instruction (SUBLEQ and MUX) program from a
+ * static memory array. It supports standard input/output and halts when the
+ * program counter moves to a negative address.
  */
 
 #include <stdint.h>
@@ -11,67 +11,76 @@
 
 /* branch predictor hints */
 #if defined(__GNUC__) || defined(__clang__)
-#define unlikely(x) __builtin_expect(!!(x), 0)
+#define LIKELY(x) __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
-#define unlikely(x) (x)
+#define LIKELY(x) (x)
+#define UNLIKELY(x) (x)
 #endif
 
-/* Define memory size and masks */
-#define SZ (1 << 15)
-#define MASK (SZ - 1)
-#define IO_MARKER (uint16_t) (~0U)
+/* Define memory and instruction layout constants. */
+#define MEM_SIZE (1 << 15)
+#define MEM_MASK (MEM_SIZE - 1)
+#define IO_MARKER ((uint16_t) -1) /* More idiomatic way to express all 1s. */
+#define NEGATIVE_FLAG MEM_SIZE
 
-/* The memory array of the virtual machine */
-static uint16_t m[SZ] = {
+/* Instruction operand offsets. */
+enum { A = 0, B = 1, C = 2, INSN_SIZE = 3 };
+
+/* The memory of the virtual machine, initialized from an external file. */
+static uint16_t m[MEM_SIZE] = {
 #include "stage0.c"
 };
 
-int main()
+int main(void)
 {
     /* Disable buffering for stdout to ensure immediate output */
-    if (setvbuf(stdout, NULL, _IONBF, 0) < 0)
-        return 1;
+    if (setvbuf(stdout, NULL, _IONBF, 0) != 0)
+        return 1; /* Non-zero return indicates failure */
 
-    for (uint16_t pc = 0;;) { /* main loop */
-        /* Fetch instruction operands */
-        uint16_t a = m[pc + 0], b = m[pc + 1], c = m[pc + 2];
+    uint16_t pc = 0;
+    /* Loop until PC becomes negative. */
+    while (LIKELY((pc & NEGATIVE_FLAG) == 0)) {
+        /* Fetch instruction operands from memory. */
+        const uint16_t addr_a = m[pc + A];
+        const uint16_t addr_b = m[pc + B];
+        const uint16_t addr_c = m[pc + C];
 
-        /* Check if operands are not I/O markers */
-        if (unlikely(a == IO_MARKER || b == IO_MARKER)) {
-            /* Handle I/O operations */
-            if (a == IO_MARKER) {
-                /* Input operation: read a byte and store in memory */
-                int input = getchar();
-                if (unlikely(input == EOF))
-                    break;
-                m[b] = (uint16_t) input;
-            } else {
-                /* Output operation: write the byte from memory */
-                if (putchar(m[a]) < 0)
-                    return 3;
-            }
-            pc += 3;
+        /* Handle I/O as a special case. */
+        if (UNLIKELY(addr_a == IO_MARKER)) { /* Input */
+            const int input = getchar();
+            if (input == EOF)
+                break; /* Halt on End-of-File. */
+
+            m[addr_b] = (uint16_t) input;
+            pc += INSN_SIZE;
             continue;
         }
 
-        /* Check if MUX operation */
-        if (c & SZ && c != IO_MARKER) {
-            /* Perform bitwise multiplexing */
-            uint16_t mc = m[c & MASK]; /* MUX condition */
-            m[b] = (m[a] & ~mc) | (m[b] & mc);
-            pc += 3;
+        if (UNLIKELY(addr_b == IO_MARKER)) { /* Output */
+            if (putchar(m[addr_a]) == EOF)
+                return 3; /* Halt on output error. */
+
+            pc += INSN_SIZE;
+            continue;
+        }
+
+        /* Check for MUX operation, encoded in a negative 'c' address. */
+        if (UNLIKELY((addr_c & NEGATIVE_FLAG) && (addr_c != IO_MARKER))) {
+            const uint16_t mask = m[addr_c & MEM_MASK];
+            m[addr_b] = (m[addr_a] & ~mask) | (m[addr_b] & mask);
+            pc += INSN_SIZE;
         } else {
-            /* SUBLEQ operation: subtract and conditionally branch */
-            const uint16_t r = m[b] - m[a];
-            if (r == 0 || r & SZ) {    /* If result is zero or negative */
-                pc = c;                /* Branch to address c */
-                if (unlikely(pc & SZ)) /* Exit loop if pc exceeds bounds */
-                    break;
+            /* Default to SUBLEQ operation. */
+            const uint16_t result = m[addr_b] - m[addr_a];
+            m[addr_b] = result;
+            if ((result == 0) || (result & NEGATIVE_FLAG)) {
+                pc = addr_c; /* Branch if result is zero or negative. */
             } else {
-                pc += 3;
+                pc += INSN_SIZE;
             }
-            m[b] = r; /* Store result */
         }
     }
+
     return 0;
 }
