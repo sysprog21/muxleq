@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <unistd.h>
 
 /* Tail-call optimization attribute */
 #if defined(__has_attribute) && __has_attribute(musttail)
@@ -122,9 +123,11 @@ static int dispatch(uint16_t pc,
 
 int main(void)
 {
-    /* Disable buffering for stdout to ensure immediate output */
-    if (setvbuf(stdout, NULL, _IONBF, 0) != 0)
-        return 1; /* Non-zero return indicates failure */
+    /* Set I/O buffering: line for interactive, full for piped. */
+    const int mode = isatty(fileno(stdout)) ? _IOLBF : _IOFBF;
+    setvbuf(stdout, NULL, mode, BUFSIZ);
+    if (mode == _IOFBF)
+        setvbuf(stdin, NULL, _IOFBF, BUFSIZ);
 
     /* Fetch first instruction and start execution by calling the dispatcher. */
     const uint16_t pc = 0;
