@@ -45,12 +45,12 @@ static int dispatch(uint16_t pc,
                     uint16_t addr_c);
 
 /* Fetch the next instruction's operands and tail-call dispatch. */
-#define FETCH_AND_DISPATCH(next_pc)                  \
-    do {                                             \
-        const uint16_t a = m[(next_pc) + A];         \
-        const uint16_t b = m[(next_pc) + B];         \
-        const uint16_t c = m[(next_pc) + C];         \
-        MUST_TAIL return dispatch(next_pc, a, b, c); \
+#define FETCH_AND_DISPATCH(next_pc)                        \
+    do {                                                   \
+        const uint16_t __a = m[(next_pc) + A];             \
+        const uint16_t __b = m[(next_pc) + B];             \
+        const uint16_t __c = m[(next_pc) + C];             \
+        MUST_TAIL return dispatch(next_pc, __a, __b, __c); \
     } while (0)
 
 static int get(uint16_t pc,
@@ -92,9 +92,42 @@ static int subleq(uint16_t pc,
     const uint16_t result = m[addr_b] - m[addr_a];
     m[addr_b] = result;
     if ((result == 0) || (result & NEGATIVE_FLAG)) {
-        FETCH_AND_DISPATCH(addr_c); /* Branch */
+        FETCH_AND_DISPATCH(addr_c); /* Branch taken, cannot fuse. */
     } else {
-        FETCH_AND_DISPATCH(pc + INSN_SIZE);
+        /* Superinstruction Optimization: If the first SUBLEQ doesn't branch,
+         * peek at the next instruction. If it is also a SUBLEQ, execute it
+         * immediately to fuse the pair and reduce dispatch overhead.
+         */
+        const uint16_t next_pc = pc + INSN_SIZE;
+        /* Next PC is negative, must halt. Dispatch to handle it cleanly. */
+        if ((next_pc & NEGATIVE_FLAG) != 0)
+            FETCH_AND_DISPATCH(next_pc);
+
+        const uint16_t next_a = m[next_pc + A];
+        const uint16_t next_b = m[next_pc + B];
+        const uint16_t next_c = m[next_pc + C];
+
+        /* Check if the next instruction is a candidate for SUBLEQ fusion. */
+        const int is_subleq =
+            (next_a != IO_MARKER) && (next_b != IO_MARKER) &&
+            !((next_c & NEGATIVE_FLAG) && (next_c != IO_MARKER));
+
+        if (is_subleq) {
+            /* Fuse: Execute the second SUBLEQ here. */
+            const uint16_t result2 = m[next_b] - m[next_a];
+            m[next_b] = result2;
+
+            if ((result2 == 0) || (result2 & NEGATIVE_FLAG)) {
+                FETCH_AND_DISPATCH(next_c); /* Second instruction branches. */
+            } else {
+                /* Success! Fused pair executed. Dispatch the instruction AFTER
+                 * the pair. */
+                FETCH_AND_DISPATCH(next_pc + INSN_SIZE);
+            }
+        } else {
+            /* Next instruction is not a SUBLEQ, so dispatch it normally. */
+            MUST_TAIL return dispatch(next_pc, next_a, next_b, next_c);
+        }
     }
 }
 
