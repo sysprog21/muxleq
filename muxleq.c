@@ -80,7 +80,15 @@ static int put(uint16_t pc,
 static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
 {
     const uint16_t mask = m[addr_c & MEM_MASK];
-    m[addr_b] = (m[addr_a] & ~mask) | (m[addr_b] & mask);
+
+    /* Optimized path for mask=0 (pure move operation) */
+    if (mask == 0) {
+        m[addr_b] = m[addr_a];
+    } else {
+        /* General MUX operation for non-zero masks */
+        m[addr_b] = (m[addr_a] & ~mask) | (m[addr_b] & mask);
+    }
+
     FETCH_AND_DISPATCH(pc + INSN_SIZE);
 }
 
@@ -120,8 +128,7 @@ static int subleq(uint16_t pc,
             if ((result2 == 0) || (result2 & NEGATIVE_FLAG)) {
                 FETCH_AND_DISPATCH(next_c); /* Second instruction branches. */
             } else {
-                /* Success! Fused pair executed. Dispatch the instruction AFTER
-                 * the pair. */
+                /* Fused pair executed. Dispatch instruction AFTER the pair. */
                 FETCH_AND_DISPATCH(next_pc + INSN_SIZE);
             }
         } else {
