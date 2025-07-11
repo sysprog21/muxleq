@@ -114,6 +114,17 @@ while pc >= 0:
             pc = c # Branch
 ```
 
+MUX with constants `0` and `-1` can implement any boolean function:
+- AND: Use selector = second operand
+- OR: Use selector = ~first operand
+- XOR: Combine multiple MUX operations
+- NOT: MUX with swapped true/false values
+
+The above are expensive in pure SUBLEQ (requiring dozens of instructions).
+
+Setting the selector to 0 creates single-instruction MOV, can replace SUBLEQ's 4-instruction copy sequence.
+In addition, direct bit manipulation accelerates pointer arithmetic, array indexing, and indirect memory operations.
+
 ### Future Directions and Variants
 The MUXLEQ design can be extended with other instructions by encoding them in the operands. Some potential enhancements include:
 * Bit Reversal: As proposed in "[Subleq: An Area-Efficient Two-Instruction-Set Computer](https://janders.eecg.utoronto.ca/pdfs/esl.pdf)," a bit-reversal instruction can efficiently implement arithmetic shifts.
