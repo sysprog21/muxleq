@@ -17,11 +17,14 @@
 #define MUST_TAIL
 #endif
 
-/* Unused parameter attribute to suppress compiler warnings */
 #if defined(__GNUC__) || defined(__clang__)
 #define UNUSED __attribute__((unused))
+#define LIKELY(x) __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
 #define UNUSED
+#define LIKELY(x) (x)
+#define UNLIKELY(x) (x)
 #endif
 
 /* Define memory and instruction layout constants. */
@@ -59,7 +62,7 @@ static int get(uint16_t pc,
                UNUSED uint16_t addr_c)
 {
     const int input = getchar();
-    if (input == EOF)
+    if (UNLIKELY(input == EOF))
         return 0; /* Halt on End-of-File. */
 
     m[addr_b] = (uint16_t) input;
@@ -71,7 +74,7 @@ static int put(uint16_t pc,
                UNUSED uint16_t addr_b,
                UNUSED uint16_t addr_c)
 {
-    if (putchar(m[addr_a]) == EOF)
+    if (UNLIKELY(putchar(m[addr_a]) == EOF))
         return 3; /* Halt on output error. */
 
     FETCH_AND_DISPATCH(pc + INSN_SIZE);
@@ -82,7 +85,7 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
     const uint16_t mask = m[addr_c & MEM_MASK];
 
     /* Optimized path for mask=0 (pure move operation) */
-    if (mask == 0) {
+    if (LIKELY(mask == 0)) {
         m[addr_b] = m[addr_a];
     } else {
         /* General MUX operation for non-zero masks */
@@ -99,7 +102,7 @@ static int subleq(uint16_t pc,
 {
     const uint16_t result = m[addr_b] - m[addr_a];
     m[addr_b] = result;
-    if ((result == 0) || (result & NEGATIVE_FLAG)) {
+    if (UNLIKELY((result == 0) || (result & NEGATIVE_FLAG))) {
         FETCH_AND_DISPATCH(addr_c); /* Branch taken, cannot fuse. */
     } else {
         /* Superinstruction Optimization: If the first SUBLEQ doesn't branch,
@@ -108,7 +111,7 @@ static int subleq(uint16_t pc,
          */
         const uint16_t next_pc = pc + INSN_SIZE;
         /* Next PC is negative, must halt. Dispatch to handle it cleanly. */
-        if ((next_pc & NEGATIVE_FLAG) != 0)
+        if (UNLIKELY((next_pc & NEGATIVE_FLAG) != 0))
             FETCH_AND_DISPATCH(next_pc);
 
         const uint16_t next_a = m[next_pc + A];
@@ -120,12 +123,12 @@ static int subleq(uint16_t pc,
             (next_a != IO_MARKER) && (next_b != IO_MARKER) &&
             !((next_c & NEGATIVE_FLAG) && (next_c != IO_MARKER));
 
-        if (is_subleq) {
+        if (LIKELY(is_subleq)) {
             /* Fuse: Execute the second SUBLEQ here. */
             const uint16_t result2 = m[next_b] - m[next_a];
             m[next_b] = result2;
 
-            if ((result2 == 0) || (result2 & NEGATIVE_FLAG)) {
+            if (UNLIKELY((result2 == 0) || (result2 & NEGATIVE_FLAG))) {
                 FETCH_AND_DISPATCH(next_c); /* Second instruction branches. */
             } else {
                 /* Fused pair executed. Dispatch instruction AFTER the pair. */
@@ -144,17 +147,17 @@ static int dispatch(uint16_t pc,
                     uint16_t addr_c)
 {
     /* Halt if the program counter becomes negative. */
-    if ((pc & NEGATIVE_FLAG) != 0)
+    if (UNLIKELY((pc & NEGATIVE_FLAG) != 0))
         return 0;
 
     /* Dispatch to the appropriate handler based on the operand values. */
-    if (addr_a == IO_MARKER) /* Input */
+    if (UNLIKELY(addr_a == IO_MARKER))
         MUST_TAIL return get(pc, addr_a, addr_b, addr_c);
 
-    if (addr_b == IO_MARKER) /* Output */
+    if (UNLIKELY(addr_b == IO_MARKER))
         MUST_TAIL return put(pc, addr_a, addr_b, addr_c);
 
-    if ((addr_c & NEGATIVE_FLAG) && (addr_c != IO_MARKER)) /* MUX */
+    if (UNLIKELY((addr_c & NEGATIVE_FLAG) && (addr_c != IO_MARKER)))
         MUST_TAIL return mux(pc, addr_a, addr_b, addr_c);
 
     /* Default to SUBLEQ operation. */
