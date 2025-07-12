@@ -82,14 +82,19 @@ static int put(uint16_t pc,
 
 static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
 {
-    const uint16_t mask = m[addr_c & MEM_MASK];
+    const uint16_t mask_addr = addr_c & MEM_MASK;
 
-    /* Optimized path for mask=0 (pure move operation) */
-    if (LIKELY(mask == 0)) {
+    if (LIKELY(mask_addr == 6)) {
+        /* Address 6 is always 0 - pure move */
         m[addr_b] = m[addr_a];
     } else {
-        /* General MUX operation for non-zero masks */
-        m[addr_b] = (m[addr_a] & ~mask) | (m[addr_b] & mask);
+        const uint16_t mask = m[mask_addr];
+        if (UNLIKELY(mask == 0)) {
+            m[addr_b] = m[addr_a];
+        } else {
+            /* General MUX operation for non-zero masks */
+            m[addr_b] = (m[addr_a] & ~mask) | (m[addr_b] & mask);
+        }
     }
 
     FETCH_AND_DISPATCH(pc + INSN_SIZE);
