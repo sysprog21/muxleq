@@ -100,9 +100,7 @@ static int put(uint16_t pc,
     FETCH_AND_DISPATCH(pc + INSN_SIZE);
 }
 
-/* MUX with look-ahead fusion for eForth patterns
- * Common eForth pattern: move operations followed by arithmetic or more moves
- */
+/* MUX with extended fusion for Forth inner interpreter patterns */
 static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
 {
     const uint16_t mask_addr = addr_c & MEM_MASK;
@@ -131,7 +129,7 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
     const uint16_t next_b = m[next_pc + B];
     const uint16_t next_c = m[next_pc + C];
 
-    /* Pattern 1: MOVE + SUBLEQ (stack manipulation + arithmetic) */
+    /* Pattern 1: MOVE + SUBLEQ */
     if (is_subleq_instruction(next_a, next_b, next_c)) {
         const uint16_t result = m[next_b] - m[next_a];
         m[next_b] = result;
@@ -139,13 +137,52 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
         if (UNLIKELY((result == 0) || (result & NEGATIVE_FLAG))) {
             FETCH_AND_DISPATCH(next_c);
         } else {
-            FETCH_AND_DISPATCH(next_pc + INSN_SIZE);
+            /* Extend to 3-instruction fusion for common Forth patterns */
+            const uint16_t third_pc = next_pc + INSN_SIZE;
+            if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
+                const uint16_t third_a = m[third_pc + A];
+                const uint16_t third_b = m[third_pc + B];
+                const uint16_t third_c = m[third_pc + C];
+
+                /* MOVE + SUBLEQ + MOVE (common: load, operate, store) */
+                if (is_move_instruction(third_a, third_b, third_c)) {
+                    m[third_b] = m[third_a];
+                    FETCH_AND_DISPATCH(third_pc + INSN_SIZE);
+                } else {
+                    FETCH_AND_DISPATCH(third_pc);
+                }
+            } else {
+                FETCH_AND_DISPATCH(third_pc);
+            }
         }
     }
-    /* Pattern 2: MOVE + MOVE (multiple stack operations) */
+    /* Pattern 2: MOVE + MOVE */
     else if (is_move_instruction(next_a, next_b, next_c)) {
         m[next_b] = m[next_a]; /* Execute second move */
-        FETCH_AND_DISPATCH(next_pc + INSN_SIZE);
+
+        /* Try to extend: MOVE + MOVE + SUBLEQ (common in Forth stack
+         * manipulation) */
+        const uint16_t third_pc = next_pc + INSN_SIZE;
+        if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
+            const uint16_t third_a = m[third_pc + A];
+            const uint16_t third_b = m[third_pc + B];
+            const uint16_t third_c = m[third_pc + C];
+
+            if (is_subleq_instruction(third_a, third_b, third_c)) {
+                const uint16_t result = m[third_b] - m[third_a];
+                m[third_b] = result;
+
+                if (UNLIKELY((result == 0) || (result & NEGATIVE_FLAG))) {
+                    FETCH_AND_DISPATCH(third_c);
+                } else {
+                    FETCH_AND_DISPATCH(third_pc + INSN_SIZE);
+                }
+            } else {
+                FETCH_AND_DISPATCH(third_pc);
+            }
+        } else {
+            FETCH_AND_DISPATCH(third_pc);
+        }
     }
     /* No fusion possible */
     else {
@@ -154,8 +191,7 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
 }
 
 /*
- * SUBLEQ with enhanced fusion for eForth patterns
- * Keep the proven SUBLEQ+SUBLEQ fusion and add SUBLEQ+MOVE
+ * SUBLEQ with extended fusion for Forth patterns
  */
 static int subleq(uint16_t pc,
                   uint16_t addr_a,
@@ -177,7 +213,7 @@ static int subleq(uint16_t pc,
         const uint16_t next_b = m[next_pc + B];
         const uint16_t next_c = m[next_pc + C];
 
-        /* Pattern 1: SUBLEQ + SUBLEQ (proven successful at 21.8% rate) */
+        /* Pattern 1: SUBLEQ + SUBLEQ */
         if (is_subleq_instruction(next_a, next_b, next_c)) {
             const uint16_t result2 = m[next_b] - m[next_a];
             m[next_b] = result2;
@@ -185,10 +221,26 @@ static int subleq(uint16_t pc,
             if (UNLIKELY((result2 == 0) || (result2 & NEGATIVE_FLAG))) {
                 FETCH_AND_DISPATCH(next_c);
             } else {
-                FETCH_AND_DISPATCH(next_pc + INSN_SIZE);
+                /* Try to extend: SUBLEQ + SUBLEQ + MOVE (arithmetic + cleanup)
+                 */
+                const uint16_t third_pc = next_pc + INSN_SIZE;
+                if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
+                    const uint16_t third_a = m[third_pc + A];
+                    const uint16_t third_b = m[third_pc + B];
+                    const uint16_t third_c = m[third_pc + C];
+
+                    if (is_move_instruction(third_a, third_b, third_c)) {
+                        m[third_b] = m[third_a];
+                        FETCH_AND_DISPATCH(third_pc + INSN_SIZE);
+                    } else {
+                        FETCH_AND_DISPATCH(third_pc);
+                    }
+                } else {
+                    FETCH_AND_DISPATCH(third_pc);
+                }
             }
         }
-        /* Pattern 2: SUBLEQ + MOVE (arithmetic + stack manipulation) */
+        /* Pattern 2: SUBLEQ + MOVE */
         else if (is_move_instruction(next_a, next_b, next_c)) {
             m[next_b] = m[next_a]; /* Execute the move */
             FETCH_AND_DISPATCH(next_pc + INSN_SIZE);
