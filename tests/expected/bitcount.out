@@ -1,0 +1,10 @@
+example: bit counting  ok
+ ok
+ ok
+ ok
+ ok
+ ok
+to test the routines, type:  ok
+15  count-bits . =>  4 ok
+16  count-bits . =>  1 ok
+17  count-bits . =>  2 ok

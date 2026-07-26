@@ -1,0 +1,13 @@
+example: CRC-16  ok
+ ok
+ ok
+ ok
+to test the routines, type:  ok
+ ok
+ ok
+ ok
+here 1 crc . =>  -11885 ok
+ ok
+ ok
+ ok
+test-data 4 crc . =>  12524 ok

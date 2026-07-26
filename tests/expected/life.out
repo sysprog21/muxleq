@@ -1,0 +1,36 @@
+ ok
+ ok
+ ok
+ ok
+Conway's Game of Life - 5x5 Grid
+Testing center cell evolution with real rules
+
+Generation  0:
+.....
+..O..
+.OOO.
+..O..
+.....
+
+Generation  1:
+.....
+..O..
+.O.O.
+..O..
+.....
+
+Generation  2:
+.....
+..O..
+.O.O.
+..O..
+.....
+
+Generation  3:
+.....
+..O..
+.O.O.
+..O..
+.....
+
+Demo complete!

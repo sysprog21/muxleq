@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 /* Tail-call optimization attribute */
@@ -39,8 +40,23 @@ enum { A = 0, B = 1, C = 2, INSN_SIZE = 3 };
 
 /* The memory of the virtual machine, initialized from an external file. */
 static uint16_t m[MEM_SIZE] = {
-#include "stage0.c"
+#include <stage0.c>
 };
+
+/* Lightweight profiler, opt-in via -s / -p. When disabled (the default, and
+ * what make check/bench/bootstrap use), dispatch() takes a single
+ * predicted-not-taken branch, so profiled and unprofiled runs are behaviorally
+ * identical. Only counts dispatch entries: fused ops that execute inline never
+ * re-enter dispatch, so the heat map shows where the interpreter re-decodes
+ * from scratch.
+ */
+enum { OP_GET, OP_PUT, OP_MUX, OP_SUBLEQ, OP_COUNT };
+static bool prof_enabled = false; /* -s or -p given */
+static bool prof_stats = false;   /* -s: instruction mix */
+static bool prof_heat = false;    /* -p: PC heat map */
+static uint64_t prof_total = 0;
+static uint64_t prof_op[OP_COUNT] = {0};
+static uint64_t prof_heat_map[MEM_SIZE];
 
 /* Forward declarations for the mutually recursive VM functions. */
 static int dispatch(uint16_t pc,
@@ -161,7 +177,8 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
         m[next_b] = m[next_a]; /* Execute second move */
 
         /* Try to extend: MOVE + MOVE + SUBLEQ (common in Forth stack
-         * manipulation) */
+         * manipulation)
+         */
         const uint16_t third_pc = next_pc + INSN_SIZE;
         if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
             const uint16_t third_a = m[third_pc + A];
@@ -190,9 +207,7 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
     }
 }
 
-/*
- * SUBLEQ with extended fusion for Forth patterns
- */
+/* SUBLEQ with extended fusion for Forth patterns */
 static int subleq(uint16_t pc,
                   uint16_t addr_a,
                   uint16_t addr_b,
@@ -261,6 +276,22 @@ static int dispatch(uint16_t pc,
     if (UNLIKELY((pc & NEGATIVE_FLAG) != 0))
         return 0;
 
+    if (UNLIKELY(prof_enabled)) {
+        prof_total++;
+        if (prof_heat)
+            prof_heat_map[pc & MEM_MASK]++;
+        if (prof_stats) {
+            if (addr_a == IO_MARKER)
+                prof_op[OP_GET]++;
+            else if (addr_b == IO_MARKER)
+                prof_op[OP_PUT]++;
+            else if ((addr_c & NEGATIVE_FLAG) && (addr_c != IO_MARKER))
+                prof_op[OP_MUX]++;
+            else
+                prof_op[OP_SUBLEQ]++;
+        }
+    }
+
     /* Dispatch to the appropriate handler based on the operand values. */
     if (UNLIKELY(addr_a == IO_MARKER))
         MUST_TAIL return get(pc, addr_a, addr_b, addr_c);
@@ -275,8 +306,65 @@ static int dispatch(uint16_t pc,
     MUST_TAIL return subleq(pc, addr_a, addr_b, addr_c);
 }
 
-int main(void)
+/* Emit the profile to stderr after the VM halts (only when -s/-p was given). */
+static void report_profile(void)
 {
+    static const char *names[OP_COUNT] = {"GET", "PUT", "MUX", "SUBLEQ"};
+
+    fprintf(stderr, "\n=== muxleq profile ===\n");
+    fprintf(stderr, "dispatched instructions: %llu\n",
+            (unsigned long long) prof_total);
+
+    if (prof_stats)
+
+        /* Mix of ops at dispatch entry only; inline-fused ops are not counted.
+         */
+        for (int i = 0; i < OP_COUNT; i++)
+            fprintf(stderr, "  %-6s %14llu  %5.1f%%\n", names[i],
+                    (unsigned long long) prof_op[i],
+                    prof_total ? 100.0 * prof_op[i] / prof_total : 0.0);
+
+    if (prof_heat) {
+        /* One pass, keeping the 16 hottest PCs in a sorted array. */
+        struct {
+            uint32_t pc;
+            uint64_t n;
+        } top[16] = {{0, 0}};
+        for (uint32_t pc = 0; pc < MEM_SIZE; pc++) {
+            const uint64_t n = prof_heat_map[pc];
+            if (n <= top[15].n)
+                continue;
+            int j = 15;
+            while (j > 0 && top[j - 1].n < n) {
+                top[j] = top[j - 1];
+                j--;
+            }
+            top[j].pc = pc;
+            top[j].n = n;
+        }
+        fprintf(stderr, "hot PCs (addr: count  [a b c]):\n");
+        for (int i = 0; i < 16 && top[i].n; i++)
+            fprintf(stderr, "  %5u: %14llu  [%u %u %u]\n", (unsigned) top[i].pc,
+                    (unsigned long long) top[i].n,
+                    (unsigned) m[top[i].pc & MEM_MASK],
+                    (unsigned) m[(top[i].pc + 1) & MEM_MASK],
+                    (unsigned) m[(top[i].pc + 2) & MEM_MASK]);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-s"))
+            prof_stats = true;
+        else if (!strcmp(argv[i], "-p"))
+            prof_heat = true;
+        else
+            fprintf(stderr, "muxleq: ignoring unknown argument '%s'\n",
+                    argv[i]);
+    }
+    prof_enabled = prof_stats || prof_heat;
+
     /* Set I/O buffering: line for interactive, full for piped. */
     const int mode = isatty(fileno(stdout)) ? _IOLBF : _IOFBF;
     setvbuf(stdout, NULL, mode, BUFSIZ);
@@ -285,8 +373,8 @@ int main(void)
 
     /* Fetch first instruction and start execution by calling the dispatcher. */
     const uint16_t pc = 0;
-    const uint16_t addr_a = m[pc + A];
-    const uint16_t addr_b = m[pc + B];
-    const uint16_t addr_c = m[pc + C];
-    return dispatch(pc, addr_a, addr_b, addr_c);
+    const int rc = dispatch(pc, m[pc + A], m[pc + B], m[pc + C]);
+    if (prof_enabled)
+        report_profile();
+    return rc;
 }
