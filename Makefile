@@ -34,7 +34,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order (the fast "budget" guard fails before the slow bootstrap).
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all budget golden golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent check-format
+.PHONY: FORCE help run bootstrap clean distclean check check-all budget golden golden-see golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent check-format
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -379,6 +379,16 @@ golden: $(BIN) $(if $(RV_GOLDEN),rvelf) ## Run byte-exact golden output tests.
 	    fi; \
 	))
 
+golden-see: $(BIN) tests/expected/see.out ## Check the address-normalized `see` decompiler output.
+	$(Q)if $(GOLDEN_RUN) < tests/see.fth > $(TMPDIR)/see.raw 2>/dev/null \
+	    && sed -E 's/^ *[0-9]+ [|]/# |/; s/[0-9]+/#/g' $(TMPDIR)/see.raw > $(TMPDIR)/see.out \
+	    && cmp -s tests/expected/see.out $(TMPDIR)/see.out; \
+	then :; \
+	else \
+	    echo "golden-see: decompiler output drift or VM error (see tests/see.fth)"; exit 1; \
+	fi
+	$(Q)$(PRINTF) "golden-see: normalized decompiler output "; $(call notice, [OK])
+
 golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mandelbrot prefix.
 	$(Q)test -n "$(TIMEOUT)" || { echo "golden-mandel: timeout(1)/gtimeout required"; exit 1; }
 	$(Q)command -v stdbuf >/dev/null 2>&1 || { echo "golden-mandel: stdbuf required for killed-run stdout"; exit 1; }
@@ -393,7 +403,7 @@ golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mand
 # proof. rvopt runs before the slow bootstrap so an optimizer regression fails fast.
 # verify-rvopt-gate is the rvopt differential; it uses the "-r" ELF loader as its
 # oracle, which ENABLE_RV32I=0 compiles out, so drop it when RV32I is disabled.
-check: budget golden $(if $(filter 1,$(ENABLE_RV32I)),verify-rvopt-gate) bootstrap ## Run the fast pre-commit gate.
+check: budget golden golden-see $(if $(filter 1,$(ENABLE_RV32I)),verify-rvopt-gate) bootstrap ## Run the fast pre-commit gate.
 
 # Self-host ceiling guard. The image + its re-assembled copy + the metacompiler dictionary must all
 # fit 32768 cells (empirical hard ceiling ~12888, where bootstrap starts to fail). Fail loudly HERE if

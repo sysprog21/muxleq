@@ -1,0 +1,119 @@
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+: dump
+# |  aligned
+# |  ?dup
+# |  jumpz  #
+# |  VM     #
+# |  #
+# |  .
+# |  cell+
+# |  VM     #
+# |  cell-
+# |  jump   #
+# |  VM     #
+ ;
+ ok
+: page
+# |  #
+# |  ." #J"
+# |  #
+# |  ." #;#H"
+ ;
+ ok
+: quit
+# |  (push)  #
+# |  #
+# |  !
+# |  query
+# |  (push)  #
+# |  catch
+# |  ?dup
+# |  jumpz  #
+# |  #
+# |  #
+# |  jump   #
+ ;
+ ok
+: list
+# |  page
+# |  cr
+# |  VM     #
+# |  VM     #
+# |  block
+# |  (push)  #
+# |  VM     #
+# |  (push)  #
+# |  r@
+# |  VM     #
+# |  (push)  #
+# |  u.r
+# |  space
+# |  (push)  #
+# |  VM     #
+# |  count
+# |  #
+# |  next   #
+# |  cr
+# |  next   #
+# |  VM     #
+# |  VM     #
+# |  scr
+# |  !
+ ;
+ ok
+: bl
+# |  (const)  #
+ ok
+: b/buf
+# |  (const)  #
+ ok
+: blk
+# |  (var)  # ->  #
+ ok
+: base
+# |  (user)  #
+ ok
+: >in
+# |  (user)  #
+ ok
+: +
+# |  VM     #
+ ;
+ ok
+: cold
+# |  (push)  #
+# |  #*
+# |  #
+ ;
+ ok
+: [char]
+# |  char
+# |  compile #
+# |  ,
+ ; immediate
+ ok
+: set-input
+# |  <ok>
+# |  !
+# |  (up)  #
+# |  !
+# |  >in
+# |  !
+# |  #
+# |  #!
+ ;
+ ok
+ ok
+: qtest
+# |  $" hi"
+# |  drop
+ ;
+ ok

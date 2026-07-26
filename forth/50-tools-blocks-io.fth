@@ -1,4 +1,4 @@
-opt.better-see [if]
+opt.decompiler [if]
 :s ndrop for aft drop then next ;s ( x0...xn n -- )
 :s validate                        ( pwd cfa -- nfa | 0 )
   over cfa <> if drop #0 exit then nfa ;s
@@ -26,43 +26,25 @@ opt.better-see [if]
     and type drop exit then
   then
   u. ;s
+\ Operand tails shared by the repeated decompile arms below.
+:s .opd cell+ dup @ 2* u. ;s        ( a -- a+1 : operand is a byte address )
+:s .val cell+ dup @ u. ;s           ( a -- a+1 : inline operand value )
+:s .fin cell+ @ u. [ $7FFF ] literal ;s ( a -- 7FFF : last cell, stop see )
+:s .str [char] " emit space         ( a -- a' : quoted string operand )
+  cell+ count 2dup type [char] " emit + aligned cell - ;s
 :s decompile                       ( a u -- a )
-  dup [ =jumpz ] literal = if
-    drop ."  jumpz " cell+ dup @ 2* u. exit
-  then
-  dup [ =jump ] literal = if
-    drop ."  jump  " cell+ dup @ 2* u. exit
-  then
-  dup [ =next ] literal = if
-    drop ."  next  " cell+ dup @ 2* u. exit
-  then
-  dup [ to' compile half ] literal = if
-     drop ."  compile" cell+ dup @ instruction exit
-  then
-  dup [ to' (up) half ] literal = if drop
-     ."  (up) " cell+ dup @ u. exit
-  then
-  dup [ to' (push) half ] literal = if drop
-     ."  (push) " cell+ dup @ u. exit
-  then
-  dup [ to' (user) half ] literal = if drop
-     ."  (user) " cell+ @ u. [ $7FFF ] literal exit
-  then
-  dup [ to' (const) half ] literal = if drop
-     ."  (const) " cell+ @ u. [ $7FFF ] literal exit
-  then
-  dup [ to' (var) half ] literal = if drop
-     ."  (var) " cell+ dup u. ."  -> " @ . [ $7FFF ] literal
-     exit
-  then
-  dup [ to' .$ half ] literal = if drop ."  ." [char] "
-    emit space
-    cell+ count 2dup type [char] " emit + aligned cell -
-  exit then
-  dup [ to' ($) half ] literal = if drop ."  $" [char] "
-  emit space
-    cell+ count 2dup type [char] " emit + aligned cell -
-  exit then
+  dup [ =jumpz          ] literal = if drop ."  jumpz " .opd exit then
+  dup [ =jump           ] literal = if drop ."  jump  " .opd exit then
+  dup [ =next           ] literal = if drop ."  next  " .opd exit then
+  dup [ to' compile half ] literal = if drop ."  compile" cell+ dup @ instruction exit then
+  dup [ to' (up)    half ] literal = if drop ."  (up) "    .val exit then
+  dup [ to' (push)  half ] literal = if drop ."  (push) "  .val exit then
+  dup [ to' (user)  half ] literal = if drop ."  (user) "  .fin exit then
+  dup [ to' (const) half ] literal = if drop ."  (const) " .fin exit then
+  dup [ to' (var)   half ] literal = if drop
+     ."  (var) " cell+ dup u. ."  -> " @ . [ $7FFF ] literal exit then
+  dup [ to' .$ half ] literal = if drop ."  ." .str exit then
+  dup [ to' ($) half ] literal = if drop ."  $" .str exit then
   instruction ;s
 :s compile-only?                   ( pwd -- f )
    nfa [ $20 ] literal swap @ and 0<> ;s

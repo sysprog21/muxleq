@@ -727,7 +727,7 @@ root[
   [ $20 ] literal (nfa) ;
 
 \ Decompiler SEE
-opt.better-see [unless]
+opt.decompiler [unless]
 :to see token find ?found cr       ( --, "name" : decompile word )
   begin @+ [ =unnest ] literal <>
   while @+ . cell+ here over < if drop exit then
