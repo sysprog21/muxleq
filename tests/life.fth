@@ -4,7 +4,7 @@
 
 ' ( <ok> !
 
-\ Current generation (5x5 = 25 cells)  
+\ Current generation (5x5 = 25 cells)
 variable c00 variable c01 variable c02 variable c03 variable c04
 variable c10 variable c11 variable c12 variable c13 variable c14
 variable c20 variable c21 variable c22 variable c23 variable c24
@@ -189,22 +189,22 @@ variable gen-num
 : conway-demo ( -- )
   ." Conway's Game of Life - 5x5 Grid" cr
   ." Testing center cell evolution with real rules" cr cr
-  
+
   setup-test
   show-5x5
-  
+
   gen-num @ 1+ gen-num !
   evolve-center
   show-5x5
-  
-  gen-num @ 1+ gen-num !
-  evolve-center  
-  show-5x5
-  
+
   gen-num @ 1+ gen-num !
   evolve-center
   show-5x5
-  
+
+  gen-num @ 1+ gen-num !
+  evolve-center
+  show-5x5
+
   ." Demo complete!" cr
 ;
 

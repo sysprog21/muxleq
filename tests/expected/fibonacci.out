@@ -1,0 +1,12 @@
+example: Fibonacci sequence  ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+to test the routines, type:  ok
+10 fib-sequence =>  34 21 13 8 5 3 2 1 1 1 0 ok

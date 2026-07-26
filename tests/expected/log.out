@@ -1,0 +1,8 @@
+example: integer logarithm  ok
+ ok
+ ok
+ ok
+ ok
+to test the routines, type:  ok
+1024  2 log . =>  10 ok
+1000 10 log . =>  3 ok

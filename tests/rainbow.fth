@@ -7,7 +7,7 @@
 \ Helper: Send ANSI escape sequence prefix ESC[
 : esc[  ( -- )
   27 emit   \ ESC character (ASCII 27)
-  91 emit   \ '[' character (ASCII 91) 
+  91 emit   \ '[' character (ASCII 91)
 ;
 
 \ ANSI Foreground Color Words (30-37 range)

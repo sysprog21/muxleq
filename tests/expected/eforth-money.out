@@ -1,0 +1,38 @@
+ ok
+example 7. money exchange  ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+with this set of money exchange words, we can do some tests: 
+ ok
+5   ounce gold =>  1425
+ ok
+10  ounce silver =>  49
+ ok
+100 $nt =>  3355
+ ok
+20  $rmb =>  189
+ ok
+ ok
+you can add many different currency bills then all up in dollars: 
+ ok
+1000 nt 500 hk + .s =>  93
+ ok
+320 rmb + .s =>  126
+ ok
+print out total worth in dollars =>  126
+ ok
+ ok

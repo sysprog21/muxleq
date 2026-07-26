@@ -1,0 +1,9 @@
+example: square root  ok
+ ok
+ ok
+ ok
+ ok
+to test the routines, type:  ok
+16    sqrt . =>  4 ok
+625   sqrt . =>  25 ok
+2401  sqrt . =>  49 ok

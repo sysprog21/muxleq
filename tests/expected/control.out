@@ -1,0 +1,26 @@
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+=== Control Structure Tests ===
+1. if/then: OK
+2. begin/until:  3 2 1
+3. do/loop:  0 1 2
+4. ?do skip: (empty)
+5. ?do normal:  0 1 2
+6. nested:  0 0 1 0 0 1 1 1
+7. case: two
+8. leave:  0 1 2
+9. +loop:  0 3 6 9
+=== Tests complete ===

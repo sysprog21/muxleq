@@ -1,0 +1,36 @@
+ ok
+ ok
+ ok
+example 12. sines and cosines  ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+ ok
+to test the routines, type: 
+ ok
+90 sin . =>  10000
+ ok
+45 sin . =>  7070
+ ok
+30 sin . =>  5000
+ ok
+0  sin . =>  0
+ ok
+90 cos . =>  0
+ ok
+45 cos . =>  7071
+ ok
+0  cos . =>  10000
+
+ ok
+ ok

@@ -1,0 +1,6 @@
+*.elf
+*.o
+.check.out
+.mux.dec
+upstream/
+upstream.tmp/
