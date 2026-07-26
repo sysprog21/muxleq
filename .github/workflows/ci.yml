@@ -3,12 +3,14 @@
 #
 #   format   : clang-format 20 and a trailing-newline check (no toolchain)
 #   check    : make check, then publish the generated RV32I binaries
+#   no-rv32i : make ENABLE_RV32I=0 check, the microcode-free build (no toolchain)
 #   sanitize : make sanitize (ASan/UBSan over the interpreter and emitters)
 #   deep     : conformance, the Z3 proof, rvopt fuzz, the rv32ui suite, DureMark
 #
 # check, sanitize, and deep install the xPack riscv-none-elf toolchain (cached)
 # and build the RV32I programs from source. Together with check they reproduce
-# make check-all. No job depends on another, so all four run concurrently.
+# make check-all. no-rv32i needs no toolchain. No job depends on another, so
+# all five run concurrently.
 name: ci
 
 on:
@@ -35,13 +37,25 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Install clang-format
+      - name: Install formatters
+        # Versions are pinned so CI and local runs format identically: clang-format
+        # output drifts between majors, and black/shfmt style shifts between
+        # releases too (the committed sources are formatted to exactly these).
+        # python3 (for scripts/forth-indent.py) is preinstalled on the runner.
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format-20
+          pipx install "black==26.5.1"
+          # Pinned by content hash, not just the version tag: a re-published
+          # release asset would otherwise run unverified in CI.
+          shfmt_sha=fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1
+          curl -fsSL https://github.com/mvdan/sh/releases/download/v3.13.1/shfmt_v3.13.1_linux_amd64 \
+            -o /tmp/shfmt
+          echo "$shfmt_sha  /tmp/shfmt" | sha256sum -c -
+          sudo install -m 0755 /tmp/shfmt /usr/local/bin/shfmt
       - name: Check trailing newline
         run: .ci/check-newline.sh
-      - name: Check clang-format
+      - name: Check formatting (C, Python, shell, Forth)
         env:
           CLANG_FORMAT: clang-format-20
         run: .ci/check-format.sh
@@ -73,6 +87,22 @@ jobs:
           path: |
             build/rv32i/*.elf
             build/rv32i/*.bin
+
+  no-rv32i:
+    # Prove the ENABLE_RV32I=0 build stands on its own: the microcode is stamped
+    # out of the image and "-r" is compiled out, so the whole gate runs with no
+    # RISC-V toolchain installed. Guards against RV32I state leaking into the base
+    # eForth path (a leak would break this build while the default stayed green).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang gforth
+      - name: Run pre-commit gate (RV32I disabled)
+        run: make ENABLE_RV32I=0 check
 
   sanitize:
     runs-on: ubuntu-24.04

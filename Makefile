@@ -53,6 +53,9 @@ RVCROSS ?= riscv-none-elf-
 RVELF_DIR := $(OUT)/rv32i
 DUREMARK_ELF := $(RVELF_DIR)/duremark.elf
 HAVE_RVCC := $(shell command -v $(RVCROSS)gcc 2>/dev/null)
+# The "-r" ELF/flat goldens need both the toolchain (to build the programs) and
+# the microcode (to run them). ENABLE_RV32I=0 compiles "-r" out, so gate on both.
+RV_GOLDEN := $(if $(filter 1,$(ENABLE_RV32I)),$(HAVE_RVCC))
 
 all: $(BIN) ## Build the default muxleq VM.
 
@@ -295,8 +298,12 @@ $(OUT)/rv32i-traces.inc: $(STAGE0_DEC) rv32i-traces.inc.in scripts/gen-rv32i-tra
 	$(VECHO) "  GEN\t$@\n"
 	$(Q)python3 scripts/gen-rv32i-traces.py $(STAGE0_DEC) rv32i-traces.inc.in $@
 
-$(MUXLEQ_FTH): $(MUXLEQ_FORTH_MODULES) scripts/update-muxleq-fth.sh | $(OUT)
-	$(Q)sh scripts/update-muxleq-fth.sh $@ $(MUXLEQ_FORTH_MODULES)
+# The generated image carries opt.rv32i stamped to match ENABLE_RV32I (see the
+# script). Reconsider it every build so a flag flip is honored; the script
+# rewrites the file, bumping its mtime so stage0/stage1 rebuild, only when the
+# stamped content actually changes.
+$(MUXLEQ_FTH): $(MUXLEQ_FORTH_MODULES) scripts/update-muxleq-fth.sh FORCE | $(OUT)
+	$(Q)ENABLE_RV32I=$(ENABLE_RV32I) sh scripts/update-muxleq-fth.sh $@ $(MUXLEQ_FORTH_MODULES)
 
 $(STAGE0_DEC): $(MUXLEQ_FTH) | $(OUT)
 	$(VECHO) "  FORTH\t$@\n"
@@ -309,12 +316,21 @@ $(STAGE0_DEC): $(MUXLEQ_FTH) | $(OUT)
 GOLDEN_FILES := \
 	loops radix sqrt \
 	fibonacci bitcount clz crc log arith prng-bench \
-	life rainbow control editor \
+	life rainbow control \
 	define chacha20 scheduler tasker sieve collatz base recurse rot13 double sort heap except eof \
 	eforth-hello eforth-f eforth-loops eforth-trig eforth-multiply \
 	eforth-array eforth-does eforth-ascii \
 	eforth-text eforth-money eforth-temp eforth-weather eforth-calendar \
-	eforth-fig eforth-stack eforth-msgpass eforth-value rv32i-spec rv32i-run
+	eforth-fig eforth-stack eforth-msgpass eforth-value
+
+# rv32i-spec/rv32i-run drive the microcode through Forth, so they only exist in
+# an ENABLE_RV32I=1 image. "editor" dumps a raw block buffer that overlays
+# resident image bytes, so its expected output is pinned to the RV32I-on layout
+# (the greeting output it computes is identical either way). All three are gated
+# on the microcode being present.
+ifeq ($(ENABLE_RV32I),1)
+GOLDEN_FILES += editor rv32i-spec rv32i-run
+endif
 
 # Bound each test run so a mis-fused interpreter that loops forever fails the
 # gate instead of hanging it -- an infinite loop is the likeliest fusion bug.
@@ -335,7 +351,7 @@ RVELF_FILES := hello fibonacci primes crc16 mul bgcd bsort
 RVFLAT_FILES := hello
 RVELF_RUN = $(RUN) ./$(BIN) -r
 
-golden: $(BIN) $(if $(HAVE_RVCC),rvelf) ## Run byte-exact golden output tests.
+golden: $(BIN) $(if $(RV_GOLDEN),rvelf) ## Run byte-exact golden output tests.
 	$(Q)test -n "$(TIMEOUT)" || $(PRINTF) \
 	    "golden: WARNING: no timeout(1)/gtimeout; a hung test (e.g. broken task switching) will not be bounded\n"
 	$(Q)$(foreach t,$(GOLDEN_FILES),\
@@ -346,15 +362,15 @@ golden: $(BIN) $(if $(HAVE_RVCC),rvelf) ## Run byte-exact golden output tests.
 	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; \
 	    fi; \
 	)
-	$(Q)$(if $(HAVE_RVCC),$(foreach e,$(RVELF_FILES),\
+	$(Q)$(if $(RV_GOLDEN),$(foreach e,$(RVELF_FILES),\
 	    $(PRINTF) "golden rv32i/$(e).elf ... "; \
 	    if $(RVELF_RUN) $(RVELF_DIR)/$(e).elf > $(TMPDIR)/golden.out 2>/dev/null \
 	        && cmp -s tests/expected/rv32i-$(e).out $(TMPDIR)/golden.out; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; \
 	    fi; \
-	),$(PRINTF) "golden rv32i/* ... [SKIP: no $(RVCROSS)gcc]\n")
-	$(Q)$(if $(HAVE_RVCC),$(foreach f,$(RVFLAT_FILES),\
+	),$(PRINTF) "golden rv32i/* ... [SKIP: no $(RVCROSS)gcc or ENABLE_RV32I=0]\n")
+	$(Q)$(if $(RV_GOLDEN),$(foreach f,$(RVFLAT_FILES),\
 	    $(PRINTF) "golden rv32i/$(f).bin ... "; \
 	    if $(RVELF_RUN) $(RVELF_DIR)/$(f).bin > $(TMPDIR)/golden.out 2>/dev/null \
 	        && cmp -s tests/expected/rv32i-$(f).out $(TMPDIR)/golden.out; \
@@ -375,7 +391,9 @@ golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mand
 # The pre-commit gate: cell-budget guard + byte-exact golden diff + the rvopt native
 # differential (the AOT optimizer's -x/-x32 output must match -r) + the self-hosting
 # proof. rvopt runs before the slow bootstrap so an optimizer regression fails fast.
-check: budget golden verify-rvopt-gate bootstrap ## Run the fast pre-commit gate.
+# verify-rvopt-gate is the rvopt differential; it uses the "-r" ELF loader as its
+# oracle, which ENABLE_RV32I=0 compiles out, so drop it when RV32I is disabled.
+check: budget golden $(if $(filter 1,$(ENABLE_RV32I)),verify-rvopt-gate) bootstrap ## Run the fast pre-commit gate.
 
 # Self-host ceiling guard. The image + its re-assembled copy + the metacompiler dictionary must all
 # fit 32768 cells (empirical hard ceiling ~12888, where bootstrap starts to fail). Fail loudly HERE if

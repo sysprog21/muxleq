@@ -20,7 +20,10 @@ quote_env_value() {
 files="muxleq.c rv32i.inc rv32i-traces.inc.in scripts/gen-rv32i-traces.py build/muxleq.fth tests/rv32i/duremark/duremark.elf scripts/duremark-profile-remote.sh"
 
 for f in $files; do
-    [ -e "$f" ] || { echo "profile-duremark: missing $f" >&2; exit 1; }
+    [ -e "$f" ] || {
+        echo "profile-duremark: missing $f" >&2
+        exit 1
+    }
 done
 
 {
@@ -50,6 +53,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-REMOTE=$(ssh "$HOST" 'mktemp -d') || { echo "profile-duremark: cannot reach $HOST" >&2; exit 1; }
+REMOTE=$(ssh "$HOST" 'mktemp -d') || {
+    echo "profile-duremark: cannot reach $HOST" >&2
+    exit 1
+}
 COPYFILE_DISABLE=1 tar --no-xattrs -czf - $files profile.env | ssh "$HOST" "tar xzf - -C \"$REMOTE\""
 ssh "$HOST" "cd \"$REMOTE\" && sh scripts/duremark-profile-remote.sh"
