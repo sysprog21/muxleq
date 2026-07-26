@@ -41,5 +41,5 @@ variable width                  ( number of asterisks to print )
 5 18 parallelogram
 
 .( 12 triangle) cr
-12 triangle  
+12 triangle
 bye

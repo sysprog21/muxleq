@@ -1,7 +1,7 @@
 # Freestanding RV32I Sieve of Eratosthenes: print every prime <= N, one per line.
 # Base ISA only (no M extension: marking multiples is repeated addition, decimal
 # printing divides by 10 with a subtract loop). Entry 0, write(64)/exit(93) ecalls,
-# fits the 1 KiB guest RAM. Runs under `../../muxleq -r primes.elf`. The sieve array
+# fits the 32 KiB guest RAM. Runs under `../../muxleq -r primes.elf`. The sieve array
 # lives in .bss, which the loader zero-fills, so no explicit clear is needed.
 .equ SYS_WRITE, 64
 .equ SYS_EXIT,  93

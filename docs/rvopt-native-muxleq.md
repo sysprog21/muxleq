@@ -6,7 +6,7 @@ implementation. The commit history records every measured optimization and the o
 
 ## As-built summary (what rvopt does today)
 
-`rvopt` (a standalone ~3900-line C compiler, zero image cells) turns an RV32I ELF32 / flat binary into a
+`rvopt` (a standalone 3810-line C compiler, zero image cells) turns an RV32I ELF32 / flat binary into a
 graph IR (flat `struct node` array: linear decode + intra-block value/def-use edges + a memory-order
 chain) and emits one of:
 
@@ -147,13 +147,13 @@ AND/OR verified empirically (MUX): `rd=rs1&rs2` = MOVE rs1->rd; `MUX(Z, rd, 0x80
 MOVE rs2->rd; `MUX(rs1, rd, 0x8000|rs2)`. XOR = (rs1&~rs2)|(~rs1&rs2), 2 MUX + an OR per half (or
 `~x = ONES - x` since ONES is all-ones and x<=0xFFFF borrows nothing).
 
-FOUNDATION FACT (codex review 019f7e65, corrects a first-draft error): SUBLEQ's branch test is `result==0
+FOUNDATION FACT (codex review, corrects a first-draft error): SUBLEQ's branch test is `result==0
 || bit15(result)`, i.e. the 16-bit difference `a-b` interpreted as SIGNED <= 0 -- NOT unsigned a<=b (e.g.
 `0-0x8001=0x7FFF`, no branch, yet 0<=0x8001 unsigned). So the SUBLEQ branch primitive is SLE0 =
 "if (a-b) signed <= 0 goto L" = MOVE(a->T); `SUBLEQ(b,T,L)`. Unconditional JMP = `SUBLEQ(Z,Z,L)`.
 
 16-bit EQUALITY (from SLE0 + an add-1 re-test): two signed SLE0 tests are WRONG -- `a-b == 0x8000` makes
-BOTH `a-b` and `b-a` read as signed<=0 (codex 019f7e73). Instead, once SLE0 proves `a-b <= 0` and leaves it
+BOTH `a-b` and `b-a` read as signed<=0 (codex). Instead, once SLE0 proves `a-b <= 0` and leaves it
 in T, add 1 (`SUBLEQ` of a -1 cell): `(a-b)+1 <= 0` iff `a-b < 0` (a!=b), `> 0` iff `a-b == 0` (a==b).
 `EQ16(a,b,L)` = `SLE0(a,b,C); JMP NE; C: SUBLEQ(NEG1,T,NE); JMP L; NE:` (5 insn). `NE16` = `SLE0(a,b,C);
 JMP L; C: SUBLEQ(NEG1,T,L)` (4 insn, fall-through = equal). Verified: EQ16(0x8000,0)='not equal',

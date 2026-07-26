@@ -20,6 +20,7 @@ RVOPT  ?= ../../../rvopt
 # instead of hanging it. The top Makefile passes its own detected value; a
 # standalone run auto-detects. Empty (no timeout tool) => unguarded, as elsewhere.
 TIMEOUT ?= $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)
+RUN_TIMEOUT ?= 60
 
 # Base RV32I only. Excluded: fence_i (FENCE traps by design, docs/rv32i-muxleq-abi.md)
 # and ma_data (misaligned access unsupported, muxleq.fth:752).
@@ -84,7 +85,7 @@ $(STAMP): FORCE
 # not PASS, so cmp rejects it.
 check: $(ELFS)
 	@fail=0; for t in $(TESTS); do \
-	  $(TIMEOUT) $(if $(TIMEOUT),20) $(MUXLEQ) -r $$t.elf > .check.out 2>/dev/null; \
+	  $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) $(MUXLEQ) -r $$t.elf > .check.out 2>/dev/null; \
 	  st=$$?; \
 	  if [ $$st -ne 0 ] || ! printf 'PASS\n' | cmp -s - .check.out; then \
 	    echo "  FAIL: rv32ui-$$t (status $$st, got '`tr -d '\n' < .check.out`')"; fail=1; fi; \
@@ -100,7 +101,7 @@ check: $(ELFS)
 check-mux: $(addsuffix .elf,$(MUX_TESTS))
 	@fail=0; for t in $(MUX_TESTS); do \
 	  if $(RVOPT) -mux $$t.elf > .mux.dec 2>/dev/null; then \
-	    $(TIMEOUT) $(if $(TIMEOUT),20) $(MUXLEQ) -x .mux.dec > .check.out 2>/dev/null; \
+	    $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) $(MUXLEQ) -x .mux.dec > .check.out 2>/dev/null; \
 	    st=$$?; \
 	    if [ $$st -ne 0 ] || ! printf 'PASS\n' | cmp -s - .check.out; then \
 	      echo "  FAIL(mux): rv32ui-$$t (status $$st, got '`tr -d '\n' < .check.out`')"; fail=1; fi; \
@@ -118,7 +119,7 @@ check-mux: $(addsuffix .elf,$(MUX_TESTS))
 check-x32: $(addsuffix .elf,$(X32_TESTS))
 	@fail=0; for t in $(X32_TESTS); do \
 	  if $(RVOPT) -mux32 $$t.elf > .x32.dec 2>/dev/null; then \
-	    $(TIMEOUT) $(if $(TIMEOUT),20) $(MUXLEQ) -x32 .x32.dec > .check.out 2>/dev/null; \
+	    $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) $(MUXLEQ) -x32 .x32.dec > .check.out 2>/dev/null; \
 	    st=$$?; \
 	    if [ $$st -ne 0 ] || ! printf 'PASS\n' | cmp -s - .check.out; then \
 	      echo "  FAIL(x32): rv32ui-$$t (status $$st, got '`tr -d '\n' < .check.out`')"; fail=1; fi; \

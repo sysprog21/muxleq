@@ -2,7 +2,7 @@
 
 : fibonacci ( n -- fib[n] )
     dup 2 < if exit then
-    
+
     0 1                     \ Initial values: fib[0], fib[1]
     rot 1- for              \ Loop n-1 times
         over +              \ Calculate next fibonacci

@@ -63,7 +63,7 @@ MUXLEQ from pure SUBLEQ.
 ## 2. Memory image
 
 The whole 32768-cell image is baked into the C binary at compile time (see the
-build pipeline). The current image occupies ~6428 cells; the rest is working RAM
+build pipeline). The current image occupies 10643 cells; the rest is working RAM
 (stacks, buffers, dictionary growth). Key fixed locations near the base include
 the zero register (`zreg`, address 6, the MUX zero-mask), the `-1`/`1` constants,
 and the working registers `r0..r4`, followed by the dictionary and task blocks.
@@ -98,13 +98,13 @@ cell and then execute it. Consequently:
 muxleq.fth  --gforth-->  stage0.dec  --sed 's/$/,/'-->  stage0.c  --#include-->  m[] in muxleq.c
 ```
 
-- `muxleq.fth` (~1700 lines) is a Gforth-hosted meta-compiler that assembles the
+- `muxleq.fth` (2376 lines) is a Gforth-hosted meta-compiler that assembles the
   full eForth -- dictionary, inner interpreter, block editor, multitasker -- into
   MUXLEQ cells. It runs under both Gforth (to build) and the target VM (to
   self-host). Feature toggles are the `opt.*` constants near the top.
 - `stage0.dec` / `stage0.c` are generated -- never edit them. Change the language
   or image via `muxleq.fth`; change the interpreter via `muxleq.c`.
-- `muxleq.c` (~290 lines) `#include`s `stage0.c` to initialize `m[]`.
+- `muxleq.c` (761 lines) `#include`s `stage0.c` to initialize `m[]`.
 
 ### Self-hosting invariant
 
@@ -242,7 +242,7 @@ For an ELF the loader flattens the PT_LOAD segments to their virtual addresses (
 zero-filled); a flat `objcopy -O binary` image is used as-is. Scope is a demonstrator,
 not a full emulator: RV32I base only (no M/A/F/D, CSRs, or interrupts), the `write`
 (a7=64) and `exit` (a7=93) ecalls only, entry must be 0, and the whole program
-(code+data+stack) must fit the 1024-byte guest RAM window. It runs well-formed programs
+(code+data+stack) must fit the 32 KiB guest RAM window. It runs well-formed programs
 and is a runner, not a strict encoding validator -- a few illegal encodings (some R-type
 `funct7`, out-of-range shift immediates) alias a legal instruction instead of trapping,
 though M-extension and unknown opcodes do trap. The VM halts when the guest exits or
@@ -252,6 +252,13 @@ verify-rv32i` drives the computational ISA (ALU, branches, jumps, upper-immediat
 against an independent reference model; loads/stores and ecalls are covered by the
 golden runner tests. The full register/memory ABI and encoding hazards are in
 `docs/rv32i-muxleq-abi.md`.
+
+The freestanding RV32I examples and vendored rv32ui compliance suite build with a
+bare-metal RISC-V toolchain. The tested default prefix is `riscv-none-elf-`;
+override it as `make RVCROSS=riscv64-unknown-elf- verify-riscv-tests` if your
+toolchain uses that prefix. `make verify-riscv-tests` skips cleanly when
+`$(RVCROSS)gcc` is absent, while the committed `.elf` and `.bin` fixtures keep
+`make check` independent of any RISC-V toolchain.
 
 ## 8. Testing
 

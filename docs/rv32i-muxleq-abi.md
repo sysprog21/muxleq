@@ -60,11 +60,11 @@ which also load inline-built programs with `rvorg`/`rvcell,`). Proven with a pre
 
 Scope of the shipped simulator: RV32I base only (no M/A/F/D, no CSRs, no interrupts); syscalls `write`
 and `exit` only; entry must be 0; guest RAM is 32 KiB (32768 bytes). The self-host memory ceiling is the
-binding constraint -- the image is ~10679 cells and the hard ceiling is ~12888 (the self-host holds the running
+binding constraint -- the image is 10643 cells and the hard ceiling is ~12888 (the self-host holds the running
 image PLUS the copy it re-assembles PLUS the metacompiler dictionary, all in 32768 cells), so the
 generous guest-RAM budget the plan below assumed does NOT hold today. Bigger programs need the eForth
-teardown (Decision 1) -- NOT yet done. NOT built: an ELF PT_LOAD parser, a pure-microcode
-runner, the teardown, and MMIO.
+teardown (Decision 1) -- NOT yet done. Built: an ELF PT_LOAD parser and the C runner. NOT built:
+a pure-microcode runner, the teardown, and MMIO.
 
 Conformance: RV32I compliance is validated at the INSTRUCTION level, because the official
 riscv-arch-test ELFs can't run here (they link past the 32767-cell guest window). `scripts/rv32i-
@@ -85,8 +85,8 @@ a bug with the microcode. `make verify-rv32i` runs it (~minutes, not in `make ch
 
 - MUXLEQ cells are 16-bit (`uint16_t`); the address space is 15-bit: `MEM_SIZE = 32768` cells
   (`muxleq.c`), i.e. 64 KiB of byte space if every cell holds two bytes.
-- The shipped eForth image currently occupies 6555 cells (`stage0.dec`); the rest is working RAM
-  (dictionary growth, stacks, buffers). So ~26 000 cells are free with the image resident.
+- The shipped eForth image currently occupies 10643 cells (`stage0.dec`); the rest is working RAM
+  (dictionary growth, stacks, buffers). So 22125 cells are free with the image resident.
 - MUXLEQ arithmetic is 16-bit two's complement; there is native same-lane MUX (bitwise select) but
   no cross-lane shift. Every 32-bit RV32I value is therefore TWO cells (low half / high half), and
   every op is written as explicit half-by-half microcode (see the MODEL section).
@@ -188,7 +188,7 @@ Register/scratch subtotal: **91 cells** (round up to 128 for alignment/growth he
 ## Cell budget (hand-worked)
 
 > SUPERSEDED by AS-BUILT: the interpreter came in at the HIGH end (~4400 cells of rv32i microcode;
-> full image ~10679). Critically, the "~22 000–24 000 cells of guest RAM" row did NOT materialize as a
+> full image 10643). Critically, the "~22 000–24 000 cells of guest RAM" row did NOT materialize as a
 > baked buffer -- the self-host ceiling (image + its re-assembled copy + dictionary in 32768 cells) caps
 > the baked image near ~12888. Instead guest RAM was moved OUT of the image into a fixed high-memory
 > window (byte `$7000` = cell `$3800`, un-baked like `buf0`/`=thread`), giving 32 KiB (16384 cells) at
@@ -202,9 +202,9 @@ Register/scratch subtotal: **91 cells** (round up to 128 for alignment/growth he
 | Fetch/decode/dispatch loop             | ~200         | fetch (2-cell load), field extraction, jump table |
 | Per-op microcode (`.sl` routines)      | ~1500–4000   | OPTIMISTIC placeholder, ~40 base ops. Each MUXLEQ instruction is 3 cells, and cross-cell carry / doubling-halving shifts / sub-cell loads are bulky, so real per-op cost may run 2–3× a naive estimate. MEASURE it; do not trust this number. |
 | Fixture area (raw instrs + presets)    | ~32          | a handful of hand-encoded instrs + register seeds |
-| Interpreter subtotal                   | **~2–4 K**   | well under the ~26 000 free cells even at the high end |
-| Guest RAM for a full ELF               | ~22 000–24 000 | 32768 − 6555 (image) − interpreter; ~44–48 KiB -- NOT guaranteed until the interpreter is measured |
-| Guest RAM if image torn down           | up to ~30 000 | frees the 6555 image cells → ~60 KiB              |
+| Interpreter subtotal                   | **~2–4 K**   | under the 22125 free cells even at the high end |
+| Guest RAM for a full ELF               | ~22 000–24 000 | stale baked-buffer estimate; the shipped runner uses a 32 KiB high-memory window |
+| Guest RAM if image torn down           | up to ~30 000 | would free the 10643-cell image, but is not needed for the shipped 32 KiB window |
 
 Takeaway: the interpreter fits comfortably with the image resident even if the microcode is 2–3× my
 estimate. A full compliance ELF is the only place the budget could bind, and the guest-RAM
@@ -248,7 +248,7 @@ even for the initial ADD/AND/SLL trio, and the full-ISA expansion depends on the
 2. Jump table vs compare chain -- RESOLVED as a COMPARE CHAIN (opcode short-circuits + `funct3`
    equal-zero tests). Simple and correct; no measured need for a computed `iJMP` table.
 3. Resident image vs teardown -- STILL OPEN, now purely a guest-RAM concern: the runner and
-   real-binary support shipped with the image resident (1024-byte guest RAM); teardown is the
+   real-binary support shipped with the image resident (32 KiB guest RAM); teardown is the
    unbuilt path to a larger guest RAM.
 
 This doc originally satisfied the design-validation ask (register/scratch/microcode/stack/fixture

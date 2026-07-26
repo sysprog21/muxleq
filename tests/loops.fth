@@ -27,4 +27,4 @@ cr .( 3 10 rectangle)
 3 10 rectangle
 
 cr .( 12 triangle)
-12 triangle  
+12 triangle

@@ -21,11 +21,11 @@ variable leap           ( 1 for a leap year, 0 otherwise. )
 
 : first ( month -- 1st, 1st of a month from jan. 1 )
         dup 1 =
-        if drop 0 
+        if drop 0
         else dup 2 =
-            if drop 31 
+            if drop 31
             else dup 3 =
-                if drop 59 leap @ + 
+                if drop 59 leap @ +
             else
                     4 - 30624 1000 */
                     90 + leap @ +       ( apr. 1 to dec. 1 )
@@ -37,7 +37,7 @@ variable leap           ( 1 for a leap year, 0 otherwise. )
 : stars 60 for 42 emit next ;    ( form the boarder )
 
 : header ( -- )                  ( print title bar )
-        cr stars cr 
+        cr stars cr
         ."      sun     mon     tue     wed     thu     fri     sat"
         cr stars cr              ( print weekdays )
         ;

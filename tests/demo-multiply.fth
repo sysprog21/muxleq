@@ -17,12 +17,12 @@ variable t10
         cr cr 7 spaces
         1 11
         for     dup 4 .r 1 +
-        next drop 
+        next drop
         1 11
         for     dup onerow 1 +
         next drop cr
         ;
-        
+
 .( type 'multiply' to print the multiplication table =>) cr
 multiply
 bye

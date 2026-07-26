@@ -35,8 +35,8 @@ variable xs                      ( square of scaled angle )
 : sin ( degree -- sin )
     360 mod dup 0< if 360 + then ( mod may be negative )
     dup  46 < if sin_ else
-    dup 136 < if 90 - cos_ else 
-    dup 226 < if 180 - sin_ negate else 
+    dup 136 < if 90 - cos_ else
+    dup 226 < if 180 - sin_ negate else
     dup 316 < if 270 - cos_ negate else
     360 - sin_ then then then then ;
 : cos     90 + sin ;

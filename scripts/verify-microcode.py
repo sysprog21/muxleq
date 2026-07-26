@@ -25,11 +25,24 @@ settles once and for all; a mutation that drops the SHL1 spill is caught at sham
 Needs the z3 Python package (z3-solver). Host-side only -- no image, VM, or build involvement,
 so it is a separate target (`make verify-microcode`), not part of `make check`.
 """
+
 import sys
 
 try:
-    from z3 import (BitVec, BitVecVal, Concat, Extract, If, LShR, Solver, UGE, ULT, ZeroExt, sat,
-                    unsat)
+    from z3 import (
+        BitVec,
+        BitVecVal,
+        Concat,
+        Extract,
+        If,
+        LShR,
+        Solver,
+        UGE,
+        ULT,
+        ZeroExt,
+        sat,
+        unsat,
+    )
 except ImportError:
     sys.exit("verify-microcode: needs the z3 Python package (pip install z3-solver)")
 
@@ -48,7 +61,7 @@ def vote_ge2(a, b, c):
 
 def add_model(s1lo, s1hi, s2lo, s2hi):
     """rvadd: per-half add, carry = MAJ(bit15 s1lo, bit15 s2lo, NOT bit15 sum_lo)."""
-    rslt_lo = s1lo + s2lo                                      # 16-bit wrap
+    rslt_lo = s1lo + s2lo  # 16-bit wrap
     carry = vote_ge2(bit15(s1lo), bit15(s2lo), BitVecVal(1, W) - bit15(rslt_lo))
     rslt_hi = s1hi + s2hi + carry
     return Concat(rslt_hi, rslt_lo)
@@ -56,7 +69,7 @@ def add_model(s1lo, s1hi, s2lo, s2hi):
 
 def sub_model(s1lo, s1hi, s2lo, s2hi):
     """rvsub: per-half subtract, borrow = MAJ(NOT bit15 s1lo, bit15 s2lo, bit15 diff_lo)."""
-    rslt_lo = s1lo - s2lo                                      # 16-bit wrap
+    rslt_lo = s1lo - s2lo  # 16-bit wrap
     borrow = vote_ge2(BitVecVal(1, W) - bit15(s1lo), bit15(s2lo), bit15(rslt_lo))
     rslt_hi = s1hi - s2hi - borrow
     return Concat(rslt_hi, rslt_lo)
@@ -82,15 +95,16 @@ def srl_model(lo, hi, shamt):
     s_lo, s_hi = lo, hi
     for _ in range(32 - shamt):
         rlo, rhi = shl1(rlo, rhi)
-        rlo = rlo + bit15(s_hi)                                   # rlo bit0 is 0 after shl1, so += is clean
+        rlo = rlo + bit15(s_hi)  # rlo bit0 is 0 after shl1, so += is clean
         s_lo, s_hi = shl1(s_lo, s_hi)
     return rlo, rhi
 
 
 def sra_model(lo, hi, shamt):
     """rvsra: the SRL loop bracketed by a conditional invert of SRC1 (before) and the result (after)
-    when SRC1 < 0 -- inverting a negative operand makes the zero-filling SRL sign-fill instead."""
-    neg = bit15(hi)                                              # bit31(SRC1)
+    when SRC1 < 0 -- inverting a negative operand makes the zero-filling SRL sign-fill instead.
+    """
+    neg = bit15(hi)  # bit31(SRC1)
     lo, hi = If(neg != 0, ~lo, lo), If(neg != 0, ~hi, hi)
     rlo, rhi = srl_model(lo, hi, shamt)
     return If(neg != 0, ~rlo, rlo), If(neg != 0, ~rhi, rhi)
@@ -104,10 +118,11 @@ def ult16(x, y):
 
 def sltu_model(a_lo, a_hi, b_lo, b_hi):
     """rvsltu: high-half-first unsigned compare -- a_hi<b_hi -> 1; a_hi>b_hi -> 0; else a_lo<b_lo.
-    Each 16-bit unsigned `<` is ult16 (the SUB-borrow vote). Result is a 0/1 word, hi half zero."""
-    hi_lt = ult16(a_hi, b_hi)                     # a_hi < b_hi
-    hi_gt = ult16(b_hi, a_hi)                     # b_hi < a_hi, i.e. a_hi > b_hi
-    lo_lt = ult16(a_lo, b_lo)                     # low halves, only consulted when a_hi == b_hi
+    Each 16-bit unsigned `<` is ult16 (the SUB-borrow vote). Result is a 0/1 word, hi half zero.
+    """
+    hi_lt = ult16(a_hi, b_hi)  # a_hi < b_hi
+    hi_gt = ult16(b_hi, a_hi)  # b_hi < a_hi, i.e. a_hi > b_hi
+    lo_lt = ult16(a_lo, b_lo)  # low halves, only consulted when a_hi == b_hi
     rlo = If(hi_lt != 0, BitVecVal(1, W), If(hi_gt != 0, BitVecVal(0, W), lo_lt))
     return Concat(BitVecVal(0, W), rlo)
 
@@ -133,7 +148,9 @@ def prove_shift(name, model_fn, spec_fn):
             continue
         if r == sat:
             m = s.model()
-            print(f"FAIL  {name} shamt={shamt}: src={m[hi].as_long():#06x}{m[lo].as_long():04x}")
+            print(
+                f"FAIL  {name} shamt={shamt}: src={m[hi].as_long():#06x}{m[lo].as_long():04x}"
+            )
         else:
             print(f"UNKNOWN  {name} shamt={shamt}: Z3 returned {r}")
         return False
@@ -161,18 +178,30 @@ def prove(name, model, spec, inputs):
 def main():
     s1lo, s1hi, s2lo, s2hi = (BitVec(n, W) for n in ("s1lo", "s1hi", "s2lo", "s2hi"))
     inputs = [s1hi, s1lo, s2hi, s2lo]
-    src1, src2 = Concat(s1hi, s1lo), Concat(s2hi, s2lo)        # the 32-bit operands
+    src1, src2 = Concat(s1hi, s1lo), Concat(s2hi, s2lo)  # the 32-bit operands
     ok = True
     ok &= prove("rvadd", add_model(s1lo, s1hi, s2lo, s2hi), src1 + src2, inputs)
     ok &= prove("rvsub", sub_model(s1lo, s1hi, s2lo, s2hi), src1 - src2, inputs)
     one32, zero32 = BitVecVal(1, 2 * W), BitVecVal(0, 2 * W)
-    ok &= prove("rvsltu", sltu_model(s1lo, s1hi, s2lo, s2hi),            # unsigned set-less-than
-                If(ULT(src1, src2), one32, zero32), inputs)
-    ok &= prove("rvslt", slt_model(s1lo, s1hi, s2lo, s2hi),             # signed set-less-than
-                If(src1 < src2, one32, zero32), inputs)
-    ok &= prove_shift("rvsll", sll_model, lambda src, sh: src << sh)     # logical left
-    ok &= prove_shift("rvsrl", srl_model, lambda src, sh: LShR(src, sh)) # logical right (zero fill)
-    ok &= prove_shift("rvsra", sra_model, lambda src, sh: src >> sh)     # arithmetic right (sign fill)
+    ok &= prove(
+        "rvsltu",
+        sltu_model(s1lo, s1hi, s2lo, s2hi),  # unsigned set-less-than
+        If(ULT(src1, src2), one32, zero32),
+        inputs,
+    )
+    ok &= prove(
+        "rvslt",
+        slt_model(s1lo, s1hi, s2lo, s2hi),  # signed set-less-than
+        If(src1 < src2, one32, zero32),
+        inputs,
+    )
+    ok &= prove_shift("rvsll", sll_model, lambda src, sh: src << sh)  # logical left
+    ok &= prove_shift(
+        "rvsrl", srl_model, lambda src, sh: LShR(src, sh)
+    )  # logical right (zero fill)
+    ok &= prove_shift(
+        "rvsra", sra_model, lambda src, sh: src >> sh
+    )  # arithmetic right (sign fill)
     sys.exit(0 if ok else 1)
 
 

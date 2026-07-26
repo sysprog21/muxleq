@@ -31,14 +31,14 @@ variable s12 variable s13 variable s14 variable s15
 : set-constants ( -- )
     25462 s0 !     \ magic constant
     28237 s1 !     \ magic constant
-    25648 s2 !     \ magic constant  
+    25648 s2 !     \ magic constant
     29808 s3 ! ;   \ magic constant
 
 \ set 128-bit key as 8 x 16-bit words
 : set-key128 ( k0 k1 k2 k3 k4 k5 k6 k7 -- )
     s11 ! s10 ! s9 ! s8 ! s7 ! s6 ! s5 ! s4 ! ;
 
-\ set counter and 96-bit nonce  
+\ set counter and 96-bit nonce
 : set-counter-nonce ( counter n0 n1 n2 -- )
     s15 ! s14 ! s13 ! s12 ! ;
 
@@ -166,7 +166,7 @@ variable p-acc0 variable p-acc1 variable p-acc2 variable p-acc3
     s8 @ . s9 @ . s10 @ . s11 @ cr
     s12 @ . s13 @ . s14 @ . s15 @ cr ;
 
-\ simplified AEAD encryption  
+\ simplified AEAD encryption
 : simple-encrypt ( plaintext -- ciphertext )
     encrypt-word ;
 
@@ -222,7 +222,7 @@ add-original
 cr .( Block 2 - Plaintext: 22222 )
 22222 simple-encrypt .
 
-increment-counter  
+increment-counter
 backup-state
 chacha-block
 add-original
