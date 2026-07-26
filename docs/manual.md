@@ -182,25 +182,34 @@ Each item below is a one-liner you can paste into `make run`.
   `7 -2 /` = `-4`. Division by zero throws `-10`; catch it with `: d 1 0 / ;  ' d catch .` → `-10`.
 - `um*` leaves the double result low-then-high; `.` prints top first, so
   `5 dup um* . .` prints `0 25` (high, low).
+- Shifts are LOGICAL, not arithmetic: `rshift` zero-fills the vacated high bits, and `2/` is
+  defined as `1 rshift`, so `2/` does NOT sign-extend. `-2 2/` is `32767`, not `-1`; `$8000 1 rshift`
+  is `16384` (0x4000), not 0xC000. For a signed (arithmetic) shift-right-by-1, sign-fill explicitly:
+  `: asr1 dup 0< if 2/ $8000 or else 2/ then ;` gives `-8 asr1` → `-4`. Pinned by `tests/arith.fth`.
+- `case`/`of` parks the selector on the RETURN stack, not the data stack (`(case)` is
+  `r> swap >r >r`). Each `of` compares against it via `r@`, and `endcase` drops it. Consequence: the
+  DEFAULT arm (after the last `of`, before `endcase`) cannot `dup` the selector off the data stack --
+  it isn't there. To use the selector's value in the default arm, recompute or re-fetch it from its
+  source. This differs from the classic eForth `case` that leaves the selector on the data stack.
 - The multitasker words (`pause`/`task:`/`activate`/`multi`/`single`/`send`/`receive`) live in
   the `system` vocabulary: run `system +order` first, or they read as undefined (`-13`).
   See `tests/tasker.fth`. This multitasker is COOPERATIVE and single-threaded: tasks run a
-  round-robin and only switch at an explicit `pause`, so execution is deterministic. It is NOT
-  ceForth's model -- there `task`/`start` create and schedule real host OS threads and `send`/`recv`
-  pass messages between them (preemptive, with `clock`/`rank`/`lock`, backed by `std::thread` +
-  condition variables), which a single-threaded OISC VM cannot match. So ceForth's `mtask`/`mpi`
-  demos do not port as conformance goldens: `mtask` is a `clock`-timing benchmark
-  (nondeterministic), and `mpi` relies on preemptive thread scheduling. muxleq's cooperative
+  round-robin and only switch at an explicit `pause`, so execution is deterministic. It is NOT a
+  preemptive host-thread model -- a fuller Forth's `task`/`start` create and schedule real host OS
+  threads and `send`/`recv` pass messages between them (preemptive, with `clock`/`rank`/`lock`,
+  backed by `std::thread` + condition variables), which a single-threaded OISC VM cannot match. So
+  preemptive-thread demos do not port as conformance goldens: a `clock`-timing benchmark is
+  nondeterministic, and preemptive message passing relies on thread scheduling. muxleq's cooperative
   `pause`/`send`/`receive` is an analogous messaging capability with a different API and semantics
-  (a single-slot mailbox, not ceForth's stack-copy queue).
+  (a single-slot mailbox, not a stack-copy queue).
 - This eForth is fairly complete (~250 words: `case`, `marker`, `pick`, `within`, `nip`/`tuck`,
   `2dup`/`2drop`, `type`, `cmove`, `fill`, `allocate`/`free`, `catch`/`throw`, `um*`/`d+`, the
-  pictured-output words `<# # #s #>`, …). Recent ceForth-conformance additions: `*/`/`*/mod`/`m*`,
+  pictured-output words `<# # #s #>`, …). Recent conformance additions: `*/`/`*/mod`/`m*`,
   `.r`, `th` (array cell index), `octal`, `chars`, `spaces`, `2over`, `2swap`, `depth` (now in the
-  forth vocab), and `value`/`to`. `to` is interpret-time only (it parses the next word from input,
-  like ceForth's `to`): `5 to x` works at the REPL but `: foo 5 to x ;` does not -- the compiled
+  forth vocab), and `value`/`to`. `to` is interpret-time only (it parses the next word from input):
+  `5 to x` works at the REPL but `: foo 5 to x ;` does not -- the compiled
   `to` has no input to read. (A `value` is a mutable `constant`; `to` writes any such word's cell,
-  with no value-vs-constant type guard, same as ceForth.) Still absent and read as undefined
+  with no value-vs-constant type guard.) Still absent and read as undefined
   (`-13`); external programs may need adapting: `vocabulary`, `defer`, `s"` (no string literals),
   `[']` (use `'` at the REPL only -- it reads the input stream, so it can't fetch an xt inside a
   `:` definition), `roll` (needs recursion the metacompiler can't build), and the `#`/`%`/`'c'`
@@ -210,10 +219,41 @@ Each item below is a one-liner you can paste into `make run`.
   Number input: decimal by default; `$FF` or `hex … decimal` for hex. Use `[char] A` (not
   `'A'`) for a character constant.
 - `." text"` outside a definition is fragile. Common error codes: `-4` (stack underflow),
-  `-13` (undefined word / compile-only misuse), `-14` (execution/output error). More in
-  `externals/subleq/CLAUDE.md`.
+  `-13` (undefined word / compile-only misuse), `-14` (execution/output error).
 
-## 7. Testing
+## 7. RV32I microcode runner
+
+MUXLEQ stays a 16-bit OISC; on top of it the image assembles a fetch-decode-execute
+interpreter for the RISC-V RV32I base ISA, written in the meta-assembler as `:a`
+microcode: a per-step fetch reads the 32-bit instruction word from guest RAM into two
+cells, then a single `rvstep` entry decodes those halves and runs the matching routine.
+The OISC VM executing that microcode image *is* the RV32I
+simulator -- the Goldcrest-VP model, where an OISC substrate plus microcode presents a
+standard RISC-V interface. It builds through the same self-hosting pipeline as eForth
+(`opt.rv32i` toggles the section in), so `make bootstrap` re-assembles and byte-checks it.
+
+Run a program directly:
+
+```
+./muxleq -r prog          # prog is an ELF32-LE executable or a flat objcopy binary
+```
+
+For an ELF the loader flattens the PT_LOAD segments to their virtual addresses (bss
+zero-filled); a flat `objcopy -O binary` image is used as-is. Scope is a demonstrator,
+not a full emulator: RV32I base only (no M/A/F/D, CSRs, or interrupts), the `write`
+(a7=64) and `exit` (a7=93) ecalls only, entry must be 0, and the whole program
+(code+data+stack) must fit the 1024-byte guest RAM window. It runs well-formed programs
+and is a runner, not a strict encoding validator -- a few illegal encodings (some R-type
+`funct7`, out-of-range shift immediates) alias a legal instruction instead of trapping,
+though M-extension and unknown opcodes do trap. The VM halts when the guest exits or
+traps, rather than dropping into the REPL. `tests/rv32i/` holds freestanding example
+programs with source and a Makefile; `make golden` runs them through `-r`. `make
+verify-rv32i` drives the computational ISA (ALU, branches, jumps, upper-immediates)
+against an independent reference model; loads/stores and ecalls are covered by the
+golden runner tests. The full register/memory ABI and encoding hazards are in
+`docs/rv32i-muxleq-abi.md`.
+
+## 8. Testing
 
 `make check` is the pre-commit gate: `make golden` byte-compares a suite of
 deterministic programs against `tests/expected/*.out` (the VM must exit 0 and
@@ -223,9 +263,10 @@ hangs), followed by `make bootstrap`. Regenerate goldens intentionally with
 (colon defs, `execute`, `does>`, `create`). `mandel` is manual-only (it does not
 self-halt).
 
-## 8. References
+## 9. References
 
 - README.md -- project overview and the MUX encoding.
 - CLAUDE.md -- operational notes and build-pipeline warnings.
-- externals/subleq -- the SUBLEQ ancestor (Richard James Howe) and a sibling
-  optimizer (`subleq.c`) whose macro-op decode inspires §2 of the roadmap.
+- docs/rv32i-muxleq-abi.md -- the RV32I microcode register/memory ABI and encoding hazards.
+- The interpreter's runtime peek-ahead fusion is inspired by macro-op decoding of the
+  SUBLEQ ancestor from which MUXLEQ descends.

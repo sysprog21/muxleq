@@ -1,5 +1,5 @@
-\ Ported from externals/eforth/tests/demo/3_fig.fs -- "FIG" ASCII art.
-\ demo adapted: prepended bar/post/f from 2_f.fs. The ceForth demos run cumulatively in one
+\ Conformance demo: "FIG" ASCII art.
+\ demo adapted: prepended the bar/post/f words from the big-F demo. The demos run cumulatively in one
 \ session, so 3_fig assumes 2_f's bar/post/f are already defined; standalone they must be added.
 .( example 3. fig, forth interest group )
 

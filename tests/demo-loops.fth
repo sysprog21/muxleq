@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/4_loops.fs -- asterisk-art loops.
+\ Conformance demo: asterisk-art loops.
 \ demo adapted: none. Exercises for/next (inclusive: n for = n+1 passes, the
 \ same in ceforth's _for, so the shapes match), r@, and the spaces alias.
 .( example 4. repeated patterns )

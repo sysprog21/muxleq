@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/7_money.fs -- currency exchange words. demo adapted: none.
+\ Conformance demo: currency exchange words. demo adapted: none.
 .( example 7. money exchange )
 
 variable t7

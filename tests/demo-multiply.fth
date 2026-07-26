@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/10_multiply.fs -- multiplication table.
+\ Conformance demo: multiplication table.
 \ Conformance driver for .r (added to muxleq.fth): right-justified columns.
 .( example 10.  print the multiplication table )
 

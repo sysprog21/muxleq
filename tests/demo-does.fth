@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/18_does.fs -- create..does> defining words.
+\ Conformance demo: create..does> defining words.
 \ demo adapted: dropped the 'see x' / 'see xyz' lines (see = muxleq's decompiler, address
 \ output, implementation-specific). The create/does> behavior and the values are verbatim.
 .( lesson 18 - create..does> )

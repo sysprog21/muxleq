@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/15_ascii.fs -- ASCII table.
+\ Conformance demo: ASCII table.
 \ Conformance driver for 'octal' (added to muxleq.fth): each row prints char,
 \ then its value in hex/octal/decimal via .r. Also exercises hex/decimal/.r/spaces.
 cr .( example 15. ascii character table )

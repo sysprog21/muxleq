@@ -1,4 +1,5 @@
-\ RV32I spec test (TODO 5.6/5.7): drive edge vectors through the single-entry rvstep microcode and
+\ RV32I spec test: drive edge vectors through the single-entry rvstep microcode (plus a small
+\ register-file section at the end exercising rvwr/rvrd directly) and
 \ compare each 32-bit result against an offline reference (computed independently, baked below).
 \ x3 = x1 OP (x2 for R-type / imm for I-type). Self-checking: prints OK per vector, or FAIL with
 \ got/want. Golden is all OK, so any regression in the decode, opcode/funct3/funct7 dispatch, immediate
@@ -107,7 +108,7 @@ FFFF FFFF 0000 0000 A193 0000 0001 0000 chk  \ SLTI FFFFFFFF = 00000001
 FFFF FFFF 0000 0000 D193 0040 FFFF 0FFF chk  \ SRLI FFFFFFFF = 0FFFFFFF
 0000 8000 0000 0000 D193 4010 0000 C000 chk  \ SRAI 80000000 = C0000000
 FFFF FFFF 0000 0000 D193 4040 FFFF FFFF chk  \ SRAI FFFFFFFF = FFFFFFFF
-\ --- memory: aligned LW/SW round-trip (5.7). Store x2 into guest RAM, load it back into x3. ---
+\ --- memory: aligned LW/SW round-trip. Store x2 into guest RAM, load it back into x3. ---
 : runi rv-ih ! rv-il ! rvstep ;                      ( irlo irhi -- : one instruction )
 : eqx3 ( wlo whi -- )  WHI ! WLO !  03 rv-idx ! rvrd
   rv-s1hi @ WHI @ =  rv-s1lo @ WLO @ =  and
@@ -120,7 +121,7 @@ A183 0000 runi  BEEF DEAD eqx3                         \ mem[0x10] untouched = D
 A183 0080 runi  2222 1111 eqx3                         \ mem[0x18] updated = 11112222
 0024 0000 05 seedr  BEEF DEAD 02 seedr                \ x5 = 0x24 base, x2 = 0xDEADBEEF
 AE23 FE22 runi  A183 FFC2 runi  BEEF DEAD eqx3        \ SW -4(x5); LW x3,-4(x5) = DEADBEEF
-\ --- sub-word memory LB/LH/LBU/LHU/SB/SH (5.7). Store a word, read bytes/halves back. ---
+\ --- sub-word memory LB/LH/LBU/LHU/SB/SH. Store a word, read bytes/halves back. ---
 0010 0000 01 seedr  F3F4 F1F2 02 seedr           \ x1=0x10, x2=0xF1F2F3F4
 A023 0020 runi                              \ SW x2,0(x1)
 8183 0000 runi  FFF4 FFFF eqx3   \ LB 0 = FFFFFFF4
@@ -143,7 +144,7 @@ A183 0000 runi  ABCD F1F2 eqx3   \ LW = F1F2ABCD
 1234 0000 02 seedr
 9123 0020 runi                              \ SH 0x1234 at 0x12
 A183 0000 runi  ABCD 1234 eqx3   \ LW = 1234ABCD
-\ --- branches BEQ/BNE/BLT/BGE/BLTU/BGEU (5.7). Set RVPC + regs, check RVPC = target or PC+4. ---
+\ --- branches BEQ/BNE/BLT/BGE/BLTU/BGEU. Set RVPC + regs, check RVPC = target or PC+4. ---
 : setpc rv-pchi ! rv-pclo ! ;
 : brun rv-ih ! rv-il ! rvstep ;
 : chkpc ( wlo whi -- )  WHI ! WLO !  rv-pchi @ WHI @ =  rv-pclo @ WLO @ =  and
@@ -186,7 +187,7 @@ F863 0020 brun  0104 0000 chkpc   \ BGEU r1=1 r2=FFFFFFFF off=16 pc=100
 8063 8020 brun  1000 0000 chkpc   \ BEQ min-off off=-4096 pc=2000
 0000 8000 01 seedr  0000 0000 02 seedr  0100 0000 setpc
 8463 0020 brun  0104 0000 chkpc   \ BEQ hi-edge off=8 pc=100
-\ --- jumps JAL (0x6F) / JALR (0x67) (5.7). Check RVPC target and the link reg[rd]=x3=PC+4. ---
+\ --- jumps JAL (0x6F) / JALR (0x67). Check RVPC target and the link reg[rd]=x3=PC+4. ---
 \ reuses setpc from the branch section above
 : jrun rv-ih ! rv-il ! rvstep ;
 : chkj ( pclo pchi -- : verify RVPC, then verify x3 = PC+4 = 0x204 )
@@ -209,7 +210,7 @@ F863 0020 brun  0104 0000 chkpc   \ BGEU r1=1 r2=FFFFFFFF off=16 pc=100
 0200 0000 setpc  01E7 FFC1 jrun  03FC 0000 chkj   \ JALR x3,x2,-4
 1000 0000 02 seedr
 0200 0000 setpc  01E7 7FF1 jrun  17FE 0000 chkj   \ JALR x3,x2,2047
-\ --- upper immediates LUI (0x37) / AUIPC (0x17) (5.7). rd = imm<<12, AUIPC adds RVPC. ---
+\ --- upper immediates LUI (0x37) / AUIPC (0x17). rd = imm<<12, AUIPC adds RVPC. ---
 \ reuses runi + eqx3 + setpc from the sections above
 51B7 1234 runi  5000 1234 eqx3   \ LUI 0x12345
 F1B7 FFFF runi  F000 FFFF eqx3   \ LUI 0xFFFFF
@@ -218,5 +219,13 @@ F1B7 FFFF runi  F000 FFFF eqx3   \ LUI 0xFFFFF
 2000 0000 setpc  1197 0000 runi  3000 0000 eqx3   \ AUIPC 0x1 pc=2000
 2000 0000 setpc  F197 FFFF runi  1000 0000 eqx3   \ AUIPC 0xFFFFF pc=2000
 1234 0000 setpc  0197 0000 runi  1234 0000 eqx3   \ AUIPC 0 pc=1234
+\ --- register file (rvwr/rvrd direct): x0 writes discarded, x31 usable, writes independent. ---
+: eqr ( wlo whi idx -- )  rv-idx ! rvrd  WHI ! WLO !
+  rv-s1hi @ WHI @ =  rv-s1lo @ WLO @ =  and
+  if ." OK" else ." FAIL got=" rv-s1hi @ u. rv-s1lo @ u. ." want=" WHI @ u. WLO @ u. then cr ;
+5678 1234 05 seedr  5678 1234 05 eqr   \ reg[5] = 0x12345678, read back
+BBBB AAAA 00 seedr  0000 0000 00 eqr   \ write to x0 (index 0) discarded, stays 0
+4444 3333 1F seedr  4444 3333 1F eqr   \ x31 accessible at the top of the file
+5678 1234 05 eqr                       \ reg[5] untouched by the x0/x31 writes
 decimal cr
 bye

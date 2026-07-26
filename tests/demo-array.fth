@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/17_array.fs -- array access via create/allot + th.
+\ Conformance demo: array access via create/allot + th.
 \ Conformance driver for 'th' (added to muxleq.fth). demo adapted: dropped the two 'see arr'
 \ lines -- 'see' prints muxleq's decompiler output (addresses), which is implementation-specific,
 \ not conformance-relevant. The array reads/writes (the demo's point) are verbatim.

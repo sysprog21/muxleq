@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/9_weather.fs -- threshold-based report. demo adapted: none.
+\ Conformance demo: threshold-based report. demo adapted: none.
 .( example 9. weather reporting. )
 
 variable t9

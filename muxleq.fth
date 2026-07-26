@@ -23,7 +23,12 @@ only forth definitions hex
 1 constant opt.allocate   ( Dynamic memory allocation allocate/free )
 1 constant opt.glossary   ( Word glossary and analysis tools )
 1 constant opt.divmod     ( Hardware division/modulo primitive )
- 1 constant opt.rv32i      ( RV32I microcode interpreter, §5 Phase 5 -- smoke slice )
+ 1 constant opt.rv32i      ( RV32I microcode interpreter )
+\ RV32I guest RAM lives in a fixed high-memory window ($7000 byte = cell $3800), NOT baked into the
+\ image (same trick as buf0/=thread): only touched while running an RV program, never during
+\ self-host bootstrap, so it costs zero image cells. Base is a plain forth constant so the tvar
+\ block (rvrambase) and the runner (rv-ram) both read it.
+7000 constant rvram       ( RV32I: guest-RAM base byte address; guest cell 0 lives here )
 
 \ System options bit flags
 : sys.echo-off 1 or ;     ( bit #1 = turn character echoing off )
@@ -281,7 +286,7 @@ opt.rv32i [if]
   $8000 tvar rvsign                ( RV32I: high-bit mask for negation-safe signbit tests )
   0 tvar rvsh                      ( RV32I: shift amount, pre-masked to 0..31 by decode )
   0 tvar rvidx                     ( RV32I: register index 0..31 for indexed access )
-  0 tvar rvmask                    ( RV32I: field-extract mask for rvfield )
+  0 tvar rvmask                    ( RV32I: field-extract mask for rvfield.sub )
   0 tvar rvlink                    ( RV32I: subroutine return-address link cell )
   0 tvar rvil  0 tvar rvih         ( RV32I: instruction word, low/high 16-bit halves )
   0 tvar rvo-rs1  0 tvar rvo-rs2  0 tvar rvo-rd  ( RV32I: decoded register indices )
@@ -296,6 +301,8 @@ opt.rv32i [if]
   $63 tvar rvc99   $1E tvar rvc1e   $7E0 tvar rvc7e0   $800 tvar rvc800  ( RV32I: BRANCH opcode, B-imm fields )
   $6F tvar rvc111  $67 tvar rvc103  ( RV32I: JAL / JALR opcodes )
   $37 tvar rvc55   $17 tvar rvc23   ( RV32I: LUI / AUIPC opcodes )
+  $73 tvar rvc115  ( RV32I: SYSTEM opcode -- ecall )
+  $33 tvar rvc51   $200 tvar rvc512  ( RV32I: R-type opcode, M-extension funct7 bit0 = instr bit25 )
   $7FE tvar rvc7fe  $10 tvar rvc16  $FFF0 tvar rvcfff0  $FFFE tvar rvcfffe  ( RV32I: J-imm fields, JALR mask )
   0 tvar rvtmp                     ( RV32I: scratch for XOR = a-or-b minus a-and-b )
   0 tvar rvneg                     ( RV32I: SRA sign flag: was SRC1 negative? )
@@ -310,6 +317,8 @@ opt.rv32i [if]
   0 tvar rvtaken                   ( RV32I: branch-taken flag )
   0 tvar rvo-jmp                   ( RV32I: is-jump flag, set for JAL 0x6F / JALR 0x67 )
   0 tvar rvo-uop                   ( RV32I: is-upper-immediate flag, set for LUI 0x37 / AUIPC 0x17 )
+  0 tvar rvo-ctrl                  ( RV32I: is-control-flow flag = branch 0x63 or jump; runner skips RVPC+=4 )
+  0 tvar rvstate                   ( RV32I: run-state signal the host reads -- 0 running, 1 ecall, 2 illegal )
   0 tvar rvr1  0 tvar rvr2  0 tvar rvr3  0 tvar rvr4   ( RV32I: rvstep per-call return slots )
   0 tvar rvr5  0 tvar rvr6  0 tvar rvr7  0 tvar rvr8
   0 tvar rvr9  0 tvar rvr10 0 tvar rvr11 0 tvar rvr12
@@ -322,10 +331,13 @@ opt.rv32i [if]
   0 tvar rvr39 0 tvar rvr40         ( RV32I: U-type return slots )
   0 tvar rvregs  126 tallot        ( RV32I: register file x0..x31, 64 cells: 1 from tvar + 63 more )
   rvregs half tvar rvbase          ( RV32I: halved base address of the register file )
-  $7F tvar rvrammask               ( RV32I: guest-RAM cell mask, indices 0..127 = 256 bytes )
-  \ 129 cells = 128 usable + 1 guard, so a misaligned idx+1 of at most 128 stays in bounds
-  0 tvar rvram  256 tallot         ( RV32I: guest RAM, one LE halfword per cell )
-  rvram half tvar rvrambase        ( RV32I: halved base address of guest RAM )
+  $3FFF tvar rvrammask             ( RV32I: guest-RAM cell mask, indices 0..16383 = 32 KiB )
+  \ rvram (the un-baked high window, explained in the constants header) has an address invariant we
+  \ record here, verified by the RV goldens + sanitize: base cell ($3800) stays above MAX_CELLS so
+  \ image growth can't reach it, and base+mask+1 ($7800) stays below buf0 (cell $7A00) and the 15-bit
+  \ address ceiling ($8000). The window can't survive heavy interactive dictionary growth before an RV
+  \ run; only the eForth teardown would, and that is deferred.
+  rvram half tvar rvrambase        ( RV32I: halved cell base address of guest RAM = $3800 )
 [then]
   =thread =stksz        + half dup tvar {rp0} tvar {rp}
   =thread =stksz double + half dup tvar {sp0} tvar {sp}
@@ -504,6 +516,13 @@ assembler.1 -order
   r3 tos MMOV ;a
 
 opt.divmod [if]
+\ Repeated-subtraction unsigned divide: r0 (dividend) -= tos (divisor) until it goes negative, then
+\ correct back one step. The 'r0 -if' sign test has the INT16_MIN blind spot ('-if' mis-reads 0x8000
+\ as non-negative), so it is only exact if the running remainder can never equal exactly 0x8000. That
+\ holds for the SOLE caller, '(.)', which always passes a small radix (base, 2..36) as the divisor:
+\ r0 starts <= 0x8000 and only decreases, and each terminating (r0 - radix) is a small negative
+\ (-1..-radix), never -32768. Do NOT call opDivMod with a bit15-set divisor -- it would loop/misstep;
+\ use a negation-safe sign test (mask+DEC+'+if', like RVBIT15) if that case is ever needed.
 :a opDivMod                        ( u1 u2 -- u1 u2 )
   r0 {sp} iLOAD
   r1 ZERO                          \ zero quotient
@@ -553,42 +572,43 @@ opt.rv32i [if]
 \ (MUX/AND -> exactly 0 or 0x8000) then DEC (0x8000->0x7FFF>0 fires, 0->-1 doesn't). Avoids '-if',
 \ which mis-signs 0x8000 because its own negation overflows. Clobbers r1.
 :m RVBIT15 r1 MMOV  r1 zreg rvsign MUXR  r1 DEC ;m  ( a -- )
+\ The next three macros emit assembler.1 control flow (+if/else/then), which a :m macro can't see
+\ under the default meta.1-only search order. Bracket their definitions with assembler.1 in scope;
+\ get-order/set-order restore the search order exactly, whatever it was on entry.
+get-order assembler.1 +order
+\ Shift a 32-bit value (cells 'lo/'hi) left by one bit, injecting the bit15 spill from lo into hi.
+:m SHL1 ( 'lo 'hi -- )  swap dup RVBIT15  dup ADD  dup dup ADD  r1 +if swap INC then ;m
+\ ADD/SUB carry majority-vote step: add bit15('src) (VOTE+) or NOT bit15('src) (VOTE-) to counter r0.
+:m VOTE+ ( 'src -- )  RVBIT15  r1 +if r0 INC then ;m
+:m VOTE- ( 'src -- )  RVBIT15  r1 +if else r0 INC then ;m
+set-order
 \ Point r1 at reg[rvidx].lo: halved base + 2*rvidx (each register is two cells). Clobbers r1.
 :m RVPTR rvbase r1 MMOV  rvidx r1 ADD  rvidx r1 ADD ;m  ( -- )
 \ Invert cell a in place (a = ~a = -1 - a). Clobbers r0. No control flow, so it can be a macro.
 :m RVINV  neg1 r0 MMOV  dup r0 SUB  r0 swap MMOV ;m  ( a -- )
 
-\ Op bodies factored so each is shared by the standalone ':a' primitive (ends ';a', returns to VM)
-\ and a '.sub' label version (ends 'rvlink iJMP', returns to a composing caller like rvstep). None of
-\ these four has an internal label, so a macro can expand into both without a label collision.
+\ Recurring op bodies are factored into a macro shared across routines: RVRD-BODY by both the kept
+\ 'rvrd' standalone and 'rvrd.sub', RVAND-BODY/RVRD2-BODY by just the '.sub' form. None has an
+\ internal label, so a macro can expand into multiple routines without a label collision.
 :m RVAND-BODY rvs1lo rvrlo MMOV  rvrlo zreg rvs2lo MUXR  rvs1hi rvrhi MMOV  rvrhi zreg rvs2hi MUXR ;m
 :m RVRD-BODY  RVPTR  rvs1lo r1 iLOAD  r1 INC  rvs1hi r1 iLOAD ;m
 :m RVRD2-BODY RVPTR  rvs2lo r1 iLOAD  r1 INC  rvs2hi r1 iLOAD ;m
-\ rvwr's body uses '+if'/'then' (assembler control flow), which can't live inside a ':m' macro, so
-\ it is written inline in both the ':a' primitive and the '.sub' version below.
+\ rvwr's body uses '+if'/'then', so bracket its definition with assembler.1 in scope (see SHL1 above).
+get-order assembler.1 +order
+:m RVWR-BODY  RVPTR  rvidx +if  rvrlo r1 iSTORE  r1 INC  rvrhi r1 iSTORE  then ;m
+set-order
 
-:a rvand RVAND-BODY ;a              ( RV32I: RSLT = SRC1 & SRC2, one same-lane MUX per half )
-:a rvand.sub RVAND-BODY rvlink iJMP (a);   ( callable AND: returns to Mem[rvlink] )
+:a rvand.sub RVAND-BODY rvlink iJMP (a);   ( RV32I: RSLT = SRC1 & SRC2, one same-lane MUX/half; -> Mem[rvlink] )
 
-:a rvadd                           ( RV32I: RSLT = SRC1 + SRC2, 32-bit with cross-cell carry )
-  rvs1lo rvrlo MMOV                 \ RSLTlo = SRC1lo
-  rvs2lo rvrlo ADD                  \ RSLTlo += SRC2lo   (16-bit, wraps mod 65536)
-  rvs1hi rvrhi MMOV                 \ RSLThi = SRC1hi
-  rvs2hi rvrhi ADD                  \ RSLThi += SRC2hi   (carry added below)
-  \ carry-out of the low half = MAJ(bit15 SRC1lo, bit15 SRC2lo, NOT bit15 sum): >=2 votes -> carry.
-  r0 ZERO                           \ r0 = vote count
-  rvs1lo RVBIT15  r1 +if r0 INC then       \ + bit15(SRC1lo)
-  rvs2lo RVBIT15  r1 +if r0 INC then       \ + bit15(SRC2lo)
-  rvrlo  RVBIT15  r1 +if else r0 INC then  \ + NOT bit15(sum)
-  r0 DEC                            \ r0-1 > 0  <=>  count >= 2  <=>  carry
-  r0 +if rvrhi INC then ;a          \ propagate carry into the high half
-
-:a rvadd.sub                       ( callable ADD: body inline -- +if/then can't be in a :m macro )
+\ ADD: RSLT = SRC1 + SRC2. Per-half add + a low->high carry = MAJ(bit15 SRC1lo, bit15 SRC2lo,
+\ NOT bit15 sum_lo); >=2 votes -> carry, so increment the high half. VOTE+ counts a set bit15,
+\ VOTE- a clear one; 'r0 ZERO / three votes / r0 DEC / +if' fires iff at least two voted.
+:a rvadd.sub                       ( RV32I: RSLT = SRC1 + SRC2, 32-bit cross-cell carry; -> Mem[rvlink] )
   rvs1lo rvrlo MMOV  rvs2lo rvrlo ADD  rvs1hi rvrhi MMOV  rvs2hi rvrhi ADD
   r0 ZERO
-  rvs1lo RVBIT15  r1 +if r0 INC then
-  rvs2lo RVBIT15  r1 +if r0 INC then
-  rvrlo  RVBIT15  r1 +if else r0 INC then
+  rvs1lo VOTE+
+  rvs2lo VOTE+
+  rvrlo  VOTE-
   r0 DEC  r0 +if rvrhi INC then  rvlink iJMP (a);
 
 \ SUB: RSLT = SRC1 - SRC2. Per-half SUBLEQ subtract + a low->high borrow. Borrow-out of the low half
@@ -597,30 +617,19 @@ opt.rv32i [if]
 :a rvsub.sub
   rvs1lo rvrlo MMOV  rvs2lo rvrlo SUB  rvs1hi rvrhi MMOV  rvs2hi rvrhi SUB
   r0 ZERO
-  rvs1lo RVBIT15  r1 +if else r0 INC then     \ + NOT bit15(a_lo)
-  rvs2lo RVBIT15  r1 +if r0 INC then          \ + bit15(b_lo)
-  rvrlo  RVBIT15  r1 +if r0 INC then          \ + bit15(diff_lo)
+  rvs1lo VOTE-                                 \ + NOT bit15(a_lo)
+  rvs2lo VOTE+                                 \ + bit15(b_lo)
+  rvrlo  VOTE+                                 \ + bit15(diff_lo)
   r0 DEC  r0 +if rvrhi DEC then  rvlink iJMP (a);
 
-:a rvsll                           ( RV32I: RSLT = SRC1 << rvsh, logical, rvsh pre-masked to 0..31 )
-  rvs1lo rvrlo MMOV                 \ RSLT = SRC1
-  rvs1hi rvrhi MMOV
-  rvsh r0 MMOV                      \ r0 = shift count (loop counter)
-  label: rvsll.loop
-  r0 +if                           \ while count > 0, shift left by one (double both halves)
-    rvrlo RVBIT15                  \ r1 > 0 iff bit15(lo) spills into hi (capture before doubling)
-    rvrlo rvrlo ADD                \ lo <<= 1 (drops bit15)
-    rvrhi rvrhi ADD                \ hi <<= 1
-    r1 +if rvrhi INC then          \ inject the spilled bit into hi bit0
-    r0 DEC                         \ count--
-    rvsll.loop JMP
-  then ;a
-
-:a rvsll.sub                       ( callable SLL: body inline with a distinct loop label )
+\ SLL: RSLT = SRC1 << rvsh (logical, rvsh pre-masked to 0..31). Shift left by one rvsh times,
+\ doubling both halves and spilling bit15(lo) into hi bit0 (SHL1). Bits genuinely cross the two
+\ 16-bit lanes -- not a MUX win.
+:a rvsll.sub                       ( RV32I: RSLT = SRC1 << rvsh, logical; -> Mem[rvlink] )
   rvs1lo rvrlo MMOV  rvs1hi rvrhi MMOV  rvsh r0 MMOV
   label: rvsll.sub.loop
   r0 +if
-    rvrlo RVBIT15  rvrlo rvrlo ADD  rvrhi rvrhi ADD  r1 +if rvrhi INC then
+    rvrlo rvrhi SHL1
     r0 DEC  rvsll.sub.loop JMP
   then  rvlink iJMP (a);
 
@@ -636,9 +645,9 @@ opt.rv32i [if]
   rvs1lo r2 MMOV  rvs1hi r3 MMOV
   label: rvsrl.loop
   r0 +if
-    rvrlo RVBIT15  rvrlo rvrlo ADD  rvrhi rvrhi ADD  r1 +if rvrhi INC then  \ result <<= 1
+    rvrlo rvrhi SHL1                              \ result <<= 1
     r3 RVBIT15  r1 +if rvrlo INC then             \ pull bit31(SRC1) into result bit0
-    r2 RVBIT15  r2 r2 ADD  r3 r3 ADD  r1 +if r3 INC then  \ SRC1 copy <<= 1
+    r2 r3 SHL1                                    \ SRC1 copy <<= 1
     r0 DEC  rvsrl.loop JMP
   then  rvlink iJMP (a);
 
@@ -655,9 +664,9 @@ opt.rv32i [if]
   rvs1lo r2 MMOV  rvs1hi r3 MMOV
   label: rvsra.loop
   r0 +if
-    rvrlo RVBIT15  rvrlo rvrlo ADD  rvrhi rvrhi ADD  r1 +if rvrhi INC then
-    r3 RVBIT15  r1 +if rvrlo INC then
-    r2 RVBIT15  r2 r2 ADD  r3 r3 ADD  r1 +if r3 INC then
+    rvrlo rvrhi SHL1                              \ result <<= 1
+    r3 RVBIT15  r1 +if rvrlo INC then             \ pull bit31(SRC1) into result bit0
+    r2 r3 SHL1                                    \ SRC1 copy <<= 1
     r0 DEC  rvsra.loop JMP
   then
   rvneg r0 MMOV  r0 +if  rvrlo RVINV  rvrhi RVINV  then             \ if negative, result = ~result
@@ -716,13 +725,10 @@ opt.rv32i [if]
 :a rvrd  RVRD-BODY  ;a              ( RV32I: SRC1 = reg[rvidx], both halves )
 :a rvrd.sub  RVRD-BODY  rvlink iJMP (a);   ( callable read into SRC1 )
 
-:a rvrd2 RVRD2-BODY ;a              ( RV32I: SRC2 = reg[rvidx], both halves )
-:a rvrd2.sub RVRD2-BODY rvlink iJMP (a);   ( callable read into SRC2 )
+:a rvrd2.sub RVRD2-BODY rvlink iJMP (a);   ( RV32I: SRC2 = reg[rvidx], both halves; -> Mem[rvlink] )
 
-:a rvwr                            ( RV32I: reg[rvidx] = RSLT; writes to x0 are discarded )
-  RVPTR  rvidx +if  rvrlo r1 iSTORE  r1 INC  rvrhi r1 iSTORE  then ;a
-:a rvwr.sub                        ( callable write of RSLT: returns to Mem[rvlink] )
-  RVPTR  rvidx +if  rvrlo r1 iSTORE  r1 INC  rvrhi r1 iSTORE  then  rvlink iJMP (a);
+:a rvwr      RVWR-BODY ;a           ( RV32I: reg[rvidx] = RSLT; writes to x0 are discarded )
+:a rvwr.sub  RVWR-BODY rvlink iJMP (a);   ( callable write of RSLT: returns to Mem[rvlink] )
 
 \ Decode workhorse: rvrlo = (rvs1lo >> rvsh) & rvmask -- extract one instruction field. Right shift
 \ is done the SLL way in reverse: loop 16-rvsh times pulling the source's top bit down into r1, so
@@ -730,23 +736,7 @@ opt.rv32i [if]
 \ Requires rvsh in 0..15 (every RV32I field shift is a constant < 16); other values are misuse --
 \ 16-bit wraparound of 16-rvsh makes them undefined, not a guaranteed zero. Uses r3 for the bit15
 \ test, not RVBIT15, since RVBIT15 clobbers r1 (the result accumulator).
-:a rvfield                         ( RV32I: rvrlo = field of rvs1lo per rvsh/rvmask )
-  bwidth r0 MMOV                   \ r0 = 16
-  rvsh r0 SUB                      \ r0 = 16 - shift count
-  rvs1lo r2 MMOV                   \ r2 = source word, work copy
-  r1 ZERO                          \ r1 = result accumulator
-  label: rvfield.loop
-  r0 +if
-    r1 r1 ADD                      \ r1 <<= 1
-    r2 r3 MMOV  r3 zreg rvsign MUXR  r3 DEC  r3 +if r1 INC then  \ pull bit15(r2) into r1 bit0
-    r2 r2 ADD                      \ r2 <<= 1
-    r0 DEC
-    rvfield.loop JMP
-  then
-  r1 zreg rvmask MUXR              \ r1 &= rvmask
-  r1 rvrlo MMOV ;a
-
-:a rvfield.sub                     ( callable field extractor: body inline, distinct loop label )
+:a rvfield.sub                     ( RV32I: rvrlo = field of rvs1lo per rvsh/rvmask; -> Mem[rvlink] )
   bwidth r0 MMOV  rvsh r0 SUB  rvs1lo r2 MMOV  r1 ZERO
   label: rvfield.sub.loop
   r0 +if
@@ -759,7 +749,7 @@ opt.rv32i [if]
 \ rvstep: a SINGLE microcode entry that executes one RV32I ALU instruction over the register file,
 \ from a raw 32-bit word in rvil/rvih. It decodes the fields with eight rvfield.sub calls (rd, funct3,
 \ rs2, rs1 in two pieces, rvo-alt=funct7 bit5=instr bit 30, opcode, imm[11:0]), loads rs1 with rvrd,
-\ then sets SRC2 by opcode: R-type (0x33) reads reg[rs2] with rvrd2; I-type (0x13) uses the
+\ then sets SRC2 by opcode: R-type (0x33) reads reg[rs2] with rvrd2.sub; I-type (0x13) uses the
 \ sign-extended imm[11:0] (and forces rvo-alt=0 for funct3!=5, since only SRLI/SRAI use funct7). It
 \ dispatches on funct3 to the matching op '.sub', then stores the result with rvwr. The same ALU subs
 \ serve R- and I-type. LOAD (0x03) and STORE (0x23) short-circuit before the ALU dispatch: EA =
@@ -768,33 +758,35 @@ opt.rv32i [if]
 \ LB/LH/LW/LBU/LHU load with sign- or zero-extension, SB/SH/SW store (SB read-modify-writes the one
 \ byte selected by parity). Supported: R-type ADD/SUB/SLL/SLT/SLTU/XOR/SRL/SRA/OR/AND, their I-type
 \ immediates ADDI/SLLI/SLTI/SLTIU/XORI/SRLI/SRAI/ORI/ANDI, and all RV32I loads/stores. Misaligned
-\ half/word access is unsupported; other opcodes alias R-type and illegal funct7 is not rejected --
-\ callers pass legal encodings until an opcode/funct7 trap is added.
+\ half/word access is unsupported. Unknown opcodes and R-type M-extension (funct7 bit0) TRAP
+\ (rvstate=2); even-but-illegal funct7 and out-of-range shift immediates still alias -- see the
+\ encoding-trap block; real toolchains never emit those.
 :a rvstep
+  zreg rvstate MMOV                              \ clear the host-syscall signal; only ECALL sets it
   \ decode: rd = ir_lo >> 7 & 0x1F
   rvil rvs1lo MMOV  rvc7 rvsh MMOV  rv1f rvmask MMOV
   rvr7 rvlink MMOV  t' rvfield.sub JMP  label: rvd1   rvrlo rvo-rd MMOV
   \ decode: funct3 = ir_lo >> 12 & 0x7
   rvil rvs1lo MMOV  rvc12 rvsh MMOV  rvc7 rvmask MMOV
   rvr8 rvlink MMOV  t' rvfield.sub JMP  label: rvd2   rvrlo rvo-funct3 MMOV
-  \ decode: rs2 = ir_hi >> 4 & 0x1F
-  rvih rvs1lo MMOV  rvc4 rvsh MMOV  rv1f rvmask MMOV
-  rvr9 rvlink MMOV  t' rvfield.sub JMP  label: rvd3   rvrlo rvo-rs2 MMOV
-  \ decode: rs1 = (ir_hi & 0xF) << 1 | bit15(ir_lo)  (straddles the 16-bit cell boundary)
-  rvih rvs1lo MMOV  zreg rvsh MMOV  rvc15 rvmask MMOV
-  rvr10 rvlink MMOV  t' rvfield.sub JMP  label: rvd4  rvrlo rvo-rs1 MMOV
+  \ rs2 = ir_hi >> 4 & 0x1F is derived from rvo-imm below (same ir_hi>>4 field), saving a rvfield.sub.
+  \ decode: rs1 = (ir_hi & 0xF) << 1 | bit15(ir_lo)  (straddles the 16-bit cell boundary).
+  \ ir_hi & 0xF is a direct mask (shift 0 would loop rvfield.sub 16 times for a pure mask).
+  rvih rvo-rs1 MMOV  rvo-rs1 zreg rvc15 MUXR
   rvo-rs1 rvo-rs1 ADD                            \ rs1_hi << 1
   rvil rvs1lo MMOV  rvc15 rvsh MMOV  one rvmask MMOV
   rvr11 rvlink MMOV  t' rvfield.sub JMP  label: rvd5  rvrlo rvo-rs1 ADD  \ OR in bit15(ir_lo)
   \ decode: rvo-alt = funct7 bit5 = instr bit 30 = ir_hi >> 14 & 1  (ADD/SUB, SRL/SRA discriminator)
   rvih rvs1lo MMOV  rvc14 rvsh MMOV  one rvmask MMOV
   rvr15 rvlink MMOV  t' rvfield.sub JMP  label: rvd6  rvrlo rvo-alt MMOV
-  \ decode: opcode = ir_lo & 0x7F  (0x33 = R-type register-register, 0x13 = I-type immediate)
-  rvil rvs1lo MMOV  zreg rvsh MMOV  rvc7f rvmask MMOV
-  rvr20 rvlink MMOV  t' rvfield.sub JMP  label: rvd7  rvrlo rvo-op MMOV
+  \ decode: opcode = ir_lo & 0x7F  (0x33 = R-type register-register, 0x13 = I-type immediate).
+  \ Direct mask, not rvfield.sub: a shift of 0 makes rvfield.sub loop 16-0 = 16 times to reconstruct
+  \ the whole word before masking -- its single most expensive call, on the hot per-instruction path.
+  rvil rvo-op MMOV  rvo-op zreg rvc7f MUXR
   \ decode: imm[11:0] = ir_hi >> 4 & 0xFFF  (I-type immediate, sign bit = imm[11] = bit15(ir_hi))
   rvih rvs1lo MMOV  rvc4 rvsh MMOV  rvcfff rvmask MMOV
   rvr21 rvlink MMOV  t' rvfield.sub JMP  label: rvd8  rvrlo rvo-imm MMOV
+  rvo-imm rvo-rs2 MMOV  rvo-rs2 zreg rv1f MUXR  \ rs2 = imm & 0x1F (both are ir_hi >> 4)
   \ rvo-itype = (opcode == 0x13) ? 1 : 0
   zreg rvo-itype MMOV  rvo-op r0 MMOV  rvc13 r0 SUB
   r0 +if else r0 -if else  one rvo-itype MMOV  then then
@@ -810,6 +802,9 @@ opt.rv32i [if]
   zreg rvo-uop MMOV
   rvo-op r0 MMOV  rvc55 r0 SUB  r0 +if else r0 -if else  one rvo-uop MMOV  then then
   rvo-op r0 MMOV  rvc23 r0 SUB  r0 +if else r0 -if else  one rvo-uop MMOV  then then
+  \ rvo-ctrl = (opcode == 0x63 BRANCH || rvo-jmp) ? 1 : 0  -- the runner leaves RVPC alone when set
+  rvo-jmp rvo-ctrl MMOV
+  rvo-op r0 MMOV  rvc99 r0 SUB  r0 +if else r0 -if else  one rvo-ctrl MMOV  then then
   \ execute
   rvo-rs1 rvidx MMOV
   rvr1 rvlink MMOV  t' rvrd.sub  JMP  label: rvs1p   \ SRC1 = reg[rs1]
@@ -994,6 +989,31 @@ opt.rv32i [if]
     rvr40 rvlink MMOV  t' rvwr.sub JMP  label: rvu2
     vm JMP
   then
+  \ ECALL (the exact encoding 0x00000073: ir_lo==0x0073 AND ir_hi==0 -- this excludes ebreak 0x0010....
+  \ and the CSR ops, which share opcode 0x73 but differ in ir_hi/funct3). The ISA only signals the host
+  \ via rvstate; the runner reads a7 and emulates the syscall (write/exit). No reg write, no RVPC change.
+  rvil r0 MMOV  rvc115 r0 SUB
+  r0 +if else r0 -if else
+    rvih r0 MMOV
+    r0 +if else r0 -if else
+      one rvstate MMOV
+      vm JMP
+    then then
+  then then
+  \ ENCODING TRAP: only R-type (0x33) and I-type (0x13) reach here (every other base opcode was
+  \ short-circuited above). Trap (rvstate=2, host stops): (a) any UNKNOWN opcode -- FENCE 0x0F,
+  \ atomics 0x2F, custom -- and (b) R-type M-extension, funct7 bit0 = instr bit25 = ir_hi bit9 (MUL/
+  \ DIV/REM), which would otherwise alias a base ALU op. NOT a full RV32I validator: even-but-illegal
+  \ R-type funct7 (e.g. 0x02) and out-of-range shift immediates still alias -- real toolchains never
+  \ emit those, and M-extension is the encoding real compiled programs actually reach. rvtmp = legal.
+  zreg rvtmp MMOV
+  rvo-op r0 MMOV  rvc51 r0 SUB  r0 +if else r0 -if else  one rvtmp MMOV  then then
+  rvo-op r0 MMOV  rvc13 r0 SUB  r0 +if else r0 -if else  one rvtmp MMOV  then then
+  rvtmp r0 MMOV  r0 +if else r0 -if else  rvc2 rvstate MMOV  vm JMP  then then
+  rvo-op r0 MMOV  rvc51 r0 SUB
+  r0 +if else r0 -if else
+    rvih r0 MMOV  r0 zreg rvc512 MUXR  r0 +if  rvc2 rvstate MMOV  vm JMP  then
+  then then
   \ SRC2: I-type -> sign-extended immediate; R-type -> reg[rs2]
   rvo-itype r0 MMOV  r0 +if
     rvo-imm rvs2lo MMOV                          \ SRC2 low = imm[11:0]
@@ -1060,9 +1080,9 @@ opt.rv32i [if]
   rvo-rd rvidx MMOV                              \ rvidx = rd
   rvr6 rvlink MMOV  t' rvwr.sub  JMP  label: rvs6p   \ reg[rd] = RSLT
   ;a
-rvd1 half rvr7 t!  rvd2 half rvr8 t!  rvd3 half rvr9 t!   ( plant decode return addresses )
-rvd4 half rvr10 t!  rvd5 half rvr11 t!  rvd6 half rvr15 t!
-rvd7 half rvr20 t!  rvd8 half rvr21 t!
+rvd1 half rvr7 t!  rvd2 half rvr8 t!   ( plant decode return addresses; rvd3/rvr9 dropped: rs2 from imm )
+rvd5 half rvr11 t!  rvd6 half rvr15 t!  ( rvd4/rvr10 dropped: rs1-low now uses a direct mask )
+rvd8 half rvr21 t!  ( rvd7/rvr20 dropped: opcode now uses a direct mask, no rvfield.sub return slot )
 rvs1p half rvr1 t!  rvs2p half rvr2 t!  rvs3p half rvr3 t!   ( plant execute return addresses )
 rvs4p half rvr4 t!  rvs5p half rvr5 t!  rvs6p half rvr6 t!
 rvs12p half rvr12 t!  rvs13p half rvr13 t!  rvs14p half rvr14 t!
@@ -1310,17 +1330,15 @@ system[
 : cells 2* ;                       ( u -- u : multiply # of cells to get bytes )
 : th cells + ;                     ( a n -- a' : address of the n-th cell of array a )
 opt.rv32i [if]
-:to rvand rvand ;                  ( -- : run the RV32I 32-bit AND microcode )
-:to rvadd rvadd ;                  ( -- : run the RV32I 32-bit ADD microcode )
-:to rvsll rvsll ;                  ( -- : run the RV32I 32-bit SLL microcode )
 :to rvrd rvrd ;                    ( -- : SRC1 = reg[rvidx] )
-:to rvrd2 rvrd2 ;                  ( -- : SRC2 = reg[rvidx] )
 :to rvwr rvwr ;                    ( -- : reg[rvidx] = RSLT, x0 discarded )
-:to rvfield rvfield ;              ( -- : extract one instruction field )
 :to rvstep rvstep ;                ( -- : decode+execute one R-type word from rv-il/rv-ih )
 rvil constant rv-il                ( -- a : instruction word low half )
 rvih constant rv-ih                ( -- a : instruction word high half )
 rvpclo constant rv-pclo  rvpchi constant rv-pchi   ( -- a : RVPC byte-address low/high halves )
+rvo-ctrl constant rv-ctrl          ( -- a : 1 if the last-decoded op set RVPC itself, else 0 )
+rvstate constant rv-state          ( -- a : 1 if the last op was an ecall the host must service, else 0 )
+rvram constant rv-ram              ( -- a : guest-RAM base; cell i is at rv-ram 2* i * + )
 rvo-rd  constant rv-rd             ( -- a : decoded rd, for the harness to read the result )
 rvsh constant rv-sh                ( -- a : SLL shift amount cell )
 rvidx constant rv-idx              ( -- a : register index cell )
@@ -1424,7 +1442,7 @@ system[ user tup =cell tallot ]system
 
 : abort #-1 throw ;                ( -- : abort execution )
 :s (abort) do$ swap if count type abort then drop ;s ( n -- )
-: depth [ {sp0} ] literal @ sp@ - 1- ;  ( -- n : stack depth; forth vocab for ceForth conformance )
+: depth [ {sp0} ] literal @ sp@ - 1- ;  ( -- n : stack depth; promoted to the forth vocab )
 :s ?depth depth >= [ -$4 ] literal and throw ;s ( ??? n -- )
 
 \ Double-Precision Arithmetic
@@ -2305,6 +2323,41 @@ opt.glossary [if]
 :s (w) begin ?dup while display @ repeat ;s ( voc -- )
 :s .voc dup  ." voc: " . cr ;s     ( voc -- voc )
 : glossary get-order for aft .voc @ (w) then next ; ( -- )
+[then]
+
+opt.rv32i [if]
+\ Built-in RV32I loader + runner. Loads a flat RV32I image (the raw bytes objcopy -O binary
+\ produces, or any stream of instruction words) into guest RAM and runs it from entry 0 through
+\ the single-entry rvstep microcode, servicing ecall write(a7=64)/exit(a7=93) itself. This makes a
+\ prebuilt binary runnable directly, with no host-side conversion:
+\   objcopy -O binary prog.elf prog.bin
+\   { printf '%d rvboot\n' "$(wc -c < prog.bin)"; cat prog.bin; } | ./muxleq
+variable rvhalt  variable rvhpc  variable rvwp  variable rvwn  ( runner state )
+: rvg@ ( c -- v )  2* rv-ram + @ ;                 ( read guest cell c )
+: rvg! ( v c -- )  2* rv-ram + ! ;                 ( write guest cell c )
+: rvgbyte ( ba -- b )  dup #1 and swap 2/ rvg@ swap if [ 8 ] literal rshift then [ FF ] literal and ;
+: rvget ( idx -- lo )  rv-idx ! rvrd rv-s1lo @ ;   ( read reg[idx] low half )
+: rvput ( val idx -- )  rv-idx ! rv-rlo ! #0 rv-rhi ! rvwr ;   ( reg[idx] = val )
+\ write(a0=fd ignored, a1=buf, a2=len): emit len guest bytes to stdout, return len in a0
+: rvwrite  [ 0B ] literal rvget rvwp !  [ 0C ] literal rvget rvwn !  rvwn @ [ 0A ] literal rvput
+   begin rvwn @ while  rvwp @ rvgbyte emit  rvwp @ 1+ rvwp !  rvwn @ 1- rvwn !  repeat ;
+: rvsyscall  [ 11 ] literal rvget                        ( a7 )
+   dup [ 40 ] literal = if  drop rvwrite  exit then      ( write )
+       [ 5D ] literal = if  #-1 rvhalt !  exit then      ( exit: halt silently )
+   ." unsupported syscall " [ 11 ] literal rvget u. cr  #-1 rvhalt ! ;
+: rvfetch  rv-pclo @ 2/  dup rvg@ rv-il !  1+ rvg@ rv-ih ! ;
+: rvadv  rv-ctrl @ 0= if  rv-pclo @ [ 4 ] literal + rv-pclo !  then ; ( branches/jumps set RVPC )
+: rvrunning  rvhalt @ #0 =  rv-pclo @ rvhpc @ <>  and ;
+: rvrun ( haltpc -- )  rvhpc !  #0 rv-pclo ! #0 rv-pchi ! #0 rvhalt !
+   [ 8000 ] literal #2 rvput                             ( sp x2 = 0x8000, top of 32 KiB guest RAM )
+   begin rvrunning while  rvfetch rvstep
+     rv-state @ #1 = if rvsyscall then
+     rv-state @ #1 > if ." illegal instruction at " rv-pclo @ u. cr  #-1 rvhalt ! then
+     rvadv  repeat ;
+variable rvlp                      ( -- a : guest-cell load pointer, in cells )
+: rvorg  #0 rvlp ! ;               ( -- : reset the load pointer to guest cell 0 )
+: rvcell, ( c -- )  rvlp @ [ 3FFF ] literal and rvg!  rvlp @ 1+ rvlp ! ; ( append a cell, masked to guest RAM )
+: rvboot  [ FFFF ] literal rvrun ; ( -- : run the loaded image from entry 0 until exit/trap )
 [then]
 
 \ System Finalization

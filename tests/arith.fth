@@ -23,4 +23,16 @@
 : div0 1 0 / ;
 ' div0 catch . cr       \ -10
 
+\ shifts are LOGICAL, not arithmetic: rshift zero-fills the vacated high bits,
+\ so 2/ (= 1 rshift) does NOT sign-extend. -2 2/ is 32767, not -1 -- a gotcha a
+\ threading/fusion rewrite could silently break. No golden pinned this before.
+$8000 1 rshift . cr     \ 16384  (0x4000: logical zero-fill, not 0xC000)
+$C000 2 rshift . cr     \ 12288  (0x3000)
+-2 2/ . cr              \ 32767  (0xFFFE>>1 logical; NOT -1 -- 2/ is not arithmetic)
+1 15 lshift . cr        \ -32768 (0x8000: high bit set, printed signed)
+
+\ compile-time numeric conversion: [ ... ] evaluates now, literal plants the result
+: five [ 2 3 + ] literal ;
+five . cr               \ 5
+
 bye

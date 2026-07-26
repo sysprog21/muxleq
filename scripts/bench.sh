@@ -12,8 +12,8 @@ HOST=${BENCH_HOST:-node1}
 TIME=${TIME:-5000}
 REPS=${REPS:-5}
 
-case $TIME in '' | *[!0-9]*) echo "bench: TIME must be an integer" >&2; exit 1 ;; esac
-case $REPS in '' | *[!0-9]*) echo "bench: REPS must be an integer" >&2; exit 1 ;; esac
+case $TIME in '' | *[!0-9]* | 0) echo "bench: TIME must be a positive integer" >&2; exit 1 ;; esac
+case $REPS in '' | *[!0-9]* | 0) echo "bench: REPS must be a positive integer" >&2; exit 1 ;; esac
 
 files="muxleq.c stage0.c muxleq.fth tests/chacha20.fth scripts/bench-remote.sh"
 for f in $files; do

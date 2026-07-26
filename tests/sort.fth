@@ -2,7 +2,7 @@
 \ data-manipulation shape from the read-only/marking demos. Sorts a fixed array
 \ and prints it before and after. Uses 'for'/'next' for the outer passes and a
 \ single 'do'/'loop' inner scan to avoid the fragile nested-'do/loop' 'j i'
-\ pattern. Deterministic; a golden test. (The Bubble Sort benchmark from §5.)
+\ pattern. Deterministic; a golden test. (A Bubble Sort benchmark.)
 create arr  5 , 2 , 8 , 1 , 9 , 3 , 7 , 4 , 6 , 0 ,
 10 constant N
 variable tmp

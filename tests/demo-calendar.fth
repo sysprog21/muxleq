@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/11_calendar.fs -- monthly calendar (Zeller-style
+\ Conformance demo: monthly calendar (Zeller-style
 \ day-of-week). demo adapted: none. Renders May 2024 (May 1 2024 = Wednesday).
 .( example 11.  calendars - print weekly calendars for any month in any year. )
 decimal

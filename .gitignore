@@ -4,6 +4,10 @@ build/
 *.a
 *.dll
 *.so
-# editor swap files and clang static-analyzer output
+# generated RV32I test binaries: built from source into build/ or in place by
+# the sub-Makefiles, and published by CI as build artifacts, never committed
+*.elf
+*.bin
+# editor swap files and clang static-analyzer output (see "make sanitize" / static-analysis workflow)
 *.sw?
 *.plist

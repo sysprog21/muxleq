@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -86,13 +87,23 @@ static int dispatch(uint16_t pc,
                     uint16_t addr_b,
                     uint16_t addr_c);
 
-/* Fetch the next instruction's operands and tail-call dispatch. */
-#define FETCH_AND_DISPATCH(next_pc)                        \
-    do {                                                   \
-        const uint16_t __a = m[(next_pc) + A];             \
-        const uint16_t __b = m[(next_pc) + B];             \
-        const uint16_t __c = m[(next_pc) + C];             \
-        MUST_TAIL return dispatch(next_pc, __a, __b, __c); \
+/* Fetch the next instruction's operands and tail-call dispatch. A negative
+ * next_pc is the MUXLEQ halt / negative-branch marker (e.g. a 0xFFFF exit
+ * target); check it here and halt BEFORE the loads, so the halt does not read
+ * m[] out of bounds (m[next_pc + A..C] with next_pc >= 0x8000 is past the
+ * 32768-cell array). dispatch() also halts on a negative pc by returning 0, and
+ * it discards the fetched operands in that case, so returning 0 here is
+ * byte-for-byte identical behavior without the OOB read.
+ */
+#define FETCH_AND_DISPATCH(next_pc)                 \
+    do {                                            \
+        const uint16_t fpc = (next_pc);             \
+        if (UNLIKELY((fpc & NEGATIVE_FLAG) != 0))   \
+            return 0;                               \
+        const uint16_t fa = m[fpc + A];             \
+        const uint16_t fb = m[fpc + B];             \
+        const uint16_t fc = m[fpc + C];             \
+        MUST_TAIL return dispatch(fpc, fa, fb, fc); \
     } while (0)
 
 /* A move is a MUX whose mask is zero (address 6 is hardwired 0). */
@@ -109,12 +120,20 @@ static bool is_subleq_instruction(uint16_t a, uint16_t b, uint16_t c)
     return classify(a, b, c) == OP_SUBLEQ;
 }
 
+/* Optional prefix input fed before real stdin: -r synthesizes an RV32I loader
+ * here.
+ */
+static const char *prefix_in = NULL;
+static size_t prefix_len = 0, prefix_pos = 0;
+
 static int get(uint16_t pc,
                UNUSED uint16_t addr_a,
                uint16_t addr_b,
                UNUSED uint16_t addr_c)
 {
-    const int input = getchar();
+    const int input = prefix_pos < prefix_len
+                          ? (unsigned char) prefix_in[prefix_pos++]
+                          : getchar();
     if (UNLIKELY(input == EOF))
         return 0; /* Halt on End-of-File. */
 
@@ -154,9 +173,9 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
 
     /* Look ahead for fusion opportunities after a move */
     const uint16_t next_pc = pc + INSN_SIZE;
-    if (UNLIKELY((next_pc & NEGATIVE_FLAG) != 0)) {
-        FETCH_AND_DISPATCH(next_pc);
-    }
+    if (UNLIKELY((next_pc & NEGATIVE_FLAG) !=
+                 0)) /* PC went negative: halt (as dispatch would) */
+        return 0;
 
     const uint16_t next_a = m[next_pc + A];
     const uint16_t next_b = m[next_pc + B];
@@ -238,8 +257,9 @@ static int subleq(uint16_t pc,
     } else {
         /* No branch - look for fusion opportunities */
         const uint16_t next_pc = pc + INSN_SIZE;
-        if (UNLIKELY((next_pc & NEGATIVE_FLAG) != 0))
-            FETCH_AND_DISPATCH(next_pc);
+        if (UNLIKELY((next_pc & NEGATIVE_FLAG) !=
+                     0)) /* PC went negative: halt (as dispatch would) */
+            return 0;
 
         const uint16_t next_a = m[next_pc + A];
         const uint16_t next_b = m[next_pc + B];
@@ -361,6 +381,165 @@ static void report_profile(void)
     }
 }
 
+/* Guest RAM window in bytes. Must match rvrammask in muxleq.fth: mask $3FFF =>
+ * 16384 cells => 32768 bytes. Guest RAM is a fixed high window in the image's
+ * memory (not baked into the image), so loads past it are rejected. This size
+ * is coupled to four call sites: rvrammask + rvcell,'s mask + rvrun's initial
+ * guest sp in muxleq.fth, and here; they must move together.
+ */
+#define RV_RAM_BYTES 32768
+
+static uint32_t rd32(const unsigned char *p)
+{
+    return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t) p[3] << 24;
+}
+static uint16_t rd16(const unsigned char *p)
+{
+    return (uint16_t) (p[0] | p[1] << 8);
+}
+
+/* -r FILE: run an RV32I program directly. FILE may be an ELF32 executable (its
+ * PT_LOAD segments are flattened into the guest image at their virtual
+ * addresses) or a flat binary (objcopy -O binary output), used as-is. The bytes
+ * are then handed to the built-in runner by synthesizing its loader input --
+ * hex 'rvcell,' calls (parsed cleanly as numbers, so no raw-byte/REPL desync)
+ * followed by 'rvboot', served via the input prefix above. So `./muxleq -r
+ * prog.elf` (or prog.bin) needs no host-side conversion.
+ */
+static void load_rv32i(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "muxleq: cannot open '%s'\n", path);
+        exit(1);
+    }
+    unsigned char *bin = NULL;
+    size_t cap = 0, n = 0;
+    for (int c; (c = fgetc(f)) != EOF;) {
+        if (n == cap) {
+            unsigned char *grown = realloc(bin, cap = cap ? cap * 2 : 256);
+            if (!grown) {
+                free(bin);
+                fclose(f);
+                fprintf(stderr, "muxleq: out of memory\n");
+                exit(1);
+            }
+            bin = grown;
+        }
+        bin[n++] = (unsigned char) c;
+    }
+    fclose(f);
+
+    /* An ELF32 LE executable: flatten its PT_LOAD segments into a guest image
+     * at their virtual addresses (bss beyond filesz stays zero). The runner
+     * starts at guest 0, so the entry point must be 0. Anything else is treated
+     * as a flat binary. Everything below parses UNTRUSTED bytes, so every
+     * header field is bounds-checked against the file size before use.
+     */
+    if (n >= 52 && bin[0] == 0x7f && bin[1] == 'E' && bin[2] == 'L' &&
+        bin[3] == 'F') {
+        if (bin[4] != 1 || bin[5] != 1) { /* ELFCLASS32, ELFDATA2LSB */
+            fprintf(stderr, "muxleq: '%s' is not a little-endian 32-bit ELF\n",
+                    path);
+            free(bin);
+            exit(1);
+        }
+        const uint32_t entry = rd32(bin + 24), phoff = rd32(bin + 28);
+        const uint16_t phentsize = rd16(bin + 42), phnum = rd16(bin + 44);
+
+        /* Require a well-formed program-header table that fits entirely in the
+         * file: each entry is
+         * >= 32 bytes (an ELF32 phdr) and the whole table lies within n.
+         * Written with subtraction and division so it cannot overflow. This
+         * makes every rd32(ph + k), k <= 20, in-bounds.
+         */
+        if (phentsize < 32 || phoff > n || phnum > (n - phoff) / phentsize) {
+            fprintf(stderr,
+                    "muxleq: '%s' has a malformed ELF program-header table\n",
+                    path);
+            free(bin);
+            exit(1);
+        }
+        unsigned char *img = calloc(RV_RAM_BYTES, 1);
+        if (!img) {
+            fprintf(stderr, "muxleq: out of memory\n");
+            free(bin);
+            exit(1);
+        }
+        size_t used = 0;
+        for (uint16_t i = 0; i < phnum; i++) {
+            const unsigned char *ph = bin + phoff + (size_t) i * phentsize;
+            if (rd32(ph) != 1) /* PT_LOAD */
+                continue;
+            const uint32_t off = rd32(ph + 4), vaddr = rd32(ph + 8);
+            const uint32_t filesz = rd32(ph + 16), memsz = rd32(ph + 20);
+            if (memsz < filesz || (uint64_t) vaddr + memsz > RV_RAM_BYTES ||
+                (uint64_t) off + filesz > n) {
+                fprintf(stderr,
+                        "muxleq: '%s' does not fit: a PT_LOAD segment maps %u "
+                        "bytes at guest "
+                        "address 0x%X, past the %d-byte guest RAM. '-r' runs "
+                        "freestanding RV32I "
+                        "programs (entry 0, <=%d bytes, write/exit ecalls "
+                        "only), not libc binaries "
+                        "linked high (e.g. at 0x10000).\n",
+                        path, (unsigned) memsz, (unsigned) vaddr, RV_RAM_BYTES,
+                        RV_RAM_BYTES);
+                free(bin);
+                free(img);
+                exit(1);
+            }
+            memcpy(img + vaddr, bin + off, filesz);
+            if (vaddr + memsz > used)
+                used = vaddr + memsz;
+        }
+        if (entry != 0) {
+            fprintf(stderr, "muxleq: '%s' entry 0x%X unsupported; must be 0\n",
+                    path, (unsigned) entry);
+            free(bin);
+            free(img);
+            exit(1);
+        }
+        free(bin);
+        bin = img;
+        n = used;
+    } else if (n > RV_RAM_BYTES) {
+        /* Flat binary: a larger image would overwrite the Forth image beyond
+         * the guest window.
+         */
+        fprintf(stderr, "muxleq: '%s' is %zu bytes; guest RAM holds only %d\n",
+                path, n, RV_RAM_BYTES);
+        free(bin);
+        exit(1);
+    }
+
+    const size_t cells = (n + 1) / 2;
+    char *buf =
+        malloc(cells * 14 + 64); /* "FFFF rvcell, " (13) per cell + framing */
+    if (!buf) {
+        fprintf(stderr, "muxleq: out of memory\n");
+        exit(1);
+    }
+
+    /* '' ) <ok> !' silences the REPL " ok" prompt so only the guest's output
+     * shows; the trailing 'bye' (below) halts the VM once the guest exits, so
+     * '-r' runs the program and quits instead of dropping into the interactive
+     * REPL and blocking on stdin.
+     */
+    size_t p = (size_t) sprintf(buf, "' ) <ok> ! hex rvorg\n");
+    for (size_t i = 0; i < cells; i++) {
+        const unsigned lo = bin[2 * i];
+        const unsigned hi = 2 * i + 1 < n ? bin[2 * i + 1] : 0;
+        p += (size_t) sprintf(buf + p, "%X rvcell, ", lo | hi << 8);
+        if ((i & 7) == 7) /* keep lines under the input-buffer limit */
+            buf[p++] = '\n';
+    }
+    p += (size_t) sprintf(buf + p, "\nrvboot bye\n");
+    free(bin);
+    prefix_in = buf;
+    prefix_len = p;
+}
+
 int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
@@ -368,6 +547,8 @@ int main(int argc, char **argv)
             prof_stats = true;
         else if (!strcmp(argv[i], "-p"))
             prof_heat = true;
+        else if (!strcmp(argv[i], "-r") && i + 1 < argc)
+            load_rv32i(argv[++i]);
         else
             fprintf(stderr, "muxleq: ignoring unknown argument '%s'\n",
                     argv[i]);

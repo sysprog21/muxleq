@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/8_temperature.fs -- F<->C conversion. demo adapted: none.
+\ Conformance demo: F<->C conversion. demo adapted: none.
 .( example 8. temperature conversion )
 
 variable t8

@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/2_f.fs -- the big F (ascii art).
+\ Conformance demo: the big F (ascii art).
 \ Uses only .(  variable  :  cr  ." ; no compatibility alias needed.
 .( example 2. the big f )
 

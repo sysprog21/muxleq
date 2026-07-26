@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/1_hello.fs -- the universal greeting.
+\ Conformance demo: the universal greeting.
 \ Uses only words muxleq already has (.(  :  cr  ." ); no compatibility alias needed.
 .( example 1. the universal greeting )
 

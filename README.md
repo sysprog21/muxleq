@@ -21,11 +21,16 @@ MUXLEQ is a two-instruction esoteric programming language,
 extending the classic `SUBLEQ` with a multiplexing operation for enhanced performance and reduced program size.
 This project provides a complete, self-hosting development environment for it.
 
+On top of that foundation it also hosts an RV32I ISA simulator: a RISC-V base-integer interpreter,
+assembled by the eForth image itself, that runs real RV32I programs on the two-instruction machine
+(`./muxleq -r`) -- a full RISC-V base ISA riding on a two-instruction OISC.
+
 ## Introduction
 This repository contains a full toolchain for the MUXLEQ architecture, including:
 1. An assembler for the MUXLEQ instruction set.
 2. A virtual machine built upon the assembler.
 3. A cross-compiler that targets the VM with a version of the eForth programming language.
+4. An RV32I ISA simulator on top of MUXLEQ -- a RISC-V base-integer interpreter assembled into the eForth image, running RV32I programs via `./muxleq -r`.
 
 The system is self-hosted, meaning the eForth environment can compile new versions of itself from source,
 allowing for seamless modification and extension.
@@ -72,9 +77,13 @@ Once defined, the word `hello` can be executed by typing its name.
   time and a deterministic instruction count.
 - `./muxleq -s` and `./muxleq -p` -- the built-in profiler: instruction mix and a per-PC heat
   map. Default runs (no flags) are byte-identical, so the gates are unaffected.
+- `./muxleq -r prog` -- run an RV32I program (an ELF32 executable or a flat `objcopy` binary) on
+  the RV32I microcode interpreter that the image itself assembles -- a RISC-V ISA hosted on the
+  16-bit OISC. `make verify-rv32i` checks it against an independent reference model. See the
+  manual's RV32I section.
 - [`docs/manual.md`](docs/manual.md) -- reference manual: the instruction set, memory image and
-  self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, and the eForth
-  environment.
+  self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, the eForth
+  environment, and the RV32I microcode runner.
 
 ## MUXLEQ Architecture
 The MUXLEQ architecture extends the classic SUBLEQ OISC with a second instruction to improve performance without significantly increasing implementation complexity.

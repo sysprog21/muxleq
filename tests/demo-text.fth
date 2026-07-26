@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/5_text.fs -- cumulative text ("theory jack built").
+\ Conformance demo: cumulative text ("theory jack built").
 \ demo adapted: none. It redefines 'this'/'k' (muxleq built-ins) on purpose; the "redefined"
 \ warnings are muxleq-specific but deterministic, and each golden runs in a fresh VM.
 .( example 5. text display - the theory that jack built )

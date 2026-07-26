@@ -2,7 +2,7 @@
 \ (system vocab), which tasker.fth does not cover. A producer task sends three
 \ values to a consumer task; the consumer prints each as it arrives. Deterministic
 \ because scheduling is cooperative: tasks yield only at 'pause', round-robin.
-\ Pattern mirrors externals/book/extra/multi.fth (the receiver must NOT toggle
+\ Cooperative send/receive between two tasks (the receiver must NOT toggle
 \ multi/single itself -- the main task owns that; a nested single deadlocks it).
 system +order
 task: rx

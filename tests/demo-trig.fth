@@ -1,4 +1,4 @@
-\ Ported from externals/eforth/tests/demo/12_trig.fs -- fixed-point sine/cosine.
+\ Conformance demo: fixed-point sine/cosine.
 \ Conformance driver for */ (added to muxleq.fth for this): each term uses '10k */'
 \ and 'pi 180 */'. Values are scaled by 10000 (sin 90 = 10000, sin 45 = 7070).
 .( example 12. sines and cosines )

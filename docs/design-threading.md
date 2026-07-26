@@ -1,12 +1,12 @@
-# Design note: eForth threading optimization (INLINE / STC) -- §5 Phase 2
+# Design note: eForth threading optimization (INLINE / STC)
 
-This is the entry-gate design note for the one remaining perf lever (see TODO §2/§5). It is a
+This is the entry-gate design note for the one remaining perf lever. It is a
 feasibility analysis, not an implementation spec -- enough to decide go/no-go and to know where
 the real difficulty is before committing to a meta-compiler rewrite.
 
 ## The target
 
-Measured (TODO §2, DONE.md): the inner-interpreter NEXT loop is ~39% of all executed MUXLEQ
+Measured: the inner-interpreter NEXT loop is ~39% of all executed MUXLEQ
 instructions on the self-host. NEXT is indirect-threaded: `r0 ip iLOAD` (= `m[m[ip]]`), then a
 primitive/colon check, then either `iJMP` to the primitive or push-IP/set-IP for a colon word
 (muxleq.fth:368-377). Every executed word pays ~6 MUXLEQ instructions of this overhead. The
@@ -41,10 +41,27 @@ Consequence: code built by the metacompiler -- which includes the ENTIRE self-ho
 inlines primitives via the macros. So the measured ~39% NEXT overhead on the self-host will NOT
 move from wrapper work; that figure is the irreducible cost of dispatching the primitive stream.
 The wrapper round-trip is paid only by code compiled at VM runtime (apps, REPL) -- e.g.
-`tests/chacha20.fth`. Profiled: chacha20 runs 400M fused dispatches, ~50M NEXT iterations, of
-which ~14M are colon-word entries (`-p` heat map, PCs 164/173/179 vs the colon-enter tail). The
-elidable share is the subset of those 14M that are leaf wrapper calls. So this optimization is an
-APP speedup, not a self-host/headline speedup -- bench it on chacha20, not the self-host.
+`tests/chacha20.fth`. So this optimization is an APP speedup, not a self-host/headline speedup --
+bench it on chacha20, not the self-host.
+
+UPSIDE BOUND (measured 2026-07-19, `-s`/`-p` on the shipped build). chacha20 = 431.6M dispatches;
+the NEXT/iLOAD machinery (top-4 hot PCs 744/729/738/750) ≈ 200M = 46%; `opExit` (cell 873) runs
+11.77M times = the total colon-word RETURN count. Wrapper-elision removes ~2 NEXT iterations per
+elided leaf-wrapper call (the note's "3 NEXT cycles → 1"). Elidable calls are the leaf
+single-primitive-wrapper subset of those 11.77M returns -- and that subset is NOT measurable from
+the PC heat map, because the OISC substrate is oblivious to eForth's threading structure (wrapper
+bodies are `iLOAD`-read DATA, not executed PCs). So the honest figure is a BOUND, not a point:
+the absolute ceiling (if EVERY colon call were a leaf wrapper) is 2 × 11.77M ≈ 23.5M fewer NEXT
+iterations, i.e. ~44% of the ~53.8M NEXT iterations; using the top-4 NEXT PCs (~200M) as the
+dispatch-cost proxy, that is ~87M fewer dispatched MUXLEQ instructions, or ~20% of the 431.6M
+dispatches -- but chacha20 is compound-word-heavy
+(its own crypto routines), so the realized figure is materially lower and app-specific. Pinning it
+exactly needs eForth-aware instrumentation (a throwaway counter in the colon-enter path that tests
+`body == [prim<boundary][opExit]`), which the substrate can't cheaply provide. NET for the go/no-go:
+the ceiling is real and non-trivial for wrapper-heavy runtime-compiled code (up to ~1/5 of
+dispatches), but it is APP-ONLY (self-host unaffected) and unproven below that loose ceiling -- so
+the decision stays a risk-appetite call (a bounded app-compile win vs. editing the hottest compile
+path), not an obvious yes.
 
 ### Variant 1 (cheap, low-risk): wrapper-elision at runtime `compile,`
 
@@ -66,21 +83,31 @@ RAM, not in the dumped target image, and the elision is semantically identical (
 effect, one fewer indirection). So `make bootstrap` should stay byte-exact -- but this MUST be
 verified empirically, not asserted from the path being unreached.
 
-CONSTANTS pinned for the implementation (from the metacompiler, 2026-07-18): `=unnest` (the
-`opExit` reference that marks the alias tail) = 134; the `primitive` boundary = 308 (a ref `< 308`
-is a primitive, `≥ 308` a colon word). Both are available at compile time as
-`[ t' opExit half ] literal` and `[ primitive t@ ] literal`. These are HALVED token values --
-compare them against the halved body cells `m[xt/2]`/`m[xt/2+1]`; if you ever compare doubled
-code addresses instead, double the boundary too.
+CONSTANTS -- use the LIVE compile-time expressions, never hardcode. The alias tail is
+`[ t' opExit half ] literal` (the `opExit`/`=unnest` reference) and the boundary is
+`[ primitive t@ ] literal` (a ref `<` boundary is a primitive, `≥` a colon word). Both are HALVED
+token values -- compare them against the halved body cells `m[xt/2]`/`m[xt/2+1]`; if you ever
+compare doubled code addresses instead, double the boundary too. WARNING: do NOT bake the numeric
+values. The boundary is `there 2/` captured after the assembler-layer primitives (muxleq.fth:1120),
+so it shifts as earlier-emitted image content grows; `opExit`'s ref shifts too if anything before it
+moves. An earlier draft pinned `=unnest`=134 / boundary=308 from the ~6555-cell image (2026-07-18);
+those are now stale -- the `opExit` tail currently reads 873 and the boundary sits above ~1029.
+Whether `opExit`'s own address drifted or 134 was mis-captured, the lesson is identical: use the
+live compile-time expressions, never a hardcoded number. That stale mismatch is exactly what made
+the naive reconciliation "impossible" (see RESOLVED below).
 
-OPEN BLOCKER (why this is not yet implemented): the exact runtime cell representation
-(xt → `2/` ref → body cells → boundary comparison) did not reconcile across REPL/`stage0.dec`
-probes -- e.g. a wrapper body-cell read as 464 while the boundary is 308, which should be
-impossible for a primitive-wrapper's first cell. `compile,` is the hottest compile path; a wrong
-model there is silent miscompilation. The concrete first implementation step is to nail this
-representation with authoritative instrumentation (the metacompiler's `to'` for target-only
-words, or a VM-side `dump` of a known wrapper's cells) BEFORE touching `compile,`. Do not code
-against the probe reads above until they reconcile.
+RESOLVED (2026-07-19, empirical): the representation is nailed and the model is confirmed. The
+public wrapper `dup`/`drop`/`swap`/`+` bodies ARE `[primitive-ref][opExit-ref]` -- measured runtime
+cells: dup `[786,873]`, drop `[828,873]`, swap `[768,873]`, + `[1029,873]`. cell1 is IDENTICALLY 873
+(the shared `opExit` tail) and cell0 varies per word (the primitive), each `<` the current boundary.
+The earlier "464 vs 308 impossible" alarm was purely the stale-constant drift above -- the model was
+never wrong, the pinned numbers were. The elision test is therefore exactly the VM's own primitive
+check that `see` already implements at `muxleq.fth:1886` (`cell < [ primitive ] @ → VM primitive`),
+PLUS `cell1 == [ t' opExit half ]`. Verified it discriminates correctly: `see +` → `VM 2058`
+(one-primitive wrapper, matches), while `see 2dup` → `over over` and `see negate` → `1- invert`
+(multi-op colon words: cell0 ≥ boundary, and even a `[prim][prim]` word has cell1 ≠ opExit, so both
+are correctly EXCLUDED). Net: step 1 of the bounded prototype is done -- the "we don't understand the
+cell layout" blocker is gone; only the `compile,` edit itself (step 2, gated) remains.
 
 ### Variant 2 (expensive): copy a multi-instruction primitive body inline
 
@@ -126,12 +153,11 @@ INLINE first; revisit STC only if INLINE measurements justify it.
 
 Do Variant 1 (wrapper-elision), not Variant 2. Concrete steps, in order:
 
-1. NAIL THE REPRESENTATION FIRST (the open blocker). Instrument the metacompiler (`to'` for the
-   target-only wrapper words) or add a throwaway VM-side `dump` to print, for `dup`/`drop`/`+`:
-   the runtime xt, `xt 2/`, `m[xt/2]`, `m[xt/2+1]`, and confirm each equals `[primitive-ref][134]`
-   with the primitive-ref `< 308`. Do not proceed until these reconcile -- the REPL/`stage0.dec`
-   reads in this note did NOT (a body cell read as 464 against a 308 boundary), so the naive model
-   is wrong somewhere and must be corrected before any `compile,` edit.
+1. NAIL THE REPRESENTATION FIRST -- DONE (2026-07-19, see RESOLVED above). Confirmed via `'`/`@`
+   probes and `see`: wrapper bodies are `[primitive-ref][opExit-ref]` with cell0 `<` the live
+   `[ primitive ] @` boundary and cell1 `== [ t' opExit half ]` (currently 873; do NOT hardcode).
+   `see` at `muxleq.fth:1886` already implements the primitive half of the test. Discrimination
+   verified (`+` matches; `2dup`/`negate` correctly excluded). The blocker is cleared.
 2. Implement the elision in runtime `compile,` (muxleq.fth:1022): if `m[xt/2] < [ primitive t@ ]`
    and `m[xt/2+1] == [ t' opExit half ]` and the word is not immediate, emit `m[xt/2]` instead of
    `xt 2/`. One conditional; no toggle needed (git is the A/B).
@@ -140,8 +166,44 @@ Do Variant 1 (wrapper-elision), not Variant 2. Concrete steps, in order:
    assume). Then A/B chacha20's `-s` dispatch count with vs without the change.
 Success criterion: chacha20 dispatch count drops measurably, all goldens byte-exact, bootstrap
 holds. If it does, extend the alias set / consider transitive elision. If step 1 can't be made to
-reconcile cleanly, or bootstrap breaks, stop -- the current interpreter is a sound stopping point
-(TODO §2 go/no-go), and this note records exactly why.
+reconcile cleanly, or bootstrap breaks, stop -- the current interpreter is a sound stopping point,
+and this note records exactly why.
+
+## PROTOTYPE RUN -- result: NO-GO (measured 2026-07-19)
+
+Step 2 was implemented and measured as a reversible experiment (reverted, not committed). The
+elision in `compile,` is `dup @ [ primitive ] literal @ u<  over [ 2 ] literal + @ [ =unnest ]
+literal =  and  if @ , exit then  2/ , ;` (metacompiler-layer notes: at compile,'s definition
+point `else` and bare integer literals are NOT yet available -- use `if … exit then` and
+`[ 2 ] literal`; the opExit ref is the existing `[ =unnest ] literal`, not a raw `t'` expression).
+
+Results:
+- CORRECT: the elision fires -- `: foo dup ;` compiles `foo`'s body cell0 = 786 (the dup PRIMITIVE),
+  not 5011 (the dup wrapper). All 46 computational goldens (incl. `define` -- the runtime-compile
+  guard -- `chacha20`, and every `rv32i` test) stay byte-exact. Only the address-dependent `editor`
+  memory-dump golden shifts (expected image-layout drift, would just need a rebaseline).
+- BOOTSTRAP HOLDS byte-exact. NB (Codex): the self-host DOES run target `compile,` for its
+  working-dictionary tooling; what stays byte-exact is the DUMPED image (emitted via macros/`t,`),
+  so bootstrap is unaffected either way.
+- BUT IT DOES NOT HELP: chacha20 dispatches went UP, 431,633,095 → 432,883,904 (+0.29%), not down.
+
+Why (consistent with the interpreter analysis): the C fusion (muxleq.c:185) is NOT wrapper-aware --
+it fuses specific 2–3-instruction no-branch MUX/SUBLEQ adjacencies produced by the NEXT/primitive/
+exit stream. Two things then combine: (a) that fusion already collapses most of the wrapper/NEXT
+round-trip at runtime (the shipped fused build reduces DTC to ~2-3%), so elision has almost no
+headroom left to recover; and
+(b) the elided single-cell primitive ref CHANGES the instruction adjacency, so it loses some fusion
+hits the wrapper stream was getting -- net slightly negative. The theoretical ~20% ceiling assumed
+the wrapper cost was unrecovered; on the fused interpreter it already is. So Variant 1 is a measured
+net-negative on the representative app, on top of being app-only and touching the hottest compile
+path. DECISION: NO-GO. Leave the interpreter as-is; this note records the prototype and its numbers
+so it need not be re-run. (STC/Variant 2 are strictly larger and riskier with no better prospect,
+since they attack the same already-fused overhead.)
+
+Caveat (Codex): chacha20 is the heavy runtime-compiled app benchmark and representative for this
+app-only go/no-go, but it may underrepresent a wrapper-heavy REPL / tiny-word workload. If such a
+workload ever becomes a target, a single synthetic "wrapper-storm" benchmark would be the way to
+reopen this -- but nothing today needs it, so it stays NO-GO.
 
 ## Risks
 

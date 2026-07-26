@@ -1,4 +1,4 @@
-\ ceForth-conformance stack words: depth, 2over, 2swap.
+\ Conformance stack words: depth, 2over, 2swap.
 \ depth is now in the default forth vocab (was system-only, so 'depth' at the REPL threw -13).
 \ roll is deferred: the metacompiler can't run 'recurse' at build time and no demo needs it.
 : t

@@ -6,10 +6,17 @@ OUT := build
 CFLAGS += -O2 -std=c99
 CFLAGS += -Wall -Wextra
 
-.PHONY: run bootstrap clean distclean check golden golden-update bench
+# Run serially: this build has no parallel steps to gain from `-j`, and serial execution guarantees
+# the `check`/`check-all` prerequisite order (the fast `budget` guard fails before the slow bootstrap).
+.NOTPARALLEL:
+.PHONY: run bootstrap clean distclean check check-all budget golden golden-update bench verify-rv32i verify-microcode sanitize duremark
 
 BIN := $(OUT)/muxleq
 STAGE0_DEC := $(OUT)/stage0.dec
+RVCROSS ?= riscv-none-elf-
+RVELF_DIR := $(OUT)/rv32i
+DUREMARK_ELF := $(RVELF_DIR)/duremark.elf
+HAVE_RVCC := $(shell command -v $(RVCROSS)gcc 2>/dev/null)
 STAGE0_C := $(OUT)/stage0.c
 STAGE1_DEC := $(OUT)/stage1.dec
 
@@ -17,6 +24,24 @@ all: $(BIN)
 
 $(OUT):
 	$(Q)mkdir -p $@
+
+$(RVELF_DIR):
+	$(Q)mkdir -p $@
+
+# RV32I test binaries are generated from committed sources into build/rv32i and
+# never checked in. rvelf builds the freestanding as/ld demos plus the flat
+# hello.bin; unopt and duremark are C builds driven through their sub-Makefiles.
+# All need the RISC-V toolchain, so every consumer gates on HAVE_RVCC and skips
+# when it is absent.
+.PHONY: rvelf
+rvelf: | $(RVELF_DIR)
+	$(Q)$(MAKE) --no-print-directory -C tests/rv32i OUT=$(CURDIR)/$(RVELF_DIR) CROSS=$(RVCROSS)
+
+$(RVELF_DIR)/unopt.elf: | $(RVELF_DIR)
+	$(Q)$(MAKE) --no-print-directory -C tests/rv32i/unopt OUT=$(CURDIR)/$(RVELF_DIR) CROSS=$(RVCROSS)
+
+$(DUREMARK_ELF): | $(RVELF_DIR)
+	$(Q)$(MAKE) --no-print-directory -C tests/rv32i/duremark OUT=$(CURDIR)/$(RVELF_DIR) CROSS=$(RVCROSS)
 
 $(BIN): muxleq.c $(STAGE0_C) | $(OUT)
 	$(VECHO) "  CC+LD\t$@\n"
@@ -38,13 +63,13 @@ $(STAGE0_DEC): muxleq.fth | $(OUT)
 # and runs new words at runtime (the decode-once guard).
 GOLDEN_FILES := \
 	loops radix sqrt \
-	fibonacci bitcount clz crc log arith \
+	fibonacci bitcount clz crc log arith prng-bench \
 	life rainbow control editor \
-	define chacha20 scheduler tasker sieve collatz base recurse rot13 double sort heap except \
+	define chacha20 scheduler tasker sieve collatz base recurse rot13 double sort heap except eof \
 	demo-hello demo-f demo-loops demo-trig demo-multiply \
 	demo-array demo-does demo-ascii \
 	demo-text demo-money demo-temp demo-weather demo-calendar \
-	demo-fig demo-stack demo-msgpass demo-value rv32i-smoke rv32i-spec
+	demo-fig demo-stack demo-msgpass demo-value rv32i-spec rv32i-run
 
 # Bound each test run so a mis-fused interpreter that loops forever fails the
 # gate instead of hanging it -- an infinite loop is the likeliest fusion bug.
@@ -52,13 +77,38 @@ GOLDEN_FILES := \
 TIMEOUT := $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)
 GOLDEN_RUN = $(TIMEOUT) $(if $(TIMEOUT),20) ./$(BIN)
 
-golden: $(BIN)
+# Prebuilt RV32I programs exercised end-to-end through the `-r` ELF loader (the
+# committed .elf, so no RISC-V toolchain is needed at gate time). Output is
+# compared against tests/expected/rv32i-<name>.out.
+RVELF_FILES := $(if $(HAVE_RVCC),hello fibonacci primes crc16 mul bgcd bsort)
+# Flat (objcopy -O binary) programs, to exercise the -r flat-binary path as well as the ELF
+# path. hello.bin is the same program as hello.elf, so it reuses tests/expected/rv32i-hello.out.
+RVFLAT_FILES := $(if $(HAVE_RVCC),hello)
+RVELF_RUN = $(TIMEOUT) $(if $(TIMEOUT),20) ./$(BIN) -r
+
+golden: $(BIN) $(if $(HAVE_RVCC),rvelf)
 	$(Q)test -n "$(TIMEOUT)" || $(PRINTF) \
 	    "golden: WARNING: no timeout(1)/gtimeout; a hung test (e.g. broken task switching) will not be bounded\n"
 	$(Q)$(foreach t,$(GOLDEN_FILES),\
 	    $(PRINTF) "golden $(t) ... "; \
 	    if $(GOLDEN_RUN) < tests/$(t).fth > $(TMPDIR)/golden.out 2>/dev/null \
 	        && cmp -s tests/expected/$(t).out $(TMPDIR)/golden.out; \
+	    then $(call notice, [OK]); \
+	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; \
+	    fi; \
+	)
+	$(Q)$(foreach e,$(RVELF_FILES),\
+	    $(PRINTF) "golden rv32i/$(e).elf ... "; \
+	    if $(RVELF_RUN) $(RVELF_DIR)/$(e).elf > $(TMPDIR)/golden.out 2>/dev/null \
+	        && cmp -s tests/expected/rv32i-$(e).out $(TMPDIR)/golden.out; \
+	    then $(call notice, [OK]); \
+	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; \
+	    fi; \
+	)
+	$(Q)$(foreach f,$(RVFLAT_FILES),\
+	    $(PRINTF) "golden rv32i/$(f).bin ... "; \
+	    if $(RVELF_RUN) $(RVELF_DIR)/$(f).bin > $(TMPDIR)/golden.out 2>/dev/null \
+	        && cmp -s tests/expected/rv32i-$(f).out $(TMPDIR)/golden.out; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; \
 	    fi; \
@@ -71,9 +121,41 @@ golden-update: $(BIN)
 	$(Q)set -e; $(foreach t,$(GOLDEN_FILES),\
 	    $(GOLDEN_RUN) < tests/$(t).fth > $(TMPDIR)/golden.out 2>/dev/null; \
 	    mv $(TMPDIR)/golden.out tests/expected/$(t).out;)
+	$(Q)set -e; $(foreach e,$(RVELF_FILES),\
+	    $(RVELF_RUN) $(RVELF_DIR)/$(e).elf > $(TMPDIR)/golden.out 2>/dev/null; \
+	    mv $(TMPDIR)/golden.out tests/expected/rv32i-$(e).out;)
 
-# The pre-commit gate: byte-exact golden diff plus the self-hosting proof.
-check: golden bootstrap
+# The pre-commit gate: cell-budget guard + byte-exact golden diff + the self-hosting proof.
+check: budget golden bootstrap
+
+# Self-host ceiling guard. The image + its re-assembled copy + the metacompiler dictionary must all
+# fit 32768 cells (empirical hard ceiling ~12888, where bootstrap starts to fail). Fail loudly HERE if
+# stage0.dec exceeds the budget, instead of a cryptic -13/hang deep in `make bootstrap`. Bump MAX_CELLS
+# consciously (with evidence bootstrap still holds) if the image legitimately needs to grow.
+MAX_CELLS ?= 12500
+budget: $(STAGE0_DEC)
+	$(Q)cells=$$(grep -c . $(STAGE0_DEC)); \
+	    if [ "$$cells" -gt $(MAX_CELLS) ]; then \
+	        $(PRINTF) "budget: image is $$cells cells, over the $(MAX_CELLS)-cell budget (ceiling ~12888) -- shrink the image or bump MAX_CELLS if bootstrap still holds\n"; \
+	        exit 1; \
+	    else $(PRINTF) "budget: image $$cells / $(MAX_CELLS) cells "; $(call notice, [OK]); fi
+
+# DureMark benchmark on the RV32I simulator (upstream list+matrix+state workloads, vendored under
+# tests/rv32i/duremark/). ~3.2 G dispatched MUXLEQ ops / ~16 s for one iteration -- a benchmark-scale
+# load, deliberately OUT of the fast `make check`; it runs in check-all and on demand. Needs the 32 KiB
+# guest window (its ~4.5 KB image never fit the old 1 KiB). The checksum is byte-identical to a native
+# build, so a drift means the RV32I microcode or the guest-RAM window regressed.
+duremark: $(BIN) $(if $(HAVE_RVCC),$(DUREMARK_ELF))
+	$(Q)$(PRINTF) "duremark rv32i ... "; \
+	    if $(TIMEOUT) $(if $(TIMEOUT),90) ./$(BIN) -r $(DUREMARK_ELF) > $(TMPDIR)/duremark.out 2>/dev/null \
+	        && cmp -s tests/expected/duremark.out $(TMPDIR)/duremark.out; \
+	    then $(call notice, [OK]); \
+	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; fi
+
+# Deep pre-release gate: the standard check plus the slow/opt-in exhaustive checks (RV32I conformance,
+# the Z3 ALU proof, the ASan+UBSan run, and the DureMark benchmark). Minutes; needs z3-solver + a
+# sanitizer-capable compiler.
+check-all: check verify-rv32i verify-microcode sanitize duremark
 
 # bootstrapping
 bootstrap: $(STAGE0_DEC) $(STAGE1_DEC)
@@ -90,14 +172,83 @@ $(STAGE1_DEC): $(BIN) muxleq.fth | $(OUT)
 
 TMPDIR := $(shell mktemp -d)
 
-# Consolidated benchmark suite. Builds and times the VM on a quiet remote host
-# (node1 by default) because localhost load makes wall-clock timing unreliable.
-# All params pass straight through the environment to scripts/bench.sh (which
-# defaults them), so both forms work: `BENCH_HOST=node2 TIME=20000 REPS=9 make
-# bench` and `make bench TIME=20000`. scripts/bench.sh ships the current sources
-# and runs scripts/bench-remote.sh there.
+# Consolidated throughput benchmark. Builds the VM on a quiet remote host (node1
+# by default -- localhost load makes wall-clock timing unreliable) and reports, per
+# workload, Mops/s = million dispatched instructions / best user second (one "op"
+# is one dispatch() entry -- -s does not count fused inline ops, so the raw op count
+# is higher). The DETERMINISTIC dispatch count (exact, machine-independent) over the
+# best-of-REPS uninstrumented
+# time, so the raw count is always turned into a precise, comparable rate rather than
+# shown bare. All params pass through the environment to scripts/bench.sh (which
+# defaults them): `BENCH_HOST=node2 TIME=20000 REPS=9 make bench` and `make bench
+# TIME=20000` both work. scripts/bench.sh ships the sources and runs bench-remote.sh.
 bench: $(STAGE0_C)
 	$(Q)sh scripts/bench.sh
+
+# RV32I instruction-level conformance. The official riscv-arch-test ELFs can't run
+# on this 16-bit substrate (they link past the 32767-cell guest window), so
+# compliance is validated per-instruction: scripts/rv32i-conformance.py
+# runs an independent Python reference model (anchored to tests/rv32i-spec.fth's
+# Codex-verified vectors via --verify-model) and drives the SAME operands through
+# the :a rvstep microcode, self-checking each. Slow (thousands of vectors through
+# the eForth text interpreter, minutes) so it is NOT part of `make check` -- run it
+# explicitly. Any FAIL or VM error (a stray `?`) fails the target.
+verify-rv32i: $(BIN)
+	$(Q)python3 scripts/rv32i-conformance.py > $(TMPDIR)/conform.fth
+	$(Q)./$(BIN) < $(TMPDIR)/conform.fth > $(TMPDIR)/conform.out 2>&1; \
+	    ok=$$(grep -c '^OK' $(TMPDIR)/conform.out); \
+	    bad=$$(grep -ciE 'FAIL|\?$$' $(TMPDIR)/conform.out); \
+	    $(PRINTF) "verify-rv32i: $$ok OK, $$bad bad\n"; \
+	    if [ "$$bad" -eq 0 ] && [ "$$ok" -gt 0 ]; then $(call notice, [OK]); \
+	    else $(PRINTF) "CONFORMANCE FAILURE\n"; grep -iE 'FAIL|\?$$' $(TMPDIR)/conform.out | head; exit 1; fi
+
+# Exhaustive symbolic proof of the 32-bit ADD/SUB/SLT/SLTU/SLL/SRL/SRA microcode: verify-microcode.py
+# models each op as the microcode computes it (majority-vote carry/borrow; the SHL1 doubling shifts)
+# in Z3 and proves it equals the true 32-bit result over the entire input space (conformance above
+# only samples). Needs the z3 Python package; host-side, no VM involvement, so it is NOT part of
+# `make check`.
+verify-microcode:
+	$(Q)python3 scripts/verify-microcode.py
+
+# Build with AddressSanitizer + UndefinedBehaviorSanitizer and run every golden program plus the -r
+# paths; -fno-sanitize-recover makes any out-of-bounds read/write or UB abort with a non-zero exit,
+# failing the target. The default -O2 goldens compare only stdout and cannot see this class of latent
+# memory/UB bug (sanitizer diagnostics go to stderr) -- this target is the guard for it, and would have
+# caught the halt-path OOB (b3bd2ca). Slow (sanitizers + the heavy tests) and needs a sanitizer-capable
+# compiler, so it is opt-in, not part of `make check`. Leak detection is off (the VM runs then exits;
+# the -r loader's input buffer is intentionally held in a global until exit).
+SANFLAGS := -std=c99 -fsanitize=address,undefined -fno-sanitize-recover=all -g
+SAN_RUN = ASAN_OPTIONS=detect_leaks=0 $(TIMEOUT) $(if $(TIMEOUT),120) $(TMPDIR)/muxleq.san
+# A curated set, not the whole golden suite: every test shares the same C interpreter, so running all
+# 47 (~7 min under sanitizers) is redundant. These exercise the DISTINCT C paths -- chacha20 the heavy
+# peek-ahead fusion, sieve array/loop memory, editor the block buffer, tasker the multitasker switch,
+# collatz recursion, demo-does the self-modifying code field, eof the EOF-halt (vs the bye/negative-
+# branch halt in the rest), rv32i-run the RV32I microcode + guest LB/SB + ecall -- plus the -r loader
+# and guest execution via the RVELF paths below.
+SANITIZE_FILES := chacha20 sieve editor tasker collatz demo-does eof rv32i-run
+sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C)
+	$(Q)$(CC) $(SANFLAGS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
+	$(Q)$(foreach t,$(SANITIZE_FILES),\
+	    $(PRINTF) "sanitize $(t) ... "; \
+	    if $(SAN_RUN) < tests/$(t).fth >/dev/null 2>$(TMPDIR)/san.err; \
+	    then $(call notice, [OK]); \
+	    else $(PRINTF) "SANITIZER ERROR or timeout\n"; cat $(TMPDIR)/san.err; exit 1; \
+	    fi; \
+	)
+	$(Q)$(foreach e,$(RVELF_FILES),\
+	    $(PRINTF) "sanitize rv32i/$(e).elf ... "; \
+	    if $(SAN_RUN) -r $(RVELF_DIR)/$(e).elf >/dev/null 2>$(TMPDIR)/san.err; \
+	    then $(call notice, [OK]); \
+	    else $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; \
+	    fi; \
+	)
+	$(Q)$(foreach f,$(RVFLAT_FILES),\
+	    $(PRINTF) "sanitize rv32i/$(f).bin ... "; \
+	    if $(SAN_RUN) -r $(RVELF_DIR)/$(f).bin >/dev/null 2>$(TMPDIR)/san.err; \
+	    then $(call notice, [OK]); \
+	    else $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; \
+	    fi; \
+	)
 
 clean:
 	$(RM) $(BIN)
