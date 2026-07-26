@@ -1231,6 +1231,16 @@ static void emit_load_cell(int *p,
     emit_i(p, 0, dst, 32774);    /* MOVE [addr] -> dst (source patched) */
 }
 
+/* Load the guest cell whose native address is already in OL into dst: patch the
+ * following MOVE's source operand := OL (SMC), then run it.
+ */
+static void emit_load_at(int *p, int dst, const struct mlayout *m)
+{
+    const int mi = *p + 3;       /* the load MOVE lands here */
+    emit_i(p, m->ol, mi, 32774); /* patch its source operand := OL */
+    emit_i(p, 0, dst, 32774);    /* MOVE [OL] -> dst (source patched) */
+}
+
 /* Store val to the guest cell whose native address is already in OL: patch the
  * following MOVE's dest operand := OL (SMC), then run it.
  */
@@ -1286,7 +1296,8 @@ static void emit_load_byte_u(int *p,
 }
 
 /* LB: rd = sign-extended guest RAM[rs1 + imm] (a byte; bit 7 fills bits 8..31).
- * Starts from the LBU value, then a bit15-clear branch skips the sign fill.
+ * Starts from the LBU value, then a direct bit-7 mask skips the sign fill when
+ * clear.
  */
 static void emit_load_byte(int *p,
                            int rlo,
@@ -1298,10 +1309,9 @@ static void emit_load_byte(int *p,
     emit_load_cell(p, 0, m->t0, rs1_lo, imm_cell, m); /* T0 = byte */
     emit_i(p, m->t0, rlo, 32774);                     /* rd.lo = byte */
     emit_i(p, m->z, rhi, 32774);                      /* rd.hi = 0 (positive) */
-    emit_i(p, m->t0, m->bt, 32774);                   /* BT = byte ... */
-    for (int j = 0; j < 8; j++)
-        emit_add16(p, m->bt, m->bt, m);       /* ... << 8: bit 7 -> bit 15 */
-    emit_bit15c_bt(p, *p + 9 + 6, m);         /* bit 7 clear -> skip the fill */
+    emit_i(p, m->t0, m->bt, 32774);                   /* BT = byte */
+    emit_i(p, m->z, m->bt, 0x8000 | (m->mask_base + 7)); /* BT &= 0x80 */
+    emit_i(p, m->z, m->bt, *p + 3 + 6);       /* bit 7 clear -> skip fill */
     emit_i(p, m->neg1, rlo, 0x8000 | m->mff); /* rd.lo bits 8..15 = 1 */
     emit_i(p, m->neg1, rhi, 32774);           /* rd.hi = 0xFFFF */
 }
@@ -1310,15 +1320,11 @@ static void emit_load_byte(int *p,
  * half: dst = cell[a+k] | cell[a+k+1] << 8, where a is the base address
  * snapshotted in SH2. SH1 is scratch (holds the high cell shifted left 8).
  */
-static void emit_load_half_le(int *p,
-                              int dst,
-                              int k,
-                              int imm_cell,
-                              const struct mlayout *m)
+static void emit_load_half_le(int *p, int dst, const struct mlayout *m)
 {
-    emit_load_cell(p, k, dst, m->sh2, imm_cell, m); /* dst = cell[a+k] */
-    emit_load_cell(p, k + 1, m->sh1, m->sh2, imm_cell,
-                   m); /* SH1 = cell[a+k+1] */
+    emit_load_at(p, dst, m);         /* dst = cell[a+k] */
+    emit_add16(p, m->ol, m->one, m); /* OL = &next cell */
+    emit_load_at(p, m->sh1, m);      /* SH1 = cell[a+k+1] */
     for (int j = 0; j < 8; j++)
         emit_add16(p, m->sh1, m->sh1, m); /* SH1 <<= 8 */
     emit_add16(p, dst, m->sh1, m);        /* dst |= SH1 */
@@ -1336,10 +1342,11 @@ static void emit_load_half(int *p,
                            bool sign,
                            const struct mlayout *m)
 {
-    emit_i(p, rs1_lo, m->sh2, 32774); /* snapshot base (rd may alias rs1) */
-    emit_load_half_le(p, m->t0, 0, imm_cell, m); /* T0 = half */
-    emit_i(p, m->t0, rlo, 32774);                /* rd.lo = half */
-    emit_i(p, m->z, rhi, 32774); /* rd.hi = 0 (LHU / positive LH) */
+    emit_i(p, rs1_lo, m->sh2, 32774);     /* snapshot base (rd may alias rs1) */
+    emit_addr(p, m->sh2, imm_cell, 0, m); /* OL = &RAM[addr] */
+    emit_load_half_le(p, m->t0, m);       /* T0 = half */
+    emit_i(p, m->t0, rlo, 32774);         /* rd.lo = half */
+    emit_i(p, m->z, rhi, 32774);          /* rd.hi = 0 (LHU / positive LH) */
     if (sign) {
         emit_bit15c(p, m->t0, *p + 12 + 3,
                     m);                 /* bit 15 clear -> skip the fill */
@@ -1403,11 +1410,11 @@ static void emit_load_word(int *p,
                            int imm_cell,
                            const struct mlayout *m)
 {
-    emit_i(p, rs1_lo, m->sh2, 32774); /* snapshot base (rd may alias rs1) */
-    emit_load_half_le(p, m->t0, 0, imm_cell,
-                      m); /* T0 = cell[a] | cell[a+1]<<8 */
-    emit_load_half_le(p, m->oh, 2, imm_cell,
-                      m); /* OH = cell[a+2] | cell[a+3]<<8 */
+    emit_i(p, rs1_lo, m->sh2, 32774);     /* snapshot base (rd may alias rs1) */
+    emit_addr(p, m->sh2, imm_cell, 0, m); /* OL = &RAM[addr] */
+    emit_load_half_le(p, m->t0, m);       /* T0 = cell[a] | cell[a+1]<<8 */
+    emit_add16(p, m->ol, m->one, m);      /* OL = &RAM[addr+2] */
+    emit_load_half_le(p, m->oh, m);       /* OH = cell[a+2] | cell[a+3]<<8 */
     emit_i(p, m->t0, rlo, 32774);
     emit_i(p, m->oh, rhi, 32774);
 }
@@ -1657,9 +1664,9 @@ static void resolve_jalr(struct graph *g)
 
 /* Control-flow successors of node i: the fall-through (unless the node
  * terminates) plus a branch/jump target. Writes up to 2 node indexes into
- * succ[] and returns the count. Only 'jal ra' (rd == x1) has a return site
- * (matching the ret model); 'j'/'jal x5' and jalr do not fall through; an ecall
- * exit terminates.
+ * succ[] and returns the count. Only 'jal ra' and resolved 'jalr ra,...' have a
+ * return site (matching the ret model); 'j', 'jal x5', and runtime JALR do not
+ * fall through; an ecall exit terminates.
  */
 static int successors(const struct graph *g,
                       const struct sysinfo *sys,
@@ -1669,9 +1676,11 @@ static int successors(const struct graph *g,
     const struct node *nd = &g->n[i];
     int n = 0;
     const int fall = addr2node(g, nd->pc + 4);
-    const bool link = nd->kind == K_JAL && ((nd->word >> 7) & 31) == 1;
+    const int rd = (nd->word >> 7) & 31;
+    const bool link = rd == 1 && (nd->kind == K_JAL ||
+                                  (nd->kind == K_JALR && nd->target != NONE));
     const bool terminates = (nd->kind == K_JAL && !link) ||
-                            nd->kind == K_JALR ||
+                            (nd->kind == K_JALR && !link) ||
                             (nd->kind == K_SYSTEM && sys[i].kind == SYS_EXIT);
     if (!terminates && fall != NONE)
         succ[n++] = fall;
@@ -2764,6 +2773,8 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
 /* Data-cell layout of a wide (-mux32) image. */
 struct m32 {
     int imm_base;   /* one cell per li / immediate-ALU / JAL-link value */
+    int ret_base;   /* one cell per known JAL-return address */
+    int spool_base; /* static write() source bytes */
     int reg_base;   /* 32-cell register file */
     int z, neg1;    /* the constants 0 and -1 (the equality add-1 test) */
     int sgn, one;   /* 0x80000000 (bit31 / sign flip) and 1 (the DEC) */
@@ -2772,9 +2783,15 @@ struct m32 {
     int m1f, mff;   /* 0x1F (shift-amount mask) and 0xFF (byte mask) */
     int winmask;    /* guest RAM window size - 1 (in-window address mask) */
     int rambc;      /* the ram_base value (added after the window mask) */
-    int rsite;      /* the single call site's return address (checked by ret) */
     int mask_base;  /* 32 power-of-two cells 2^0..2^31 (shift bit extraction) */
     int ram_base;   /* guest RAM window (one cell per byte), init from img */
+};
+
+struct ret_sites {
+    int n;
+    int *target;    /* resolved callee entry node */
+    int *node;      /* native destination nodes for pc+4 after jal ra */
+    uint32_t *addr; /* guest return addresses compared against x1 */
 };
 
 /* An ALU funct3 the wide emitter lowers natively: ADD/SUB(0), SLT(2), SLTU(3),
@@ -2811,13 +2828,16 @@ static bool mem_ok32(const struct node *nd)
 }
 
 /* A -mux32 node consumes an imm cell iff it is a li or an immediate ALU op
- * (ADDI/ANDI/ORI/XORI, rd != x0). The count, emit, and data passes all key on
- * this predicate so the imm-pool indices line up.
+ * (ADDI/ANDI/ORI/XORI, rd != x0), except 'mv' which is a pure register copy.
+ * The count, emit, and data passes all key on this predicate so the imm-pool
+ * indices line up.
  */
 static bool imm_op32(const struct node *nd)
 {
     if (fold_kind(nd->word) == FOLD_LI12)
         return true;
+    if (is_mv(nd))
+        return false;
     if (nd->kind == K_OPIMM && ((nd->word >> 7) & 31) &&
         alu_f3_ok32(nd->funct3))
         return true;
@@ -3291,8 +3311,7 @@ static int addr_cells32(const struct m32 *m)
  * a1, one per iteration. sh1 walks the guest pointer, sh2 counts down. Each
  * byte's native cell is chosen by SMC (emit_addr32) and PUT via a patched
  * output instruction, so it reads live RAM and is correct after any store. The
- * fd (a0) is ignored, matching the -r runner (all output goes to stdout). This
- * dynamic loop covers every write; the -mux static-buffer fold is not ported.
+ * fd (a0) is ignored, matching the -r runner (all output goes to stdout).
  */
 static void emit_write_dyn32(int *p, const struct m32 *m)
 {
@@ -3315,18 +3334,48 @@ static void emit_write_dyn32(int *p, const struct m32 *m)
     emit_i32(p, m->z, m->z, loop);   /* back to the test */
 }
 
-/* 'ret' (jalr x0,x1,0): jump to the single call site's return address, but only
- * when ra actually equals it (rsite) -- staying correct however the callee was
- * entered; a mismatch halts rather than misjump. ne32 (12 cells) branches away
- * on ra != rsite, so nomatch = start + 12 + 3 (past the return branch).
- */
-static void emit_ret32(int *p, const int *na, int ret_node, const struct m32 *m)
+static bool ret_site_matches32(const struct graph *g,
+                               const struct sysinfo *sys,
+                               const struct ret_sites *rets,
+                               int site,
+                               int ret_node)
 {
-    const long long ra = m->reg_base + 1; /* x1 = ra */
-    const long long start = *p, nomatch = start + 15;
-    ne32(p, ra, m->rsite, nomatch, m);     /* ra != rsite -> nomatch */
-    emit_i32(p, m->z, m->z, na[ret_node]); /* ra matches -> return */
-    emit_i32(p, m->z, m->z, IOMARK32);     /* no match -> halt (defensive) */
+    return rets->target[site] == ret_node ||
+           reaches_after(g, sys, rets->target[site], ret_node);
+}
+
+static int ret_site_count32(const struct graph *g,
+                            const struct sysinfo *sys,
+                            const struct ret_sites *rets,
+                            int ret_node)
+{
+    int n = 0;
+    for (int i = 0; i < rets->n; i++)
+        if (ret_site_matches32(g, sys, rets, i, ret_node))
+            n++;
+    return n;
+}
+
+/* 'ret' (jalr x0,x1,0): jump to a matching call site's return address, but only
+ * when ra actually equals it. Unknown ra halts rather than misjump.
+ */
+static void emit_ret_dispatch32(const struct graph *g,
+                                const struct sysinfo *sys,
+                                int *p,
+                                const int *na,
+                                const struct ret_sites *rets,
+                                int ret_node,
+                                const struct m32 *m)
+{
+    for (int i = 0; i < rets->n; i++) {
+        if (!ret_site_matches32(g, sys, rets, i, ret_node))
+            continue;
+        const long long start = *p, nomatch = start + 15;
+        ne32(p, m->reg_base + 1, m->ret_base + i, nomatch,
+             m); /* ra != this return site */
+        emit_i32(p, m->z, m->z, na[rets->node[i]]);
+    }
+    emit_i32(p, m->z, m->z, IOMARK32); /* no known return address matched */
 }
 
 /* Emit one wide instruction: li, or the native single-cell ALU. Every ALU form
@@ -3336,11 +3385,12 @@ static void emit_ret32(int *p, const int *na, int ret_node, const struct m32 *m)
 static void emit_one32(const struct graph *g,
                        int i,
                        const struct sysinfo *sys,
-                       int ret_node,
+                       const struct ret_sites *rets,
                        const struct m32 *m,
                        const int *na,
                        int *p,
-                       int *imm)
+                       int *imm,
+                       int *spool)
 {
     const struct node *nd = &g->n[i];
     const int rd = (nd->word >> 7) & 31;
@@ -3350,6 +3400,10 @@ static void emit_one32(const struct graph *g,
     if (fk == FOLD_LI12) {
         mov32(p, m->imm_base + *imm, m->reg_base + rd); /* rd = imm */
         (*imm)++;
+        return;
+    }
+    if (is_mv(nd)) {
+        mov32(p, m->reg_base + nd->rs1, m->reg_base + rd);
         return;
     }
     if (nd->kind == K_JAL) {
@@ -3434,11 +3488,18 @@ static void emit_one32(const struct graph *g,
         (*imm)++; /* the imm cell is consumed even when rd == x0 */
         return;
     }
-    if (nd->kind == K_SYSTEM) { /* ecall: exit (halt) or write (PUT loop) */
-        if (sys[i].kind == SYS_EXIT)
+    if (nd->kind == K_SYSTEM) { /* ecall: exit (halt) or write */
+        if (sys[i].kind == SYS_EXIT) {
             emit_i32(p, m->z, m->z, IOMARK32); /* halt (SUBLEQ Z,Z,-1) */
-        else                                   /* SYS_WRITE / SYS_WRITE_DYN */
+        } else if (sys[i].kind == SYS_WRITE) {
+            for (uint32_t k = 0; k < sys[i].len; k++) {
+                emit_i32(p, m->spool_base + *spool, IOMARK32,
+                         0); /* PUT staged byte */
+                (*spool)++;
+            }
+        } else { /* SYS_WRITE_DYN */
             emit_write_dyn32(p, m);
+        }
         return;
     }
     if (nd->kind == K_JALR) {
@@ -3455,9 +3516,10 @@ static void emit_one32(const struct graph *g,
             emit_i32(p, m->z, m->z, na[nd->target]); /* jump to the target */
             return;
         }
-        /* Else 'jalr x0, x1, 0' (= ret) with one known call site. */
-        if (rd == 0 && nd->rs1 == 1 && nd->imm == 0 && ret_node != NONE) {
-            emit_ret32(p, na, ret_node, m);
+        /* Else 'jalr x0, x1, 0' (= ret) through known call-site returns. */
+        if (rd == 0 && nd->rs1 == 1 && nd->imm == 0 &&
+            ret_site_count32(g, sys, rets, i) > 0) {
+            emit_ret_dispatch32(g, sys, p, na, rets, i, m);
             return;
         }
         fprintf(stderr, "rvopt -mux32: unsupported JALR at pc %u\n", nd->pc);
@@ -3554,8 +3616,8 @@ static void emit_one32(const struct graph *g,
  * was; through SLICE 2c this covers li + the native ALU + SLT/SLTU + LUI/AUIPC
  * + all six branches + JAL (with an na[] target map), enough to run the rvopt-*
  * control-flow fixtures. Later slices add shifts, memory, and ecalls. Reuses
- * the shared front end; an unsupported op is a hard error until its slice
- * lands. The epilogue PUTs each defined register's low byte then halts.
+ * the shared front end; arbitrary runtime JALR stays a hard error. The epilogue
+ * PUTs each defined register's low byte then halts.
  */
 static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
 {
@@ -3568,24 +3630,44 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
                                   it (same guard as -mux); run it under -r
                                   */
 
-    /* The single call site for a 'ret' (jalr x0,x1,0): the one reachable `jal
-     * ra,...` (rd == x1); ret returns to the word after it, checked at run time
-     * against ra. More than one call site would need a dispatch (no demo needs
-     * it), so ret_node stays NONE and a reachable ret aborts.
-     */
-    int ret_node = NONE, nlink = 0;
-    uint32_t ret_addr = 0;
+    bool has_store = false;
     for (int i = 1; i < g->count; i++)
-        if (reach[i] && g->n[i].kind == K_JAL &&
-            ((g->n[i].word >> 7) & 31) == 1) {
-            nlink++;
-            ret_addr = g->n[i].pc + 4;
-            ret_node = addr2node(g, ret_addr);
-        }
-    if (nlink != 1)
-        ret_node = NONE;
+        if (reach[i] && g->n[i].kind == K_STORE)
+            has_store = true;
+    if (has_store)
+        for (int i = 1; i < g->count; i++)
+            if (sys[i].kind == SYS_WRITE)
+                sys[i].kind = SYS_WRITE_DYN;
 
-    int nimm = 0; /* imm cells; defined regs get a PUT + the halt */
+    /* Known return sites for 'ret' (jalr x0,x1,0): every reachable 'jal ra,...'
+     * or resolved linking JALR contributes its pc+4. A runtime ret dispatch
+     * compares x1 against those addresses and jumps to the matching native
+     * block.
+     */
+    struct ret_sites rets = {
+        0,
+        xcalloc((size_t) g->count, sizeof *rets.target),
+        xcalloc((size_t) g->count, sizeof *rets.node),
+        xcalloc((size_t) g->count, sizeof *rets.addr),
+    };
+    for (int i = 1; i < g->count; i++) {
+        const int rd = (g->n[i].word >> 7) & 31;
+        const bool link_call =
+            g->n[i].kind == K_JAL ||
+            (g->n[i].kind == K_JALR && g->n[i].target != NONE);
+        if (reach[i] && link_call && rd == 1 && g->n[i].target != NONE) {
+            const uint32_t addr = g->n[i].pc + 4;
+            const int node = addr2node(g, addr);
+            if (node != NONE) {
+                rets.target[rets.n] = g->n[i].target;
+                rets.addr[rets.n] = addr;
+                rets.node[rets.n] = node;
+                rets.n++;
+            }
+        }
+    }
+
+    int nimm = 0, nspool = 0; /* imm/static-write cells; def regs get PUTs */
     bool def[32] = {false};
     for (int i = 1; i < g->count; i++) {
         if (!reach[i])
@@ -3603,7 +3685,7 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
         if (op_ok32(nd)) {
             if (rd) { /* rd == x0 is a nop: no cell, no def */
                 def[rd] = true;
-                if (nd->kind == K_OPIMM)
+                if (nd->kind == K_OPIMM && !is_mv(nd))
                     nimm++;
             }
             continue;
@@ -3629,8 +3711,11 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
                 def[rd] = true; /* LBU defines rd (SB does not) */
             continue;
         }
-        if (nd->kind == K_SYSTEM && sys[i].kind != SYS_BAD)
+        if (nd->kind == K_SYSTEM && sys[i].kind != SYS_BAD) {
+            if (sys[i].kind == SYS_WRITE)
+                nspool += (int) sys[i].len;
             continue; /* ecall: exit/write, no imm cell, no def */
+        }
         if (nd->kind == K_JALR && nd->target != NONE) {
             if (rd) { /* static-target JALR: pc+4 link into rd */
                 nimm++;
@@ -3639,12 +3724,15 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
             continue;
         }
         if (nd->kind == K_JALR && rd == 0 && nd->rs1 == 1 && nd->imm == 0 &&
-            ret_node != NONE)
+            ret_site_count32(g, sys, &rets, i) > 0)
             continue; /* ret: no imm cell, no def */
         fprintf(stderr,
                 "rvopt -mux32: unsupported op at pc %u (no computed JALR / "
                 "unresolved ecall yet)\n",
                 nd->pc);
+        free(rets.target);
+        free(rets.node);
+        free(rets.addr);
         free(sys);
         free(reach);
         exit(1);
@@ -3652,6 +3740,7 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
     int ndef = 0;
     for (int r = 0; r < 32; r++)
         ndef += def[r];
+    const int nret_pool = rets.n;
 
     /* Sizing pass: variable-size ops mean the code length is not a formula --
      * run the emitter with output suppressed to fill na[] (branch/jump targets)
@@ -3662,22 +3751,25 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
     int *na = xcalloc((size_t) g->count + 1, sizeof *na);
     struct m32 m = {0};
     g_sizing = true;
-    int p = 0, imm = 0;
+    int p = 0, imm = 0, spool = 0;
     for (int i = 1; i < g->count; i++) {
         na[i] = p;
         if (reach[i])
-            emit_one32(g, i, sys, ret_node, &m, na, &p, &imm);
+            emit_one32(g, i, sys, &rets, &m, na, &p, &imm, &spool);
     }
     g_sizing = false;
     na[g->count] = p;                    /* a jump past the end lands here */
     const int code = p + 3 * (ndef + 1); /* ops + one PUT per def reg + halt */
 
-    /* Layout: code | imm cells | 32-cell regfile | constants Z/-1/0x80000000/1
-     * | scratch t0/t1/t2 | sign-flip sh1/sh2 | 0x1F, 0xFF | winmask, rambc |
-     * rsite | 2^0..2^31 mask pool | the guest RAM window (one cell per byte).
+    /* Layout: code | imm cells | return-site cells | static write bytes |
+     * 32-cell regfile |
+     * constants Z/-1/0x80000000/1 | scratch t0/t1/t2 | sign-flip sh1/sh2 |
+     * 0x1F, 0xFF | winmask, rambc | 2^0..2^31 mask pool | guest RAM.
      */
     m.imm_base = code;
-    m.reg_base = m.imm_base + nimm;
+    m.ret_base = m.imm_base + nimm;
+    m.spool_base = m.ret_base + nret_pool;
+    m.reg_base = m.spool_base + nspool;
     m.z = m.reg_base + 32;
     m.neg1 = m.z + 1;
     m.sgn = m.neg1 + 1;
@@ -3691,8 +3783,7 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
     m.mff = m.m1f + 1;
     m.winmask = m.mff + 1;
     m.rambc = m.winmask + 1;
-    m.rsite = m.rambc + 1;
-    m.mask_base = m.rsite + 1;
+    m.mask_base = m.rambc + 1;
     m.ram_base = m.mask_base + 32;
     int winsize =
         1; /* smallest power of two covering the touched guest bytes */
@@ -3703,40 +3794,51 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
         fprintf(stderr, "rvopt -mux32: image needs %d cells (> %d)\n",
                 m.ram_base + winsize, 1 << 21);
         free(na);
+        free(rets.target);
+        free(rets.node);
+        free(rets.addr);
         free(sys);
         free(reach);
         exit(1);
     }
 
-    p = imm = 0;
+    p = imm = spool = 0;
     for (int i = 1; i < g->count; i++)
         if (reach[i])
-            emit_one32(g, i, sys, ret_node, &m, na, &p, &imm);
+            emit_one32(g, i, sys, &rets, &m, na, &p, &imm, &spool);
     for (int r = 0; r < 32; r++)
         if (def[r])
             emit_i32(&p, m.reg_base + r, IOMARK32, 0); /* PUT rd's low byte */
     emit_i32(&p, m.z, m.z, IOMARK32); /* halt (SUBLEQ Z,Z,-1) */
 
-    /* Data: imm values (program order, matching the imm cells), regfile, then
-     * the constants Z/-1/0x80000000/1, the zeroed t0/t1/t2/sh1/sh2, 0x1F/0xFF,
-     * winmask/rambc, rsite (ret's return address), the 2^0..2^31 mask pool, and
+    /* Data: imm values (program order), return-site addresses, static write
+     * bytes, regfile, then the constants Z/-1/0x80000000/1, zeroed
+     * t0/t1/t2/sh1/sh2, 0x1F/0xFF, winmask/rambc, the 2^0..2^31 mask pool, and
      * the guest RAM window.
      */
     for (int i = 1; i < g->count; i++)
         if (reach[i] && imm_op32(&g->n[i]))
             printf("%lld\n", imm_value32(&g->n[i]));
+    for (int i = 0; i < nret_pool; i++)
+        printf("%u\n", rets.addr[i]);
+    for (int i = 1; i < g->count; i++)
+        if (reach[i] && g->n[i].kind == K_SYSTEM && sys[i].kind == SYS_WRITE)
+            for (uint32_t k = 0; k < sys[i].len; k++)
+                printf("%u\n", img[sys[i].buf + k]);
     for (int r = 0; r < 32; r++)
         printf("0\n"); /* regfile (x0 stays 0) */
     printf("0\n-1\n2147483648\n1\n0\n0\n0\n0\n0\n31\n255\n");
     /* Z, -1, SGN(0x80000000), 1, t0, t1, t2, sh1, sh2, 0x1F, 0xFF */
     printf("%d\n%d\n", winsize - 1, m.ram_base); /* winmask, rambc */
-    printf("%u\n", ret_addr);                    /* rsite (ret's ra check) */
     for (int b = 0; b < 32; b++)
         printf("%lld\n", 1LL << b); /* mask pool 2^0 .. 2^31 */
     for (int k = 0; k < winsize; k++)
         printf("%u\n",
                k < (int) used ? img[k] : 0); /* guest RAM, init from img */
     free(na);
+    free(rets.target);
+    free(rets.node);
+    free(rets.addr);
     free(sys);
     free(reach);
 }

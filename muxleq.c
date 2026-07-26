@@ -26,6 +26,19 @@
 #define MUST_TAIL
 #endif
 
+/* preserve_none + musttail miscompiles under ASan on current clang (a SEGV in
+ * the dispatch chain), so drop the attribute in sanitizer builds; release keeps
+ * it. See make sanitize.
+ */
+#if defined(__clang__) && defined(__has_attribute) &&                \
+    __has_attribute(preserve_none) &&                                \
+    !(defined(__has_feature) && __has_feature(address_sanitizer)) && \
+    !defined(__SANITIZE_ADDRESS__)
+#define VM_ABI __attribute__((preserve_none))
+#else
+#define VM_ABI
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #define UNUSED __attribute__((unused))
 #define LIKELY(x) __builtin_expect(!!(x), 1)
@@ -64,6 +77,47 @@ static bool prof_heat = false;    /* -p: PC heat map */
 static uint64_t prof_total = 0;
 static uint64_t prof_op[OP_COUNT] = {0};
 static uint64_t prof_heat_map[MEM_SIZE];
+static bool rv32i_pc430_enabled = false;
+
+/* Generated RV32I loader hot traces. The patch-target cells are operands the
+ * trace intentionally rewrites before executing the patched instruction.
+ */
+enum {
+    RV32I_PC430 = 430,             /* dispatch-loop load/decode trace */
+    RV32I_PC448 = 448,             /* PC430 fall-through branch epilogue */
+    RV32I_PC430_END = 453,         /* last cell read by the PC430 trace */
+    RV32I_PC454 = 454,             /* PC430 taken-branch trace */
+    RV32I_PC454_FALLTHROUGH = 457, /* PC454 branch target equals fall-through */
+    RV32I_PC460 = 460,             /* instruction patched by PC457 */
+    RV32I_PC454_END = 468,         /* last cell read by the PC454 trace */
+    RV32I_PC430_PATCH_TARGET = 433,   /* PC430 writes PC433's source operand */
+    RV32I_PC448_BRANCH_TARGET = 453,  /* PC448 writes PC451's branch target */
+    RV32I_PC460_PATCH_TARGET = 461,   /* PC457 writes PC460's destination */
+    RV32I_PC460_DEST_SOURCE = 307,    /* PC454/PC457 compute that destination */
+    RV32I_PC499 = 499,                /* paired address update/backedge trace */
+    RV32I_PC499_END = 519,            /* last cell read by the PC499 trace */
+    RV32I_PC505_PATCH_TARGET = 506,   /* PC502 writes PC505's destination */
+    RV32I_PC511_PATCH_TARGET = 511,   /* PC508 writes PC511's source operand */
+    RV32I_PC574 = 574,                /* indirect load/update/backedge trace */
+    RV32I_PC574_END = 585,            /* last cell read by the PC574 trace */
+    RV32I_PC574_PATCH_TARGET = 577,   /* PC574 writes PC577's source operand */
+    RV32I_MOVE_C = NEGATIVE_FLAG | 6, /* MUX with zero-mask cell 6 */
+};
+
+/* Generated trace cells used by the PC430/PC454 superinstructions. These names
+ * describe their role inside the trace, not a global RV32I architectural role.
+ */
+enum {
+    RV32I_ZERO_CELL = 0,
+    RV32I_TRACE_BASE = 4,
+    RV32I_TRACE_STRIDE = 7,
+    RV32I_TRACE_DEC = 8,
+    RV32I_TRACE_VALUE = 11,
+    RV32I_TRACE_LIMIT = 12,
+    RV32I_TRACE_CURSOR = 38,
+    RV32I_TRACE_COND = 39,
+    RV32I_TRACE_ALT_ADDR = 309,
+};
 
 /* Classify a cell by its operands into GET/PUT/MUX/SUBLEQ. Single source of
  * truth for the opcode class (stable under the image's operand self-
@@ -83,10 +137,10 @@ static inline uint8_t classify(uint16_t a, uint16_t b, uint16_t c)
 }
 
 /* Forward declarations for the mutually recursive VM functions. */
-static int dispatch(uint16_t pc,
-                    uint16_t addr_a,
-                    uint16_t addr_b,
-                    uint16_t addr_c);
+static VM_ABI int dispatch(uint16_t pc,
+                           uint16_t addr_a,
+                           uint16_t addr_b,
+                           uint16_t addr_c);
 
 /* Fetch the next instruction's operands and tail-call dispatch. A negative
  * next_pc is the MUXLEQ halt / negative-branch marker (e.g. a 0xFFFF exit
@@ -121,16 +175,56 @@ static bool is_subleq_instruction(uint16_t a, uint16_t b, uint16_t c)
     return classify(a, b, c) == OP_SUBLEQ;
 }
 
+static inline bool rv32i_static_hot_trace_cell(uint16_t addr)
+{
+    return addr >= RV32I_PC430 && addr <= RV32I_PC454_END &&
+           addr != RV32I_PC430_PATCH_TARGET &&
+           addr != RV32I_PC448_BRANCH_TARGET &&
+           addr != RV32I_PC460_PATCH_TARGET;
+}
+
+static inline bool rv32i_pc574_static_hot_trace_cell(uint16_t addr)
+{
+    return addr >= RV32I_PC574 && addr <= RV32I_PC574_END &&
+           addr != RV32I_PC574_PATCH_TARGET;
+}
+
+static inline bool rv32i_pc499_static_hot_trace_cell(uint16_t addr)
+{
+    return addr >= RV32I_PC499 && addr <= RV32I_PC499_END &&
+           addr != RV32I_PC505_PATCH_TARGET && addr != RV32I_PC511_PATCH_TARGET;
+}
+
+static inline void store_cell(uint16_t addr, uint16_t value)
+{
+    /* Test the flag first: it is false on every non-'-r' run, so the common hot
+     * path short-circuits before the range check.
+     */
+    if (UNLIKELY(rv32i_pc430_enabled &&
+                 (rv32i_static_hot_trace_cell(addr) ||
+                  rv32i_pc499_static_hot_trace_cell(addr) ||
+                  rv32i_pc574_static_hot_trace_cell(addr))))
+        rv32i_pc430_enabled = false;
+    m[addr] = value;
+}
+
+#define EXEC_MOVE(a, b) store_cell(b, m[(a)])
+#define EXEC_SUBLEQ(a, b, result)                         \
+    const uint16_t result = (uint16_t) (m[(b)] - m[(a)]); \
+    store_cell(b, result)
+#define EXEC_SUBLEQ_DROP(a, b) store_cell(b, (uint16_t) (m[(b)] - m[(a)]))
+#define SUBLEQ_BRANCHES(result) ((result) == 0 || ((result) & NEGATIVE_FLAG))
+
 /* Optional prefix input fed before real stdin: -r synthesizes an RV32I loader
  * here.
  */
 static const char *prefix_in = NULL;
 static size_t prefix_len = 0, prefix_pos = 0;
 
-static int get(uint16_t pc,
-               UNUSED uint16_t addr_a,
-               uint16_t addr_b,
-               UNUSED uint16_t addr_c)
+static VM_ABI int get(uint16_t pc,
+                      UNUSED uint16_t addr_a,
+                      uint16_t addr_b,
+                      UNUSED uint16_t addr_c)
 {
     const int input = prefix_pos < prefix_len
                           ? (unsigned char) prefix_in[prefix_pos++]
@@ -138,14 +232,14 @@ static int get(uint16_t pc,
     if (UNLIKELY(input == EOF))
         return 0; /* Halt on End-of-File. */
 
-    m[addr_b] = (uint16_t) input;
+    store_cell(addr_b, (uint16_t) input);
     FETCH_AND_DISPATCH(pc + INSN_SIZE);
 }
 
-static int put(uint16_t pc,
-               uint16_t addr_a,
-               UNUSED uint16_t addr_b,
-               UNUSED uint16_t addr_c)
+static VM_ABI int put(uint16_t pc,
+                      uint16_t addr_a,
+                      UNUSED uint16_t addr_b,
+                      UNUSED uint16_t addr_c)
 {
     if (UNLIKELY(putchar(m[addr_a]) == EOF))
         return 3; /* Halt on output error. */
@@ -154,25 +248,26 @@ static int put(uint16_t pc,
 }
 
 /* MUX with extended fusion for Forth inner interpreter patterns */
-static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
+static VM_ABI int mux(uint16_t pc,
+                      uint16_t addr_a,
+                      uint16_t addr_b,
+                      uint16_t addr_c)
 {
     const uint16_t mask_addr = addr_c & MEM_MASK;
 
     if (LIKELY(mask_addr == 6)) {
         /* Address 6 is always 0 - pure move (99.7% of MUX operations) */
-        m[addr_b] = m[addr_a];
+        store_cell(addr_b, m[addr_a]);
     } else {
         const uint16_t mask = m[mask_addr];
         if (UNLIKELY(mask == 0)) {
-            m[addr_b] = m[addr_a];
+            store_cell(addr_b, m[addr_a]);
         } else {
-            /* General MUX operation for non-zero masks */
-            m[addr_b] = (m[addr_a] & ~mask) | (m[addr_b] & mask);
-            FETCH_AND_DISPATCH(pc + INSN_SIZE);
+            store_cell(addr_b, (m[addr_a] & ~mask) | (m[addr_b] & mask));
         }
     }
 
-    /* Look ahead for fusion opportunities after a move */
+    /* Look ahead for fusion opportunities after MUX */
     const uint16_t next_pc = pc + INSN_SIZE;
     if (UNLIKELY((next_pc & NEGATIVE_FLAG) !=
                  0)) /* PC went negative: halt (as dispatch would) */
@@ -182,12 +277,11 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
     const uint16_t next_b = m[next_pc + B];
     const uint16_t next_c = m[next_pc + C];
 
-    /* Pattern 1: MOVE + SUBLEQ */
+    /* Pattern 1: MUX + SUBLEQ */
     if (is_subleq_instruction(next_a, next_b, next_c)) {
-        const uint16_t result = m[next_b] - m[next_a];
-        m[next_b] = result;
+        EXEC_SUBLEQ(next_a, next_b, result);
 
-        if (UNLIKELY((result == 0) || (result & NEGATIVE_FLAG))) {
+        if (UNLIKELY(SUBLEQ_BRANCHES(result))) {
             FETCH_AND_DISPATCH(next_c);
         } else {
             /* Extend to 3-instruction fusion for common Forth patterns */
@@ -197,9 +291,9 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
                 const uint16_t third_b = m[third_pc + B];
                 const uint16_t third_c = m[third_pc + C];
 
-                /* MOVE + SUBLEQ + MOVE (common: load, operate, store) */
+                /* MUX + SUBLEQ + MOVE (common: load, operate, store) */
                 if (is_move_instruction(third_a, third_b, third_c)) {
-                    m[third_b] = m[third_a];
+                    EXEC_MOVE(third_a, third_b);
                     FETCH_AND_DISPATCH(third_pc + INSN_SIZE);
                 } else {
                     FETCH_AND_DISPATCH(third_pc);
@@ -209,11 +303,11 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
             }
         }
     }
-    /* Pattern 2: MOVE + MOVE */
+    /* Pattern 2: MUX + MOVE */
     else if (is_move_instruction(next_a, next_b, next_c)) {
-        m[next_b] = m[next_a]; /* Execute second move */
+        EXEC_MOVE(next_a, next_b);
 
-        /* Try to extend: MOVE + MOVE + SUBLEQ (common in Forth stack
+        /* Try to extend: MUX + MOVE + SUBLEQ (common in Forth stack
          * manipulation)
          */
         const uint16_t third_pc = next_pc + INSN_SIZE;
@@ -223,10 +317,9 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
             const uint16_t third_c = m[third_pc + C];
 
             if (is_subleq_instruction(third_a, third_b, third_c)) {
-                const uint16_t result = m[third_b] - m[third_a];
-                m[third_b] = result;
+                EXEC_SUBLEQ(third_a, third_b, result);
 
-                if (UNLIKELY((result == 0) || (result & NEGATIVE_FLAG))) {
+                if (UNLIKELY(SUBLEQ_BRANCHES(result))) {
                     FETCH_AND_DISPATCH(third_c);
                 } else {
                     FETCH_AND_DISPATCH(third_pc + INSN_SIZE);
@@ -245,19 +338,18 @@ static int mux(uint16_t pc, uint16_t addr_a, uint16_t addr_b, uint16_t addr_c)
 }
 
 /* SUBLEQ with extended fusion for Forth patterns */
-static int subleq(uint16_t pc,
-                  uint16_t addr_a,
-                  uint16_t addr_b,
-                  uint16_t addr_c)
+static VM_ABI int subleq(uint16_t pc,
+                         uint16_t addr_a,
+                         uint16_t addr_b,
+                         uint16_t addr_c)
 {
-    const uint16_t result = m[addr_b] - m[addr_a];
-    m[addr_b] = result;
+    EXEC_SUBLEQ(addr_a, addr_b, result);
 
-    if (UNLIKELY((result == 0) || (result & NEGATIVE_FLAG))) {
+    const uint16_t next_pc = pc + INSN_SIZE;
+    if (UNLIKELY(SUBLEQ_BRANCHES(result) && addr_c != next_pc)) {
         FETCH_AND_DISPATCH(addr_c); /* Branch taken, cannot fuse. */
     } else {
         /* No branch - look for fusion opportunities */
-        const uint16_t next_pc = pc + INSN_SIZE;
         if (UNLIKELY((next_pc & NEGATIVE_FLAG) !=
                      0)) /* PC went negative: halt (as dispatch would) */
             return 0;
@@ -268,10 +360,9 @@ static int subleq(uint16_t pc,
 
         /* Pattern 1: SUBLEQ + SUBLEQ */
         if (is_subleq_instruction(next_a, next_b, next_c)) {
-            const uint16_t result2 = m[next_b] - m[next_a];
-            m[next_b] = result2;
+            EXEC_SUBLEQ(next_a, next_b, result2);
 
-            if (UNLIKELY((result2 == 0) || (result2 & NEGATIVE_FLAG))) {
+            if (UNLIKELY(SUBLEQ_BRANCHES(result2))) {
                 FETCH_AND_DISPATCH(next_c);
             } else {
                 /* Try to extend: SUBLEQ + SUBLEQ + MOVE (arithmetic + cleanup)
@@ -283,7 +374,7 @@ static int subleq(uint16_t pc,
                     const uint16_t third_c = m[third_pc + C];
 
                     if (is_move_instruction(third_a, third_b, third_c)) {
-                        m[third_b] = m[third_a];
+                        EXEC_MOVE(third_a, third_b);
                         FETCH_AND_DISPATCH(third_pc + INSN_SIZE);
                     } else {
                         FETCH_AND_DISPATCH(third_pc);
@@ -295,8 +386,25 @@ static int subleq(uint16_t pc,
         }
         /* Pattern 2: SUBLEQ + MOVE */
         else if (is_move_instruction(next_a, next_b, next_c)) {
-            m[next_b] = m[next_a]; /* Execute the move */
-            FETCH_AND_DISPATCH(next_pc + INSN_SIZE);
+            EXEC_MOVE(next_a, next_b);
+            const uint16_t third_pc = next_pc + INSN_SIZE;
+            if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
+                const uint16_t third_a = m[third_pc + A];
+                const uint16_t third_b = m[third_pc + B];
+                const uint16_t third_c = m[third_pc + C];
+
+                if (is_subleq_instruction(third_a, third_b, third_c)) {
+                    EXEC_SUBLEQ(third_a, third_b, result2);
+                    if (UNLIKELY(SUBLEQ_BRANCHES(result2)))
+                        FETCH_AND_DISPATCH(third_c);
+                    else
+                        FETCH_AND_DISPATCH(third_pc + INSN_SIZE);
+                } else {
+                    FETCH_AND_DISPATCH(third_pc);
+                }
+            } else {
+                FETCH_AND_DISPATCH(third_pc);
+            }
         }
         /* No fusion possible */
         else {
@@ -305,10 +413,108 @@ static int subleq(uint16_t pc,
     }
 }
 
-static int dispatch(uint16_t pc,
-                    uint16_t addr_a,
-                    uint16_t addr_b,
-                    uint16_t addr_c)
+static VM_ABI int super_rv32i_pc454(UNUSED uint16_t pc,
+                                    UNUSED uint16_t addr_a,
+                                    UNUSED uint16_t addr_b,
+                                    UNUSED uint16_t addr_c)
+{
+    /* PC454..468: update PC460's destination source, patch PC460.b, move the
+     * trace cursor through that patched destination, restore the cursor from
+     * the trace value, then branch back to PC430.
+     */
+    EXEC_SUBLEQ_DROP(RV32I_TRACE_STRIDE, RV32I_PC460_DEST_SOURCE);
+    EXEC_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC460_PATCH_TARGET);
+
+    const uint16_t pc460_b = m[RV32I_PC460_PATCH_TARGET];
+    if (UNLIKELY(pc460_b == IO_MARKER ||
+                 (pc460_b >= RV32I_PC454 && pc460_b <= RV32I_PC454_END)))
+        FETCH_AND_DISPATCH(RV32I_PC460);
+
+    EXEC_MOVE(RV32I_TRACE_CURSOR, pc460_b);
+    EXEC_MOVE(RV32I_TRACE_VALUE, RV32I_TRACE_CURSOR);
+    EXEC_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    FETCH_AND_DISPATCH(RV32I_PC430);
+}
+
+static VM_ABI int super_rv32i_pc430(UNUSED uint16_t pc,
+                                    UNUSED uint16_t addr_a,
+                                    UNUSED uint16_t addr_b,
+                                    UNUSED uint16_t addr_c)
+{
+    /* PC430..451: patch PC433.a from the trace cursor, load the trace value
+     * indirectly, update cursor/limit cells, then either enter the PC454 trace
+     * or fold the PC448 fall-through epilogue.
+     */
+    EXEC_MOVE(RV32I_TRACE_CURSOR, RV32I_PC430_PATCH_TARGET);
+    EXEC_MOVE(m[RV32I_PC430_PATCH_TARGET], RV32I_TRACE_VALUE);
+    EXEC_SUBLEQ_DROP(RV32I_TRACE_STRIDE, RV32I_TRACE_CURSOR);
+    EXEC_MOVE(RV32I_TRACE_BASE, RV32I_TRACE_LIMIT);
+    EXEC_SUBLEQ_DROP(RV32I_TRACE_VALUE, RV32I_TRACE_LIMIT);
+
+    EXEC_SUBLEQ(RV32I_ZERO_CELL, RV32I_TRACE_LIMIT, result2);
+    if (UNLIKELY(SUBLEQ_BRANCHES(result2)))
+        MUST_TAIL return super_rv32i_pc454(RV32I_PC454, RV32I_TRACE_STRIDE,
+                                           RV32I_PC460_DEST_SOURCE,
+                                           RV32I_PC454_FALLTHROUGH);
+
+    EXEC_MOVE(RV32I_TRACE_VALUE, RV32I_PC448_BRANCH_TARGET);
+    EXEC_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    FETCH_AND_DISPATCH(m[RV32I_PC448_BRANCH_TARGET]);
+}
+
+static VM_ABI int super_rv32i_pc499(UNUSED uint16_t pc,
+                                    UNUSED uint16_t addr_a,
+                                    UNUSED uint16_t addr_b,
+                                    UNUSED uint16_t addr_c)
+{
+    /* PC499..517: update two computed address cells, use each as a patched MOVE
+     * operand, restore the trace condition cell, then branch back to PC430.
+     */
+    EXEC_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_TRACE_ALT_ADDR);
+    EXEC_MOVE(RV32I_TRACE_ALT_ADDR, RV32I_PC505_PATCH_TARGET);
+
+    const uint16_t pc505_b = m[RV32I_PC505_PATCH_TARGET];
+    if (UNLIKELY(pc505_b == IO_MARKER ||
+                 (pc505_b >= RV32I_PC499 && pc505_b <= RV32I_PC499_END)))
+        FETCH_AND_DISPATCH(RV32I_PC505_PATCH_TARGET - 1);
+    EXEC_MOVE(RV32I_TRACE_COND, pc505_b);
+
+    EXEC_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC511_PATCH_TARGET);
+    const uint16_t pc511_a = m[RV32I_PC511_PATCH_TARGET];
+    if (UNLIKELY(pc511_a == IO_MARKER))
+        FETCH_AND_DISPATCH(RV32I_PC511_PATCH_TARGET);
+    EXEC_MOVE(pc511_a, RV32I_TRACE_COND);
+
+    EXEC_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_PC460_DEST_SOURCE);
+    EXEC_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    FETCH_AND_DISPATCH(RV32I_PC430);
+}
+
+static VM_ABI int super_rv32i_pc574(UNUSED uint16_t pc,
+                                    UNUSED uint16_t addr_a,
+                                    UNUSED uint16_t addr_b,
+                                    UNUSED uint16_t addr_c)
+{
+    /* PC574..585: patch PC577.a from the computed address cell, load through it
+     * into the trace cursor, decrement that address cell, then branch back to
+     * PC430.
+     */
+    EXEC_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC574_PATCH_TARGET);
+
+    const uint16_t pc577_a = m[RV32I_PC574_PATCH_TARGET];
+    if (UNLIKELY(pc577_a == IO_MARKER))
+        FETCH_AND_DISPATCH(RV32I_PC574_PATCH_TARGET);
+
+    EXEC_MOVE(pc577_a, RV32I_TRACE_CURSOR);
+    EXEC_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_PC460_DEST_SOURCE);
+    EXEC_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    FETCH_AND_DISPATCH(RV32I_PC430);
+}
+
+static VM_ABI int dispatch(uint16_t pc,
+                           uint16_t addr_a,
+                           uint16_t addr_b,
+                           uint16_t addr_c)
 {
     /* Halt if the program counter becomes negative. */
     if (UNLIKELY((pc & NEGATIVE_FLAG) != 0))
@@ -322,6 +528,25 @@ static int dispatch(uint16_t pc,
             prof_op[classify(addr_a, addr_b, addr_c)]++;
     }
 
+    if (UNLIKELY(pc == RV32I_PC430 && rv32i_pc430_enabled &&
+                 addr_a == RV32I_TRACE_CURSOR &&
+                 addr_b == RV32I_PC430_PATCH_TARGET && addr_c == RV32I_MOVE_C &&
+                 m[RV32I_TRACE_CURSOR] != IO_MARKER))
+        MUST_TAIL return super_rv32i_pc430(pc, addr_a, addr_b, addr_c);
+    if (UNLIKELY(pc == RV32I_PC454 && rv32i_pc430_enabled &&
+                 addr_a == RV32I_TRACE_STRIDE &&
+                 addr_b == RV32I_PC460_DEST_SOURCE &&
+                 addr_c == RV32I_PC454_FALLTHROUGH))
+        MUST_TAIL return super_rv32i_pc454(pc, addr_a, addr_b, addr_c);
+    if (UNLIKELY(pc == RV32I_PC499 && rv32i_pc430_enabled &&
+                 addr_a == RV32I_TRACE_DEC && addr_b == RV32I_TRACE_ALT_ADDR &&
+                 addr_c == RV32I_PC499 + INSN_SIZE))
+        MUST_TAIL return super_rv32i_pc499(pc, addr_a, addr_b, addr_c);
+    if (UNLIKELY(pc == RV32I_PC574 && rv32i_pc430_enabled &&
+                 addr_a == RV32I_PC460_DEST_SOURCE &&
+                 addr_b == RV32I_PC574_PATCH_TARGET && addr_c == RV32I_MOVE_C &&
+                 m[RV32I_PC460_DEST_SOURCE] != IO_MARKER))
+        MUST_TAIL return super_rv32i_pc574(pc, addr_a, addr_b, addr_c);
     /* Dispatch to the appropriate handler based on the operand values. */
     if (UNLIKELY(addr_a == IO_MARKER))
         MUST_TAIL return get(pc, addr_a, addr_b, addr_c);
@@ -329,7 +554,7 @@ static int dispatch(uint16_t pc,
     if (UNLIKELY(addr_b == IO_MARKER))
         MUST_TAIL return put(pc, addr_a, addr_b, addr_c);
 
-    if (UNLIKELY((addr_c & NEGATIVE_FLAG) && (addr_c != IO_MARKER)))
+    if ((addr_c & NEGATIVE_FLAG) && (addr_c != IO_MARKER))
         MUST_TAIL return mux(pc, addr_a, addr_b, addr_c);
 
     /* Default to SUBLEQ operation. */
@@ -409,6 +634,7 @@ static uint16_t rd16(const unsigned char *p)
  */
 static void load_rv32i(const char *path)
 {
+    rv32i_pc430_enabled = true;
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "muxleq: cannot open '%s'\n", path);
@@ -550,6 +776,7 @@ static void load_rv32i(const char *path)
  */
 static void load_muxleq(const char *path)
 {
+    rv32i_pc430_enabled = false;
     FILE *f = fopen(path, "r");
     if (!f) {
         fprintf(stderr, "muxleq: cannot open '%s'\n", path);

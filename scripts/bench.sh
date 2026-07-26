@@ -1,4 +1,5 @@
 #!/bin/sh
+
 # Consolidated benchmark suite. Builds and times the VM on a quiet remote host
 # (node1 by default) because localhost load makes wall-clock timing unreliable.
 # Ships the current sources, runs scripts/bench-remote.sh there, cleans up.
@@ -15,14 +16,32 @@ REPS=${REPS:-5}
 case $TIME in '' | *[!0-9]* | 0) echo "bench: TIME must be a positive integer" >&2; exit 1 ;; esac
 case $REPS in '' | *[!0-9]* | 0) echo "bench: REPS must be a positive integer" >&2; exit 1 ;; esac
 
-files="muxleq.c stage0.c muxleq.fth tests/chacha20.fth scripts/bench-remote.sh"
+quote_env_value() {
+    printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+}
+
+files="muxleq.c stage0.c build/muxleq.fth tests/chacha20.fth scripts/bench-remote.sh"
 for f in $files; do
     [ -f "$f" ] || { echo "bench: missing $f (run 'make' first)" >&2; exit 1; }
 done
 
 # Params travel in a sourced env file, never interpolated into the remote
 # command line -- so nothing in TIME/REPS/CFLAGS can break out of the ssh shell.
-printf "TIME=%s\nREPS=%s\nCFLAGS='%s'\n" "$TIME" "$REPS" "${BENCH_CFLAGS:--O2 -std=c99}" >bench.env
+{
+    printf "TIME=%s\nREPS=%s\nCFLAGS=" "$TIME" "$REPS"
+    quote_env_value "${BENCH_CFLAGS:--O2 -std=c99}"
+    printf "\n"
+    if [ "${CC+x}" ]; then
+        printf "CC="
+        quote_env_value "$CC"
+        printf "\n"
+    fi
+    if [ "${MUXLEQ_CC+x}" ]; then
+        printf "MUXLEQ_CC="
+        quote_env_value "$MUXLEQ_CC"
+        printf "\n"
+    fi
+} >bench.env
 
 # Signals route through the EXIT trap so cleanup runs exactly once and the
 # script actually aborts (REMOTE is empty until mktemp succeeds).

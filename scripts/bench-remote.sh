@@ -1,4 +1,5 @@
 #!/bin/sh
+
 # Runs on the benchmark host (node1) inside a temp dir populated by bench.sh.
 # Builds the VM from the shipped sources and reports throughput for a fixed,
 # representative, deterministic workload set as Mops/s = dispatched MUXLEQ ops
@@ -8,13 +9,14 @@
 # silently reports a bogus 0 is worse than one that stops.
 set -e
 . ./bench.env # TIME, REPS, CFLAGS
+MUXLEQ_CC=${MUXLEQ_CC:-${CC:-$(command -v clang >/dev/null 2>&1 && echo clang || echo cc)}}
 
 command -v /usr/bin/time >/dev/null 2>&1 || {
     echo "bench: /usr/bin/time not found (install the 'time' package)" >&2
     exit 1
 }
 
-cc $CFLAGS -o muxleq muxleq.c
+$MUXLEQ_CC $CFLAGS -o muxleq muxleq.c
 
 TOTAL_OPS=0
 TOTAL_T=0
@@ -24,12 +26,12 @@ TOTAL_T=0
 # MUXLEQ ops -- fused MOVE/SUBLEQ that execute inline never re-enter dispatch
 # (muxleq.c), so the true op count is higher; this "op" is one dispatched
 # instruction, i.e. the interpreter's dispatch rate. It is still an exact,
-# deterministic performance figure: the count is
-# identical every run (machine-independent), so it is captured ONCE with -s, while
-# wall-clock is measured over REPS UNINSTRUMENTED runs (the -s counter itself
-# perturbs timing) keeping the best (min) user time -- the least-perturbed sample.
-# Exact numerator over a noise-minimized denominator, so the raw count is never
-# shown on its own -- always turned into a rate.
+# deterministic performance figure: the count is identical every run
+# (machine-independent), so it is captured ONCE with -s, while wall-clock is
+# measured over REPS UNINSTRUMENTED runs (the -s counter itself perturbs timing)
+# keeping the best (min) user time -- the least-perturbed sample. Exact
+# numerator over a noise-minimized denominator, so the raw count is never shown
+# on its own -- always turned into a rate.
 run() {
     name=$1
     shift
@@ -43,8 +45,10 @@ run() {
         /usr/bin/time -p ./muxleq <input.tmp >/dev/null 2>time.tmp
         t=$(awk '/^user/ { print $2 }' time.tmp)
         [ -n "$t" ] || { echo "bench: $name produced no timing" >&2; exit 1; }
+
         # a 0.00s sample means the workload is too short to time reliably -- the
-        # min would latch onto it and divide by zero below, so fail loud instead.
+        # min would latch onto it and divide by zero below, so fail loud
+        # instead.
         awk -v t="$t" 'BEGIN { exit (t > 0) ? 0 : 1 }' || {
             echo "bench: $name user time is ${t}s -- workload too short; raise TIME/REPS" >&2
             exit 1
@@ -61,6 +65,6 @@ run() {
 echo "=== muxleq throughput on $(hostname), best user of $REPS reps (Mops/s = M dispatched instructions/s) ==="
 run ms-timer  sh -c "echo '$TIME ms bye'"
 run chacha20  cat tests/chacha20.fth
-run self-host cat muxleq.fth
+run self-host cat build/muxleq.fth
 awk -v o="$TOTAL_OPS" -v t="$TOTAL_T" 'BEGIN {
     printf "  %-11s %15s ops  sum  %8.3fs  %9.1f Mops/s\n", "overall", o, t, o / t / 1e6 }'

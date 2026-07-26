@@ -268,10 +268,10 @@ match, each run `timeout`-bounded so a mis-fused infinite loop fails rather than
 hangs), then `make verify-rvopt-gate` (the standalone `rvopt` AOT optimizer's
 native `-x`/`-x32` images must reproduce the `-r` interpreter on every demo plus
 the unopt loop, and still reject self-modifying guest code), followed by
-`make bootstrap`. Regenerate goldens intentionally with
-`make golden-update`. `tests/define.fth` is the runtime define-and-execute guard
-(colon defs, `execute`, `does>`, `create`). `mandel` is manual-only (it does not
-self-halt).
+`make bootstrap`. Regenerate an expected file manually after an intentional,
+reviewed behavior change. `tests/define.fth` is the runtime define-and-execute
+guard (colon defs, `execute`, `does>`, `create`). `mandel` does not self-halt, so
+its bounded prefix check is separate: `make golden-mandel`.
 
 ## 9. References
 
