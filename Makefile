@@ -44,7 +44,7 @@ GOLDEN_FILES := \
 	demo-hello demo-f demo-loops demo-trig demo-multiply \
 	demo-array demo-does demo-ascii \
 	demo-text demo-money demo-temp demo-weather demo-calendar \
-	demo-fig demo-stack demo-msgpass demo-value
+	demo-fig demo-stack demo-msgpass demo-value rv32i-smoke rv32i-spec
 
 # Bound each test run so a mis-fused interpreter that loops forever fails the
 # gate instead of hanging it -- an infinite loop is the likeliest fusion bug.
