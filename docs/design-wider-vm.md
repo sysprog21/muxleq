@@ -29,9 +29,9 @@ addresses would collide with both NEGATIVE_FLAG and IO_MARKER. Widening REQUIRES
 
 Two distinct places hit the wall:
 - rvopt `-mux` emits a STANDALONE image (code + imm pool + regfile + a power-of-two guest-RAM window) that
-  must fit MEM_SIZE=32768 cells, run via `./muxleq -x`. A bigger guest program emits a bigger image ->
+  must fit MEM_SIZE=32768 cells, run via `./build/muxleq -x`. A bigger guest program emits a bigger image ->
   overflow (this is the sra/ld_st skip, and the memory-lowering pass's would-be target).
-- `./muxleq -r` runs guest RV32I in a FIXED 32 KiB window (byte $7000 = cell $3800). The guest address space
+- `./build/muxleq -r` runs guest RV32I in a FIXED 32 KiB window (byte $7000 = cell $3800). The guest address space
   is bounded by the same 32768-cell wall.
 
 ## The sacred constraint
@@ -87,7 +87,7 @@ Split the decision by the actual need:
    mined even on -O0. So the real lever for -O0 is DEAD-STORE ELIMINATION / DCE / MEMORY-CELL COALESCING (keep
    values in the regfile, drop the spill loads/stores) -- the memory-lowering milestone, which measured ~0 on
    the -O2 demos (0 spills) but now has a concrete target. Those passes need the INTER-BLOCK LIVENESS that
-   milestone-1 def-use does not yet provide (codex caveat), so the next optimizer step is: extend def-use to
+   milestone-1 def-use does not yet provide (caveat), so the next optimizer step is: extend def-use to
    a backward liveness pass, then dead-store/DCE measured on unopt. This unblocks the optimizer track
    WITHOUT the wide VM.
 

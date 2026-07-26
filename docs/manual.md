@@ -4,7 +4,13 @@ MUXLEQ is a two-instruction esoteric machine -- SUBLEQ plus a multiplexing (MUX)
 operation -- hosting a complete, self-hosting 16-bit eForth. This manual documents
 the instruction set, the memory image, the build/bootstrap pipeline, the C
 interpreter, and how to test and extend the system. It describes the actual
-implementation in `muxleq.c` and `muxleq.fth`; when in doubt, the code wins.
+implementation in `muxleq.c` and the `forth/*.fth` modules; when in doubt, the
+code wins.
+
+Throughout, `muxleq.fth` names the generated `build/muxleq.fth`: the in-order
+concatenation of the `forth/*.fth` source modules that Gforth and the VM
+consume. Line numbers like `muxleq.fth:369` index that generated file; edit the
+`forth/` modules, never the concatenation.
 
 ## 1. Instruction set
 
@@ -95,36 +101,44 @@ cell and then execute it. Consequently:
 ## 3. Build and bootstrap pipeline
 
 ```
-muxleq.fth  --gforth-->  stage0.dec  --sed 's/$/,/'-->  stage0.c  --#include-->  m[] in muxleq.c
+forth/*.fth  --cat-->  build/muxleq.fth  --gforth-->  build/stage0.dec
+    --sed 's/$/,/'-->  build/stage0.c  --#include-->  m[] in muxleq.c
 ```
 
-- `muxleq.fth` (2376 lines) is a Gforth-hosted meta-compiler that assembles the
-  full eForth -- dictionary, inner interpreter, block editor, multitasker -- into
-  MUXLEQ cells. It runs under both Gforth (to build) and the target VM (to
-  self-host). Feature toggles are the `opt.*` constants near the top.
-- `stage0.dec` / `stage0.c` are generated -- never edit them. Change the language
-  or image via `muxleq.fth`; change the interpreter via `muxleq.c`.
-- `muxleq.c` (761 lines) `#include`s `stage0.c` to initialize `m[]`.
+- The language source is the numbered `forth/*.fth` modules, concatenated in
+  order into the generated `build/muxleq.fth` -- a Gforth-hosted meta-compiler
+  that assembles the full eForth (dictionary, inner interpreter, block editor,
+  multitasker) into MUXLEQ cells. `build/muxleq.fth` runs under both Gforth (to
+  build) and the target VM (to self-host). Feature toggles are the `opt.*`
+  constants in `forth/00-config.fth`. Edit the modules; never the concatenation.
+- Every generated artifact lives under `build/` (`build/muxleq.fth`,
+  `build/stage0.dec` / `build/stage0.c`, `build/rv32i-traces.inc`, the binaries)
+  -- never edit them. Change the language via the `forth/` modules; change the
+  interpreter via `muxleq.c`.
+- `muxleq.c` `#include <stage0.c>` (resolved from `build/` by `-Ibuild`) to
+  initialize `m[]`. The RV32I loader and its hot traces live in `rv32i.inc`,
+  `#include`d only when `ENABLE_RV32I` (the default).
 
 ### Self-hosting invariant
 
-`make bootstrap` feeds `muxleq.fth` to the built VM and checks that the VM
-reproduces `stage0.dec` byte-for-byte:
+`make bootstrap` feeds `build/muxleq.fth` to the built VM and checks that the VM
+reproduces `build/stage0.dec` byte-for-byte:
 
 ```
-gforth muxleq.fth > stage0.dec        # Gforth builds the image
-sed 's/$/,/' stage0.dec > stage0.c    # cells become a C initializer list
+sh scripts/update-muxleq-fth.sh build/muxleq.fth forth/*.fth  # concatenate modules
+gforth build/muxleq.fth > build/stage0.dec        # Gforth builds the image
+sed 's/$/,/' build/stage0.dec > build/stage0.c    # cells become a C init list
 python3 scripts/gen-rv32i-traces.py \
-    stage0.dec rv32i-traces.inc.in rv32i-traces.inc   # RV32I trace addresses
-cc -o muxleq muxleq.c                 # stage0.c + rv32i-traces.inc are #included
-./muxleq < muxleq.fth > stage1.dec    # the VM re-builds the image
-diff stage0.dec stage1.dec            # must be identical
+    build/stage0.dec rv32i-traces.inc.in build/rv32i-traces.inc  # trace addrs
+cc -Ibuild -o build/muxleq muxleq.c               # stage0.c + traces #included
+./build/muxleq < build/muxleq.fth > build/stage1.dec  # the VM re-builds the image
+diff build/stage0.dec build/stage1.dec            # must be identical
 ```
 
 (`make bootstrap` runs exactly this.)
 
 This is the project's strongest correctness test: the VM runs the entire
-meta-compiler under its own execution. Any change to `muxleq.fth` or `muxleq.c`
+meta-compiler under its own execution. Any change to the `forth/` modules or `muxleq.c`
 must keep it holding. Note that the meta-compiler assembles into a dump buffer it
 never executes -- it compiles *threaded code* (data the inner interpreter reads),
 not fresh instructions the VM runs -- which is what lets the interpreter reason
@@ -155,7 +169,7 @@ unaffected):
 - `-s` -- instruction mix (GET/PUT/MUX/SUBLEQ) at dispatch entry.
 - `-p` -- per-PC heat map with the top-16 hottest program counters.
 
-For example, `./muxleq -s < tests/sqrt.fth` reports MUX dispatches at ~46%, and
+For example, `./build/muxleq -s < tests/sqrt.fth` reports MUX dispatches at ~46%, and
 `-p` shows the hottest PCs are the inner-interpreter NEXT loop (`iLOAD` then
 `iJMP`, `muxleq.fth:369-373`) -- the target for macro-op fusion. The profiler's
 dispatch counts are deterministic, unlike wall-clock timing.
@@ -237,7 +251,7 @@ standard RISC-V interface. It builds through the same self-hosting pipeline as e
 Run a program directly:
 
 ```
-./muxleq -r prog          # prog is an ELF32-LE executable or a flat objcopy binary
+./build/muxleq -r prog          # prog is an ELF32-LE executable or a flat objcopy binary
 ```
 
 For an ELF the loader flattens the PT_LOAD segments to their virtual addresses (bss
@@ -257,10 +271,12 @@ golden runner tests. The full register/memory ABI and encoding hazards are in
 
 The freestanding RV32I examples and vendored rv32ui compliance suite build with a
 bare-metal RISC-V toolchain. The tested default prefix is `riscv-none-elf-`;
-override it as `make RVCROSS=riscv64-unknown-elf- verify-riscv-tests` if your
-toolchain uses that prefix. `make verify-riscv-tests` skips cleanly when
-`$(RVCROSS)gcc` is absent, while the committed `.elf` and `.bin` fixtures keep
-`make check` independent of any RISC-V toolchain.
+override it as `make RVCROSS=riscv64-unknown-elf-` if your toolchain uses that
+prefix. The `.elf` and `.bin` are generated from source into `build/rv32i` and
+never committed; CI publishes them as build artifacts. When `$(RVCROSS)gcc` is
+absent, `make check` skips its RV32I golden and rvopt-differential slices (and
+`make verify-riscv-tests` skips the rv32ui suite) with a clear notice, while the
+toolchain-free slices and the self-host bootstrap still run.
 
 ## 8. Testing
 
@@ -269,9 +285,11 @@ deterministic programs against `tests/expected/*.out` (the VM must exit 0 and
 match, each run `timeout`-bounded so a mis-fused infinite loop fails rather than
 hangs), then `make verify-rvopt-gate` (the standalone `rvopt` AOT optimizer's
 native `-x`/`-x32` images must reproduce the `-r` interpreter on every demo plus
-the unopt loop, and still reject self-modifying guest code), followed by
+the unopt loop, and still reject the runtime-JALR programs the backends cannot
+lower), followed by
 `make bootstrap`. Regenerate an expected file manually after an intentional,
-reviewed behavior change. `tests/define.fth` is the runtime define-and-execute
+reviewed behavior change (the RV32I demo slices need the toolchain and skip
+without it). `tests/define.fth` is the runtime define-and-execute
 guard (colon defs, `execute`, `does>`, `create`). `mandel` does not self-halt, so
 its bounded prefix check is separate: `make golden-mandel`.
 

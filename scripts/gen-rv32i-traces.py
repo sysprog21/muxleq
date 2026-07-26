@@ -4,10 +4,10 @@ import sys
 from pathlib import Path
 
 # These trace-cell constants mirror the RV32I_TRACE_* / RV32I_MOVE_C enum in
-# rv32i.c.inc. They cannot be shared from a single file: this generator needs
+# rv32i.inc. They cannot be shared from a single file: this generator needs
 # them to pattern-match the traces in stage0.dec before it can emit anything.
 # Both copies are validated against the image -- here by the pattern match below
-# (a mismatch aborts the build), in rv32i.c.inc by the golden gates.
+# (a mismatch aborts the build), in rv32i.inc by the golden gates.
 MEM_SIZE = 1 << 15
 NEGATIVE_FLAG = MEM_SIZE
 INSN_SIZE = 3

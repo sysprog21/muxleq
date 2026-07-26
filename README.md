@@ -23,14 +23,14 @@ This project provides a complete, self-hosting development environment for it.
 
 On top of that foundation it also hosts an RV32I ISA simulator: a RISC-V base-integer interpreter,
 assembled by the eForth image itself, that runs real RV32I programs on the two-instruction machine
-(`./muxleq -r`) -- a full RISC-V base ISA riding on a two-instruction OISC.
+(`./build/muxleq -r`) -- a full RISC-V base ISA riding on a two-instruction OISC.
 
 ## Introduction
 This repository contains a full toolchain for the MUXLEQ architecture, including:
 1. An assembler for the MUXLEQ instruction set.
 2. A virtual machine built upon the assembler.
 3. A cross-compiler that targets the VM with a version of the eForth programming language.
-4. An RV32I ISA simulator on top of MUXLEQ -- a RISC-V base-integer interpreter assembled into the eForth image, running RV32I programs via `./muxleq -r`.
+4. An RV32I ISA simulator on top of MUXLEQ -- a RISC-V base-integer interpreter assembled into the eForth image, running RV32I programs via `./build/muxleq -r`.
 
 The system is self-hosted, meaning the eForth environment can compile new versions of itself from source,
 allowing for seamless modification and extension.
@@ -44,13 +44,12 @@ This project requires a C compiler, Gforth, and GNU Make.
 * macOS: `brew install gforth`
 * Ubuntu/Debian: `sudo apt-get install gforth build-essential`
 
-To build the VM and run the eForth interpreter, simply use:
+Build the VM and start the eForth interpreter:
 ```shell
 $ make run
 ```
 
-You can now interact with the eForth interpreter.
-Below is an example session:
+An example session:
 ```
 words
 21 21 + . cr
@@ -76,16 +75,16 @@ Once defined, the word `hello` can be executed by typing its name.
 - `make bench` -- times the VM on a quiet remote host (`node1` by default, override with
   `BENCH_HOST`); localhost load makes wall-clock timing unreliable. Reports per-workload user
   time and a deterministic instruction count.
-- `./muxleq -s` and `./muxleq -p` -- the built-in profiler: instruction mix and a per-PC heat
+- `./build/muxleq -s` and `./build/muxleq -p` -- the built-in profiler: instruction mix and a per-PC heat
   map. Default runs (no flags) are byte-identical, so the gates are unaffected.
-- `./muxleq -r prog` -- run an RV32I program (an ELF32 executable or a flat `objcopy` binary) on
+- `./build/muxleq -r prog` -- run an RV32I program (an ELF32 executable or a flat `objcopy` binary) on
   the RV32I microcode interpreter that the image itself assembles -- a RISC-V ISA hosted on the
   16-bit OISC. `make verify-rv32i` checks it against an independent reference model. See the
   manual's RV32I section.
 - `rvopt` -- a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat binary to a native
   MUXLEQ image running on the two ops directly, with no interpreter layer: `rvopt -mux prog >
-  prog.dec` then `./muxleq -x prog.dec` for the 16-bit path (which beats `-r` on measured compute
-  targets), or `rvopt -mux32` then `./muxleq -x32` for the wide 32-bit-cell backend. The wide path
+  prog.dec` then `./build/muxleq -x prog.dec` for the 16-bit path (which beats `-r` on measured compute
+  targets), or `rvopt -mux32` then `./build/muxleq -x32` for the wide 32-bit-cell backend. The wide path
   passes all 40 rv32ui compliance tests, including large programs the 16-bit image cannot hold; both
   are differential-tested against `-r`. See [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
 - [`docs/manual.md`](docs/manual.md) -- reference manual: the instruction set, memory image and
@@ -165,13 +164,15 @@ The MUXLEQ design can be extended with other instructions by encoding them in th
 The Forth environment provided is a variant of **eForth**, designed by Bill Muench and C.H. Ting for portability and efficiency.
 It is implemented with a small set of assembly primitives, making it ideal for unconventional targets like MUXLEQ.
 
-The file `muxleq.fth` is a Forth program that functions as a cross-compiler.
-It translates eForth source code into a MUXLEQ memory image.
-The cross-compilation process involves several stages:
-1. Assembler: Defines MUXLEQ machine code primitives.
-2. Virtual Machine: Builds a VM layer on top of the assembler to support high-level Forth constructs.
-3. Forth Words: Defines the core Forth dictionary.
-4. Image Generation: Outputs the final Forth memory image to standard output.
+The cross-compiler source lives in the numbered `forth/*.fth` modules, which
+concatenate in order into the generated `build/muxleq.fth` -- a Forth program
+that translates eForth source into a MUXLEQ memory image. Edit the modules, not
+the generated file. The cross-compilation proceeds in four stages:
+
+1. Assembler: define the MUXLEQ machine-code primitives.
+2. Virtual machine: build a VM layer over the assembler for high-level Forth.
+3. Forth dictionary: define the core words.
+4. Image generation: write the final memory image to standard output.
 
 ### Bootstrap and Validation
 The system's correctness is validated through a self-hosting build process,
@@ -183,13 +184,17 @@ This validation can be run with a single command:
 $ make bootstrap
 ```
 
-This command executes the following steps:
-1. `gforth muxleq.fth > stage0.dec` - Uses Gforth to compile the first image (`stage0`).
-2. `cc -o muxleq muxleq.c` - Compiles the MUXLEQ virtual machine (the generated `stage0.c` and `rv32i-traces.inc` are `#include`d).
-3. `./muxleq < muxleq.fth > stage1.dec` - Runs the `stage0` image inside the VM to compile a second image (`stage1`).
-4. `diff -w stage0.dec stage1.dec` - Compares the two images.
+This command performs the following steps, all under `build/`:
+1. Concatenate the `forth/*.fth` modules into `build/muxleq.fth` and run it
+   through Gforth to produce the first image, `build/stage0.dec`.
+2. Compile the VM (`cc -Ibuild -o build/muxleq muxleq.c`), which `#include`s the
+   generated `build/stage0.c` and `build/rv32i-traces.inc`.
+3. Run `build/muxleq` on `build/muxleq.fth` to produce a second image,
+   `build/stage1.dec`.
+4. Compare the two images.
 
-If `stage0.dec` and `stage1.dec` are identical, the bootstrap is successful.
+If `build/stage0.dec` and `build/stage1.dec` are byte-for-byte identical, the
+bootstrap succeeds.
 
 ## License
 This project is released into the Public Domain.

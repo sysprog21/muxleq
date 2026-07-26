@@ -1,5 +1,9 @@
 # RV32I-on-MUXLEQ ABI and memory map
 
+> `muxleq.fth:N` line references index the generated `build/muxleq.fth` -- the
+> in-order concatenation of the `forth/*.fth` source modules. Edit the modules,
+> not the concatenation.
+
 Entry-gate design artifact for running RISC-V RV32I as a microcode interpreter on the 16-bit
 MUXLEQ VM. It settles the two decisions this design owes: the guest-address scheme, and
 the implementation layer + packaging (assembler-layer microcode, bootstrapped WITH `muxleq.fth` for
@@ -53,7 +57,7 @@ Implementing the no-op would spend scarce image cells (the self-host ceiling) fo
 change, so `tests/rv32i-run.fth` reuses FENCE (0x0000000F) as its unsupported-opcode trap probe.
 (FENCE is base RV32I; FENCE.I is the separate `Zifencei` extension, likewise not implemented.) To run a
 prebuilt binary directly, with no host-side conversion:
-`riscv-none-elf-objcopy -O binary prog.elf prog.bin; ./muxleq -r prog.bin`. The `-r` flag loads the
+`riscv-none-elf-objcopy -O binary prog.elf prog.bin; ./build/muxleq -r prog.bin`. The `-r` flag loads the
 flat binary into guest RAM and runs it from entry 0 via the image's built-in runner (`rvrun`/`rvboot`,
 which also load inline-built programs with `rvorg`/`rvcell,`). Proven with a prebuilt `hello.elf`
 (prints its message 5x, exits). Programs must fit the 32 KiB guest RAM (see next paragraph).
@@ -73,7 +77,7 @@ systematic self-checking suite -- all 37 computational ops with edge-value cross
 shift amount 0..31 + masking, signed/unsigned boundaries, 12-bit immediate sign boundaries, all
 branches with scrambled B-immediates, JAL, JALR (incl. the `&~1` alignment), and LUI/AUIPC -- and
 drives the same operands through `rvstep`. `--verify-model` anchors the model to every vector in the
-Codex-verified `tests/rv32i-spec.fth` (133 ALU/branch/jump/upper-immediate cases) so it can't share
+independently verified `tests/rv32i-spec.fth` (133 ALU/branch/jump/upper-immediate cases) so it can't share
 a bug with the microcode. `make verify-rv32i` runs it (~minutes, not in `make check`);
 all 2974 vectors pass. Loads/stores + `ecall` are covered live in `tests/rv32i-run.fth`.
 
@@ -107,26 +111,28 @@ at the meta-ASSEMBLER level, not Forth colon words:
 - The metacompiler emits the microcode IMAGE (cells); `muxleq.c` executing that image IS the RV32I
   simulator (OISC substrate + microcode = a standard RISC-V interface). Same pipeline
   as eForth: `rv32i.fth → cells → m[] → muxleq.c`.
-- PACKAGING (MANDATED, maintainer direction): `rv32i.fth` MUST be bootstrapped WITH `muxleq.fth`
-  for self-hosting, so `make bootstrap` re-assembles and byte-checks the microcode too. CAUTION
-  (Codex): the self-host feeds ONLY `muxleq.fth` on the VM's stdin (`./muxleq < muxleq.fth`) and
-  there is no target `include` word, so a plain host-side `include rv32i.fth` would build stage0 but
-  NOT be reproduced by stage1, breaking bootstrap. Two self-host-safe options: (a) the microcode is
-  an `opt.rv32i` section PHYSICALLY inside `muxleq.fth`; or (b) the Makefile concatenates
-  `muxleq.fth`+`rv32i.fth` into the SAME source fed to BOTH stage0 (Gforth) and stage1 (the VM).
-  `stage0.dec` grows,
-  and `make bootstrap` must stay byte-identical: the RV32I simulator thereby inherits the
-  self-hosting guarantee (the VM re-assembling itself reproduces the same microcode). A standalone
-  RV-monitor image kept OUT of the bootstrap is NOT the plan -- it would forfeit self-hosting. If a
-  larger compliance ELF ever needs more guest RAM than the combined image leaves, reclaim by making
-  the eForth portion tear-downable AFTER the RV monitor is live (frees ~6555 cells ≈ 13 KiB),
-  still within one self-hosted `muxleq.fth`+`rv32i.fth` build -- never by dropping self-hosting.
+- PACKAGING (as built): the RV32I microcode is the `opt.rv32i` section of the
+  numbered Forth modules -- `forth/30-rv32i-microcode.fth` plus
+  `forth/70-rv32i-runner.fth` -- which concatenate, in order, into the generated
+  `build/muxleq.fth` alongside the eForth modules. So `make bootstrap`
+  re-assembles and byte-checks the microcode too: the VM feeds ONLY
+  `build/muxleq.fth` on its stdin (`./build/muxleq < build/muxleq.fth`), and
+  because the microcode is physically in that one source, stage1 reproduces it
+  exactly. This is the self-host-safe realization of what the maintainer
+  mandated; a host-side `include rv32i.fth` was rejected because there is no
+  target `include` word, so it would build stage0 but NOT be reproduced by
+  stage1, breaking bootstrap. A standalone RV-monitor image kept OUT of the
+  bootstrap is NOT the plan -- it would forfeit self-hosting. If a larger
+  compliance ELF ever needs more guest RAM than the combined image leaves,
+  reclaim by making the eForth portion tear-downable AFTER the RV monitor is
+  live (frees ~6555 cells ~= 13 KiB), still within one self-hosted build --
+  never by dropping self-hosting.
 - Test discipline still hangs off `make golden && make bootstrap`: a thin Forth HARNESS presets the
   register/fixture cells, invokes the microcode entry once per instruction, and prints `rd`/`x0`
   for the golden. The harness is Forth; the decode+execute it drives is the assembler-layer
   microcode. (An offline reference model is a separate oracle.)
 
-## Assembler-layer implementation hazards (Codex-flagged)
+## Assembler-layer implementation hazards
 
 Writing self-hosting assembler-layer microcode has traps the colon layer doesn't:
 

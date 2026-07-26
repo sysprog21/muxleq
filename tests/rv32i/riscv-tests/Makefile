@@ -1,4 +1,4 @@
-# RV32I compliance for `../../../muxleq` via the official riscv-tests rv32ui suite.
+# RV32I compliance for `../../../build/muxleq` via the official riscv-tests rv32ui suite.
 #
 # The upstream test bodies are NOT vendored: this Makefile shallow-clones them
 # (pinned to UPSTREAM_REV) into ./upstream (gitignored) and builds each with a
@@ -14,8 +14,8 @@ CC      = $(CROSS)gcc
 # gcc (not as) so the C preprocessor runs the #include/#define/MASK_XLEN machinery.
 CFLAGS  = -march=rv32i -mabi=ilp32 -nostdlib -nostartfiles -static -no-pie \
           -I. -Iupstream/isa/macros/scalar -Wl,--no-warn-rwx-segments
-MUXLEQ ?= ../../../muxleq
-RVOPT  ?= ../../../rvopt
+MUXLEQ ?= ../../../build/muxleq
+RVOPT  ?= ../../../build/rvopt
 # Bound each run so a regressed branch/jump that loops forever fails the gate
 # instead of hanging it. The top Makefile passes its own detected value; a
 # standalone run auto-detects. Empty (no timeout tool) => unguarded, as elsewhere.

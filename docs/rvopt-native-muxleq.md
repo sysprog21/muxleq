@@ -1,5 +1,9 @@
 # rvopt native-MUXLEQ emission
 
+> `muxleq.fth:N` line references index the generated `build/muxleq.fth` -- the
+> in-order concatenation of the `forth/*.fth` source modules. Edit the modules,
+> not the concatenation.
+
 Status: IMPLEMENTED. Native emission lowers an RV32I program to a standalone MUXLEQ image that runs on the two ops directly, with no eForth vm layer, so it is the only path faster than the -r interpreter. It is now built and mature. The design content below (image layout, 32-bit macros, per-op lowering)
 is the as-built architecture; the staged slices and open questions it closes with were all resolved in
 implementation. The commit history records every measured optimization and the open frontier.
@@ -11,9 +15,9 @@ graph IR (flat `struct node` array: linear decode + intra-block value/def-use ed
 chain) and emits one of:
 
 - `rvopt -mux prog` -- a standalone 16-bit-cell MUXLEQ image (`.dec`, decimal cells like `stage0.dec`) run
-  by `./muxleq -x`. The payoff path: runs on the two ops + fusion directly, no eForth/`vm`/`rvstep`. A whole
+  by `./build/muxleq -x`. The payoff path: runs on the two ops + fusion directly, no eForth/`vm`/`rvstep`. A whole
   32-bit register is a lo/hi cell pair, so arithmetic is 2-cell macros (carry/borrow votes, bit15 sign).
-- `rvopt -mux32 prog` -- a standalone 32-bit-cell WIDE image run by `./muxleq -x32` (a separate 2M-cell
+- `rvopt -mux32 prog` -- a standalone 32-bit-cell WIDE image run by `./build/muxleq -x32` (a separate 2M-cell
   runner, `NEG_FLAG = 1<<31`). A whole register is ONE cell, so the ALU is native single-cell SUBLEQ/MUX (no
   lo/hi halves, no carry/borrow votes -- only the compares sign-flip at bit31); and the address space is not
   capped at the 15-bit / 32768-cell wall, so large-`.data` programs the 16-bit image cannot hold now run.
@@ -62,7 +66,7 @@ the eForth image.
 
 ```
 rvopt -mux prog.elf > prog.dec     # emit a standalone MUXLEQ image (decimal cells, like stage0.dec)
-./muxleq -x prog.dec               # load prog.dec into m[], run from pc 0
+./build/muxleq -x prog.dec               # load prog.dec into m[], run from pc 0
 ```
 
 - `.dec` format = one decimal cell per line (exactly `stage0.dec`'s format; human-inspectable, reuses the
@@ -79,8 +83,8 @@ rvopt -mux prog.elf > prog.dec     # emit a standalone MUXLEQ image (decimal cel
 
 ## Image layout (rvopt-assigned absolute cell addresses, all < 32768)
 
-ONE allocator with reserved, non-overlapping ranges assigns every cell (codex: entry code, address 6,
-constants, and the regfile can otherwise collide). Address-6 subtlety (codex): the VM treats MUX *mask
+ONE allocator with reserved, non-overlapping ranges assigns every cell (entry code, address 6,
+constants, and the regfile can otherwise collide). Address-6 subtlety: the VM treats MUX *mask
 address* 6 as zero regardless of `m[6]` (muxleq.c:189) -- so a MOVE is `c = 0x8006` (NEGATIVE_FLAG | 6), and
 `m[6]` is NOT a general zero cell for SUBLEQ arithmetic; use a SEPARATE constant-zero cell. Slice 2 (built)
 showed a `c=0x8006` MOVE is a copy for ANY src/dst regardless of what m[6] holds (the VM hardwires
@@ -147,13 +151,13 @@ AND/OR verified empirically (MUX): `rd=rs1&rs2` = MOVE rs1->rd; `MUX(Z, rd, 0x80
 MOVE rs2->rd; `MUX(rs1, rd, 0x8000|rs2)`. XOR = (rs1&~rs2)|(~rs1&rs2), 2 MUX + an OR per half (or
 `~x = ONES - x` since ONES is all-ones and x<=0xFFFF borrows nothing).
 
-FOUNDATION FACT (codex review, corrects a first-draft error): SUBLEQ's branch test is `result==0
+FOUNDATION FACT (corrects a first-draft error): SUBLEQ's branch test is `result==0
 || bit15(result)`, i.e. the 16-bit difference `a-b` interpreted as SIGNED <= 0 -- NOT unsigned a<=b (e.g.
 `0-0x8001=0x7FFF`, no branch, yet 0<=0x8001 unsigned). So the SUBLEQ branch primitive is SLE0 =
 "if (a-b) signed <= 0 goto L" = MOVE(a->T); `SUBLEQ(b,T,L)`. Unconditional JMP = `SUBLEQ(Z,Z,L)`.
 
 16-bit EQUALITY (from SLE0 + an add-1 re-test): two signed SLE0 tests are WRONG -- `a-b == 0x8000` makes
-BOTH `a-b` and `b-a` read as signed<=0 (codex). Instead, once SLE0 proves `a-b <= 0` and leaves it
+BOTH `a-b` and `b-a` read as signed<=0. Instead, once SLE0 proves `a-b <= 0` and leaves it
 in T, add 1 (`SUBLEQ` of a -1 cell): `(a-b)+1 <= 0` iff `a-b < 0` (a!=b), `> 0` iff `a-b == 0` (a==b).
 `EQ16(a,b,L)` = `SLE0(a,b,C); JMP NE; C: SUBLEQ(NEG1,T,NE); JMP L; NE:` (5 insn). `NE16` = `SLE0(a,b,C);
 JMP L; C: SUBLEQ(NEG1,T,L)` (4 insn, fall-through = equal). Verified: EQ16(0x8000,0)='not equal',
@@ -170,7 +174,7 @@ EQ16(5,5)='equal'. Needs a NEG1 (=-1=0xFFFF) constant cell in the layout.
   JMP L; NOTMAJ:` (after DEC, V>0 iff V was >=2; SUBLEQ branches on <=0 to NOTMAJ). ~22 insn. `a>b`=LTU16(b,a).
   Needs constants Z(0), ONE(1), NEG1(-1), SGN(0x8000) and temps BT, D, V.
 
-32-bit branches (rs1 vs rs2, to guest target `L`, else fall through) compose hi-then-lo (structure codex
+32-bit branches (rs1 vs rs2, to guest target `L`, else fall through) compose hi-then-lo (structure
 confirmed; the 16-bit predicates must be EQ16/LTU16 above, not the broken LE):
 - BEQ: `NE16(rs1.lo,rs2.lo,FT); EQ16(rs1.hi,rs2.hi,L); FT:`
 - BNE: `NE16(rs1.hi,rs2.hi,L); NE16(rs1.lo,rs2.lo,L);`  (fall through = equal)
@@ -179,17 +183,17 @@ confirmed; the 16-bit predicates must be EQ16/LTU16 above, not the broken LE):
 - BLT (SIGNED, 0x8000 landmine): flip the hi sign bit into temps `sh1=rs1.hi^0x8000`, `sh2=rs2.hi^0x8000`
   (x^0x8000 == (x+0x8000) mod 65536), then UNSIGNED-compare sh1/sh2 for hi, lo stays unsigned:
   `if LTU16(sh1,sh2) goto L; if LTU16(sh2,sh1) goto FT; if LTU16(rs1.lo,rs2.lo) goto L; FT:`
-  (codex edge-checked 0x80000000/0, 0x7fffffff/0x80000000, -1/0, min/max -- correct with corrected LTU16.)
+  (edge-checked 0x80000000/0, 0x7fffffff/0x80000000, -1/0, min/max -- correct with corrected LTU16.)
 - BGE: complement of BLT. SLT/SLTU: same compare writing 1/0 into rd instead of branching.
 
 ADD `rd = rs1 + rs2` (32-bit): `rd.lo = rs1.lo + rs2.lo`; `carry = MAJ(bit15(rs1.lo), bit15(rs2.lo),
 !bit15(lo_res))` (matches rvadd.sub, muxleq.fth:606); `rd.hi = rs1.hi + rs2.hi + carry`. 16-bit `b += a`
 = `MOVE(Z->T); SUBLEQ(a,T,.); SUBLEQ(T,b,.)` (T=-a; b-=T => b+=a).
-SUB `rd = rs1 - rs2` (direct, simpler than ~+1 via ADD -- codex): `rd.lo = rs1.lo - rs2.lo`;
+SUB `rd = rs1 - rs2` (direct, simpler than ~+1 via ADD): `rd.lo = rs1.lo - rs2.lo`;
 `borrow = LTU16(rs1.lo, rs2.lo)`; `rd.hi = rs1.hi - rs2.hi - borrow` (matches rvsub.sub, muxleq.fth:614).
 ADDI/etc = same with the immediate as a constant cell. x0 as source folds to Z; x0 as dest is dropped.
 
-TWO HARD RULES codex flagged: (1) rd == rs1 or rd == rs2 is legal RV32I -- ADD/SUB MUST compute into a
+TWO HARD RULES: (1) rd == rs1 or rd == rs2 is legal RV32I -- ADD/SUB MUST compute into a
 temp pair (out_lo,out_hi) and MOVE to rd only at the end, or snapshot the needed source halves first, else
 the carry/hi step reads an already-overwritten operand. (2) temp cells: a single per-BLOCK pool (T0,T1,...)
 is fine, but each macro must reserve enough temps internally and leave nothing a later instruction needs
@@ -197,11 +201,11 @@ live in them -- macro-local discipline, not fresh physical temps per instruction
 
 ## Validation (the whole point is a measurable win)
 
-- Correctness: "./muxleq -x prog.dec" stdout must be byte-identical to "./muxleq -r prog.elf" on all 7
-  demos plus the unopt loop, and the wide "./muxleq -x32 prog.dec" is validated the same way.
-- Performance: `./muxleq -s -x prog.dec` dispatched-op count must be BELOW `./muxleq -s -r prog.elf`. If it
+- Correctness: "./build/muxleq -x prog.dec" stdout must be byte-identical to "./build/muxleq -r prog.elf" on all 7
+  demos plus the unopt loop, and the wide "./build/muxleq -x32 prog.dec" is validated the same way.
+- Performance: `./build/muxleq -s -x prog.dec` dispatched-op count must be BELOW `./build/muxleq -s -r prog.elf`. If it
   is not, native emission has failed its reason to exist -- report and diagnose, do not paper over.
-  CAVEAT (codex): `-s < -r` can fail STRUCTURALLY on tiny/IO-heavy programs -- a fixed prologue, the constant
+  CAVEAT: `-s < -r` can fail STRUCTURALLY on tiny/IO-heavy programs -- a fixed prologue, the constant
   pool, and an expanded ecall-write loop can dominate a program that does little compute. So do NOT judge
   the milestone on slices 1-3, and pick the first fair win target as a TIGHT COMPUTE LOOP with little I/O
   and no hard ops: `fibonacci` or `primes` FIRST, then `crc16`; leave `bgcd`/`bsort` until branches, shifts,
@@ -215,7 +219,7 @@ live in them -- macro-local discipline, not fresh physical temps per instruction
 ## Staged slices (all landed -- the original build order, kept for the record)
 
 These were the smallest-validated-increment stages; ALL are implemented. Ordered so the HARDEST
-byte-identical pieces (codex: sub-cell byte load/store alignment + sign extension, then shifts and signed
+byte-identical pieces (sub-cell byte load/store alignment + sign extension, then shifts and signed
 compares -- the 0x8000 compare landmine is handled in muxleq.fth:891) came last:
 
 1. VM `-x` load-and-run + bounds-check + the smallest HAND-written `.dec`: a `c=0x8006` MOVE of a constant

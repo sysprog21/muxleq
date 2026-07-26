@@ -16,7 +16,7 @@ command -v /usr/bin/time >/dev/null 2>&1 || {
     exit 1
 }
 
-$MUXLEQ_CC $CFLAGS -o muxleq muxleq.c
+$MUXLEQ_CC $CFLAGS -Ibuild -o muxleq muxleq.c
 
 TOTAL_OPS=0
 TOTAL_T=0

@@ -1,5 +1,9 @@
 # Design note: eForth threading optimization (INLINE / STC)
 
+> `muxleq.fth:N` line references index the generated `build/muxleq.fth` -- the
+> in-order concatenation of the `forth/*.fth` source modules. Edit the modules,
+> not the concatenation.
+
 This is the entry-gate design note for the one remaining perf lever. It is a
 feasibility analysis, not an implementation spec -- enough to decide go/no-go and to know where
 the real difficulty is before committing to a meta-compiler rewrite.
@@ -74,7 +78,7 @@ It removes, per wrapper call, one colon-enter NEXT traversal + the `opExit` -- r
 cycles with 1. It speeds up runtime-compiled app/REPL code. Golden outputs are unchanged
 (semantics identical), so the suite still gates it.
 
-Bootstrap safety (corrected -- the earlier "path not hit" argument was wrong, per Codex): the
+Bootstrap safety (corrected -- the earlier "path not hit" argument was wrong): the
 gforth build emits target image bodies via the `:m` macros / `t,` and never runs the target
 `compile,`, so those bodies (e.g. `over`) are unaffected. The self-host DOES run the target
 `compile,` -- it compiles muxleq.fth's own metacompiler tooling (`:m`, `:t`, the assembler words)
@@ -182,7 +186,7 @@ Results:
   not 5011 (the dup wrapper). All 46 computational goldens (incl. `define` -- the runtime-compile
   guard -- `chacha20`, and every `rv32i` test) stay byte-exact. Only the address-dependent `editor`
   memory-dump golden shifts (expected image-layout drift, would just need a rebaseline).
-- BOOTSTRAP HOLDS byte-exact. NB (Codex): the self-host DOES run target `compile,` for its
+- BOOTSTRAP HOLDS byte-exact. Note: the self-host DOES run target `compile,` for its
   working-dictionary tooling; what stays byte-exact is the DUMPED image (emitted via macros/`t,`),
   so bootstrap is unaffected either way.
 - BUT IT DOES NOT HELP: chacha20 dispatches went UP, 431,633,095 → 432,883,904 (+0.29%), not down.
@@ -200,7 +204,7 @@ path. DECISION: NO-GO. Leave the interpreter as-is; this note records the protot
 so it need not be re-run. (STC/Variant 2 are strictly larger and riskier with no better prospect,
 since they attack the same already-fused overhead.)
 
-Caveat (Codex): chacha20 is the heavy runtime-compiled app benchmark and representative for this
+Caveat: chacha20 is the heavy runtime-compiled app benchmark and representative for this
 app-only go/no-go, but it may underrepresent a wrapper-heavy REPL / tiny-word workload. If such a
 workload ever becomes a target, a single synthetic "wrapper-storm" benchmark would be the way to
 reopen this -- but nothing today needs it, so it stays NO-GO.

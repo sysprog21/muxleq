@@ -38,6 +38,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+OUT = os.path.join(ROOT, "build")  # generated binaries live here
 sys.path.insert(0, HERE)
 from importlib import import_module
 
@@ -478,16 +479,16 @@ def main(argv):
     )
     ap.add_argument(
         "--rvopt",
-        default=os.path.join(ROOT, "build", "rvopt"),
+        default=os.path.join(OUT, "rvopt"),
         help="rvopt binary to test (e.g. a sanitizer build, to run every "
         "emitter path under ASan/UBSan)",
     )
     a = ap.parse_args(argv[1:])
-    muxleq = os.path.join(ROOT, "build", "muxleq")
+    muxleq = os.path.join(OUT, "muxleq")
     rvopt = a.rvopt
     for exe in (muxleq, rvopt):
         if not os.path.exists(exe):
-            sys.exit("missing %s -- run `make %s` first" % (exe, os.path.basename(exe)))
+            sys.exit("missing %s -- run `make` first" % exe)
     tested = skipped = 0
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(a.n):

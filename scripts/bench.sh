@@ -22,7 +22,7 @@ quote_env_value() {
     printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
 }
 
-files="muxleq.c rv32i.inc stage0.c build/muxleq.fth tests/chacha20.fth scripts/bench-remote.sh"
+files="muxleq.c rv32i.inc build/stage0.c build/muxleq.fth tests/chacha20.fth scripts/bench-remote.sh"
 if [ "$ENABLE_RV32I" = 1 ]; then
     files="$files build/rv32i-traces.inc"
 fi

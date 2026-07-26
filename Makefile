@@ -1,6 +1,12 @@
 include mk/common.mk
 
-# Generated artifacts live under build/; it is the single .gitignore entry.
+# All generated artifacts (binaries, the baked image, the trace include, the
+# relink sentinel) live under build/, so the working tree stays clean and build/
+# is the single .gitignore entry. muxleq.c and rv32i.inc include the generated
+# files with angle brackets (<stage0.c>, <rv32i-traces.inc>), so lookup skips the
+# source directory and only -I$(OUT) resolves them: a stale root-level copy can
+# never shadow the fresh build/ one. The flat remote profiling builds pass their
+# own -I (build for bench-remote, . for duremark-remote, which regenerates flat).
 OUT := build
 
 CFLAGS += -O2 -std=c99
@@ -31,19 +37,27 @@ endif
 .PHONY: FORCE help run bootstrap clean distclean check check-all budget golden golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent
 
 BIN := $(OUT)/muxleq
+RVOPT := $(OUT)/rvopt
 MUXLEQ_FTH := $(OUT)/muxleq.fth
 STAGE0_DEC := $(OUT)/stage0.dec
+STAGE0_C := $(OUT)/stage0.c
+STAGE1_DEC := $(OUT)/stage1.dec
+ENABLE_SENTINEL := $(OUT)/.enable-rv32i
+MUXLEQ_FORTH_MODULES := $(wildcard forth/*.fth)
+
+# Bare-metal RISC-V toolchain prefix for the freestanding tests/rv32i programs
+# and the vendored riscv-tests suite. Override as "make RVCROSS=...-". The RV32I
+# .elf/.bin are generated under build/rv32i and never committed; when the
+# toolchain is absent, the golden and rvopt gate skip their RV32I slices.
 RVCROSS ?= riscv-none-elf-
 RVELF_DIR := $(OUT)/rv32i
 DUREMARK_ELF := $(RVELF_DIR)/duremark.elf
 HAVE_RVCC := $(shell command -v $(RVCROSS)gcc 2>/dev/null)
-STAGE0_C := $(OUT)/stage0.c
-STAGE1_DEC := $(OUT)/stage1.dec
-ENABLE_SENTINEL := $(OUT)/.enable-rv32i
-RVOPT := $(OUT)/rvopt
-MUXLEQ_FORTH_MODULES := $(wildcard forth/*.fth)
 
 all: $(BIN) ## Build the default muxleq VM.
+
+help: ## List public make targets.
+	$(Q)awk 'BEGIN { FS = ":.*##"; } /^[A-Za-z0-9_.-]+:.*##/ { printf "%-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 $(OUT):
 	$(Q)mkdir -p $@
@@ -66,9 +80,6 @@ $(RVELF_DIR)/unopt.elf: | $(RVELF_DIR)
 $(DUREMARK_ELF): | $(RVELF_DIR)
 	$(Q)$(MAKE) --no-print-directory -C tests/rv32i/duremark OUT=$(CURDIR)/$(RVELF_DIR) CROSS=$(RVCROSS)
 
-help: ## List public make targets.
-	$(Q)awk 'BEGIN { FS = ":.*##"; } /^[A-Za-z0-9_.-]+:.*##/ { printf "%-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
-
 $(BIN): muxleq.c rv32i.inc $(RV32I_TRACE_INC) $(STAGE0_C) $(ENABLE_SENTINEL) | $(OUT)
 	$(VECHO) "  CC+LD\t$@\n"
 	$(Q)$(MUXLEQ_CC) $(CFLAGS) $(RV32I_DEFS) -I$(OUT) -o $@ muxleq.c
@@ -90,10 +101,10 @@ $(RVOPT): rvopt.c | $(OUT)
 	$(Q)$(CC) $(CFLAGS) -o $@ rvopt.c
 
 # Native 16-bit MUXLEQ emission, the coverage NOT already in verify-rvopt-gate:
-# the "-x" runner contract via a hand-written smoke image, per-op fixtures (each
-# RV32I op in isolation), and the differential fuzz (random programs, native -x
-# vs -r). The 7-demo + unopt + SMC-reject differential lives in the gate (run by
-# "make check"); this target is its synthetic-coverage complement.
+# the "-x" runner contract via a hand-written smoke image and the differential
+# fuzz (random programs assembled in Python, native -x vs -r, no toolchain). The
+# 7-demo + unopt differential lives in the gate (run by "make check"); this
+# target is its synthetic-coverage complement.
 verify-rvopt-mux: $(BIN) $(RVOPT) ## Verify 16-bit native rvopt emission.
 	$(Q)$(RUN) ./$(BIN) -x tests/native-smoke.dec > $(TMPDIR)/native-smoke.out 2>&1 \
 	    && cmp -s tests/expected/native-smoke.out $(TMPDIR)/native-smoke.out \
@@ -106,9 +117,9 @@ verify-rvopt-mux: $(BIN) $(RVOPT) ## Verify 16-bit native rvopt emission.
 
 # Wide (32-bit-cell) native emission, the coverage NOT already in
 # verify-rvopt-gate: the "-x32" runner contract via a hand-written smoke image
-# (MOVE, SUBLEQ arithmetic + branch-to-halt, PUT at the 32-bit encoding), per-op
-# fixtures, and the wide differential fuzz. The 7-demo + unopt + SMC-reject
-# differential lives in the gate (run by "make check").
+# (MOVE, SUBLEQ arithmetic + branch-to-halt, PUT at the 32-bit encoding) and the
+# wide differential fuzz. The 7-demo + unopt differential lives in the gate (run
+# by "make check").
 verify-mux32: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	$(Q)$(RUN) ./$(BIN) -x32 tests/mux32-smoke.dec > $(TMPDIR)/mux32-smoke.out 2>&1 \
 	    && cmp -s tests/expected/mux32-smoke.out $(TMPDIR)/mux32-smoke.out \
@@ -119,34 +130,38 @@ verify-mux32: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	else $(PRINTF) "verify-mux32: python3 absent, skipping -mux32 differential fuzz\n"; fi
 	$(Q)$(PRINTF) "verify-mux32: -x32 smoke + wide differential fuzz\n"
 
-# Fast rvopt correctness slice for the pre-commit gate. rvopt is built OUTSIDE the
-# image, so "make check"/bootstrap never touched it before -- a non-compiling or
-# miscompiling optimizer passed the gate silently. This wires the differential
-# oracle in cheaply: every committed demo, lowered by BOTH backends (-mux/-x 16-bit
-# and -mux32/-x32 wide), must reproduce the "-r" interpreter byte-for-byte; unopt
-# adds the one register-promotion loop the -O2 demos lack (0 promotable loops); the
-# SMC guard must still reject self-modifying guest code. ~15 s (no fuzz, no
-# rv32ui): the exhaustive layers stay in verify-rvopt-mux/verify-riscv-tests and
-# check-all. Self-contained (committed .elf/.bin + prebuilt binaries, no toolchain).
+# Fast rvopt correctness slice for the pre-commit gate. rvopt is built OUTSIDE
+# the image, so "make check"/bootstrap never touched it before: a non-compiling
+# or miscompiling optimizer passed the gate silently. This wires the
+# differential oracle in cheaply: every demo, lowered by BOTH backends (-mux/-x
+# 16-bit and -mux32/-x32 wide), must reproduce the "-r" interpreter
+# byte-for-byte; unopt adds the one register-promotion loop the -O2 demos lack
+# (0 promotable loops). ~15 s (no fuzz, no rv32ui): the exhaustive layers stay
+# in verify-rvopt-mux/verify-riscv-tests and check-all. The demo binaries are
+# built from source into build/rv32i, so the differential needs the RISC-V
+# toolchain and skips when it is absent; the toolchain-free JALR-reject checks
+# always run.
 verify-rvopt-gate: $(BIN) $(RVOPT) $(if $(HAVE_RVCC),rvelf $(RVELF_DIR)/unopt.elf) ## Run fast rvopt differential checks.
-	$(Q)for e in $(RVELF_FILES); do \
-	    ./$(RVOPT) -mux $(RVELF_DIR)/$$e.elf > $(TMPDIR)/gate-$$e.dec 2>/dev/null \
-	        && $(RUN) ./$(BIN) -x $(TMPDIR)/gate-$$e.dec > $(TMPDIR)/gate-$$e.x 2>&1 \
-	        && ./$(RVOPT) -mux32 $(RVELF_DIR)/$$e.elf > $(TMPDIR)/gate-$$e.d32 2>/dev/null \
-	        && $(RUN) ./$(BIN) -x32 $(TMPDIR)/gate-$$e.d32 > $(TMPDIR)/gate-$$e.x32 2>&1 \
-	        && ./$(BIN) -r $(RVELF_DIR)/$$e.elf > $(TMPDIR)/gate-$$e.r 2>&1 \
-	        && cmp -s $(TMPDIR)/gate-$$e.x $(TMPDIR)/gate-$$e.r \
-	        && cmp -s $(TMPDIR)/gate-$$e.x32 $(TMPDIR)/gate-$$e.r \
-	        || { echo "verify-rvopt-gate: native $$e (-x/-x32) differs from -r"; exit 1; }; \
-	done
-	$(Q)test -z "$(HAVE_RVCC)" || ./$(RVOPT) -mux $(RVELF_DIR)/unopt.elf > $(TMPDIR)/gate-unopt.dec 2>/dev/null \
-	    && $(RUN) ./$(BIN) -x $(TMPDIR)/gate-unopt.dec > $(TMPDIR)/gate-unopt.x 2>&1 \
-	    && ./$(RVOPT) -mux32 $(RVELF_DIR)/unopt.elf > $(TMPDIR)/gate-unopt.d32 2>/dev/null \
-	    && $(RUN) ./$(BIN) -x32 $(TMPDIR)/gate-unopt.d32 > $(TMPDIR)/gate-unopt.x32 2>&1 \
-	    && ./$(BIN) -r $(RVELF_DIR)/unopt.elf > $(TMPDIR)/gate-unopt.r 2>&1 \
-	    && cmp -s $(TMPDIR)/gate-unopt.x $(TMPDIR)/gate-unopt.r \
-	    && cmp -s $(TMPDIR)/gate-unopt.x32 $(TMPDIR)/gate-unopt.r \
-	    || { echo "verify-rvopt-gate: unopt (-x/-x32, register promotion) differs from -r"; exit 1; }
+	$(Q)if [ -n "$(HAVE_RVCC)" ]; then \
+	    for e in $(RVELF_FILES); do \
+	        ./$(RVOPT) -mux $(RVELF_DIR)/$$e.elf > $(TMPDIR)/gate-$$e.dec 2>/dev/null \
+	            && $(RUN) ./$(BIN) -x $(TMPDIR)/gate-$$e.dec > $(TMPDIR)/gate-$$e.x 2>&1 \
+	            && ./$(RVOPT) -mux32 $(RVELF_DIR)/$$e.elf > $(TMPDIR)/gate-$$e.d32 2>/dev/null \
+	            && $(RUN) ./$(BIN) -x32 $(TMPDIR)/gate-$$e.d32 > $(TMPDIR)/gate-$$e.x32 2>&1 \
+	            && ./$(BIN) -r $(RVELF_DIR)/$$e.elf > $(TMPDIR)/gate-$$e.r 2>&1 \
+	            && cmp -s $(TMPDIR)/gate-$$e.x $(TMPDIR)/gate-$$e.r \
+	            && cmp -s $(TMPDIR)/gate-$$e.x32 $(TMPDIR)/gate-$$e.r \
+	            || { echo "verify-rvopt-gate: native $$e (-x/-x32) differs from -r"; exit 1; }; \
+	    done; \
+	    ./$(RVOPT) -mux $(RVELF_DIR)/unopt.elf > $(TMPDIR)/gate-unopt.dec 2>/dev/null \
+	        && $(RUN) ./$(BIN) -x $(TMPDIR)/gate-unopt.dec > $(TMPDIR)/gate-unopt.x 2>&1 \
+	        && ./$(RVOPT) -mux32 $(RVELF_DIR)/unopt.elf > $(TMPDIR)/gate-unopt.d32 2>/dev/null \
+	        && $(RUN) ./$(BIN) -x32 $(TMPDIR)/gate-unopt.d32 > $(TMPDIR)/gate-unopt.x32 2>&1 \
+	        && ./$(BIN) -r $(RVELF_DIR)/unopt.elf > $(TMPDIR)/gate-unopt.r 2>&1 \
+	        && cmp -s $(TMPDIR)/gate-unopt.x $(TMPDIR)/gate-unopt.r \
+	        && cmp -s $(TMPDIR)/gate-unopt.x32 $(TMPDIR)/gate-unopt.r \
+	        || { echo "verify-rvopt-gate: unopt (-x/-x32, register promotion) differs from -r"; exit 1; }; \
+	else $(PRINTF) "verify-rvopt-gate: RVELF/unopt differential [SKIP: no $(RVCROSS)gcc]\n"; fi
 	$(Q)printf '\223\002\000\001\023\003\000\000\263\202\142\000\147\200\002\000\223\010\320\005\023\005\000\000\163\000\000\000' > $(TMPDIR)/rvopt-jalr-runtime.bin
 	$(Q)printf '\357\000\100\001\357\000\000\001\223\010\320\005\023\005\000\000\163\000\000\000\147\200\000\000' > $(TMPDIR)/rvopt-jalr-multiret.bin
 	$(Q)$(RUN) ./$(BIN) -r $(TMPDIR)/rvopt-jalr-runtime.bin >/dev/null 2>&1 \
@@ -165,14 +180,18 @@ verify-rvopt-gate: $(BIN) $(RVOPT) $(if $(HAVE_RVCC),rvelf $(RVELF_DIR)/unopt.el
 	    || { echo "verify-rvopt-gate: multi-ret JALR -mux32 differs from -r"; exit 1; }
 	$(Q)$(PRINTF) "verify-rvopt-gate: native/JALR "; $(call notice, [OK])
 
-verify-duremark-rvopt: $(RVOPT) $(DUREMARK_ELF) ## Verify current rvopt DureMark limits.
-	$(Q)! ./$(RVOPT) -mux $(DUREMARK_ELF) >/dev/null 2>$(TMPDIR)/duremark-rvopt.err \
-	    && grep -q 'unsupported JALR at pc' $(TMPDIR)/duremark-rvopt.err \
-	    || { echo "verify-duremark-rvopt: -mux must reject DureMark runtime JALR"; exit 1; }
-	$(Q)! ./$(RVOPT) -mux32 $(DUREMARK_ELF) >/dev/null 2>$(TMPDIR)/duremark-rvopt.err \
-	    && grep -q 'unsupported op at pc' $(TMPDIR)/duremark-rvopt.err \
-	    || { echo "verify-duremark-rvopt: -mux32 must reject unresolved DureMark ecall"; exit 1; }
-	$(Q)$(PRINTF) "verify-duremark-rvopt: DureMark limits "; $(call notice, [OK])
+verify-duremark-rvopt: $(RVOPT) $(if $(HAVE_RVCC),$(DUREMARK_ELF)) ## Verify current rvopt DureMark limits.
+	$(Q)if [ -z "$(HAVE_RVCC)" ]; then \
+	    $(PRINTF) "verify-duremark-rvopt: DureMark limits [SKIP: no $(RVCROSS)gcc]\n"; \
+	else \
+	    if ./$(RVOPT) -mux $(DUREMARK_ELF) >/dev/null 2>$(TMPDIR)/duremark-rvopt.err \
+	        || ! grep -q 'unsupported JALR at pc' $(TMPDIR)/duremark-rvopt.err; then \
+	        echo "verify-duremark-rvopt: -mux must reject DureMark runtime JALR"; exit 1; fi; \
+	    if ./$(RVOPT) -mux32 $(DUREMARK_ELF) >/dev/null 2>$(TMPDIR)/duremark-rvopt.err \
+	        || ! grep -q 'unsupported op at pc' $(TMPDIR)/duremark-rvopt.err; then \
+	        echo "verify-duremark-rvopt: -mux32 must reject unresolved DureMark ecall"; exit 1; fi; \
+	    $(PRINTF) "verify-duremark-rvopt: DureMark limits "; $(call notice, [OK]); \
+	fi
 
 verify-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-range.dec tests/loader-bad-operand.dec tests/loader-bad-fused-operand.dec ## Verify malformed image rejection.
 	$(Q)for f in tests/loader-bad-token.dec tests/loader-out-of-range.dec; do \
@@ -226,13 +245,13 @@ run: $(BIN) ## Run the interactive VM.
 
 # Source formatter and lint. C sources are reformatted in place with
 # clang-format (the project .clang-format), Python scripts with black. The Forth
-# half lints muxleq.fth and the .fth tests: it catches the multi-line "( )"
-# comment that compiles under gforth yet breaks the self-host bootstrap with -13,
-# plus hard tabs, and strips trailing whitespace with --fix. Reflowing Forth
-# leading whitespace is opt-in (scripts/forth-indent.py --reindent), NOT run
-# here, because the metacompiler's label and fall-through idioms are hand-tuned
-# and do not nest mechanically. Each half degrades to a skip when its tool is
-# absent.
+# half lints the forth/ modules and the .fth tests: it catches the multi-line
+# "( )" comment that compiles under gforth yet breaks the self-host bootstrap
+# with -13, plus hard tabs, and strips trailing whitespace with --fix. Reflowing
+# Forth leading whitespace is opt-in (scripts/forth-indent.py --reindent), NOT
+# run here, because the metacompiler's label and fall-through idioms are hand-
+# tuned and do not nest mechanically. Each half degrades to a skip when its tool
+# is absent. The generated $(MUXLEQ_FTH) is not linted; its modules are.
 CFMT_SRC := muxleq.c rv32i.inc rvopt.c
 PYFMT_SRC := $(wildcard scripts/*.py)
 FORTH_SRC := $(MUXLEQ_FORTH_MODULES) $(wildcard tests/*.fth)
@@ -287,13 +306,15 @@ RUN_TIMEOUT ?= 60
 RUN = $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT))
 GOLDEN_RUN = $(RUN) ./$(BIN)
 
-# Prebuilt RV32I programs exercised end-to-end through the "-r" ELF loader (the
-# committed .elf, so no RISC-V toolchain is needed at gate time). Output is
-# compared against tests/expected/rv32i-<name>.out.
-RVELF_FILES := $(if $(HAVE_RVCC),hello fibonacci primes crc16 mul bgcd bsort)
-# Flat (objcopy -O binary) programs, to exercise the -r flat-binary path as well as the ELF
-# path. hello.bin is the same program as hello.elf, so it reuses tests/expected/rv32i-hello.out.
-RVFLAT_FILES := $(if $(HAVE_RVCC),hello)
+# RV32I programs exercised end-to-end through the "-r" ELF loader. Built from
+# source into build/rv32i (see rvelf); output is compared against
+# tests/expected/rv32i-<name>.out. Needs the RISC-V toolchain, so the golden
+# slice skips them when it is absent.
+RVELF_FILES := hello fibonacci primes crc16 mul bgcd bsort
+# Flat (objcopy -O binary) programs, to exercise the -r flat-binary path as well
+# as the ELF path. hello.bin is the same program as hello.elf, so it reuses
+# tests/expected/rv32i-hello.out.
+RVFLAT_FILES := hello
 RVELF_RUN = $(RUN) ./$(BIN) -r
 
 golden: $(BIN) $(if $(HAVE_RVCC),rvelf) ## Run byte-exact golden output tests.
@@ -307,22 +328,22 @@ golden: $(BIN) $(if $(HAVE_RVCC),rvelf) ## Run byte-exact golden output tests.
 	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; \
 	    fi; \
 	)
-	$(Q)$(foreach e,$(RVELF_FILES),\
+	$(Q)$(if $(HAVE_RVCC),$(foreach e,$(RVELF_FILES),\
 	    $(PRINTF) "golden rv32i/$(e).elf ... "; \
 	    if $(RVELF_RUN) $(RVELF_DIR)/$(e).elf > $(TMPDIR)/golden.out 2>/dev/null \
 	        && cmp -s tests/expected/rv32i-$(e).out $(TMPDIR)/golden.out; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; \
 	    fi; \
-	)
-	$(Q)$(foreach f,$(RVFLAT_FILES),\
+	),$(PRINTF) "golden rv32i/* ... [SKIP: no $(RVCROSS)gcc]\n")
+	$(Q)$(if $(HAVE_RVCC),$(foreach f,$(RVFLAT_FILES),\
 	    $(PRINTF) "golden rv32i/$(f).bin ... "; \
 	    if $(RVELF_RUN) $(RVELF_DIR)/$(f).bin > $(TMPDIR)/golden.out 2>/dev/null \
 	        && cmp -s tests/expected/rv32i-$(f).out $(TMPDIR)/golden.out; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; \
 	    fi; \
-	)
+	))
 
 golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mandelbrot prefix.
 	$(Q)test -n "$(TIMEOUT)" || { echo "golden-mandel: timeout(1)/gtimeout required"; exit 1; }
@@ -356,11 +377,12 @@ budget: $(STAGE0_DEC) ## Check the self-host image cell budget.
 # guest window (its ~4.5 KB image never fit the old 1 KiB). The checksum is byte-identical to a native
 # build, so a drift means the RV32I microcode or the guest-RAM window regressed.
 duremark: $(BIN) $(if $(HAVE_RVCC),$(DUREMARK_ELF)) ## Run the RV32I DureMark benchmark.
-	$(Q)$(PRINTF) "duremark rv32i ... "; \
+	$(Q)if [ -z "$(HAVE_RVCC)" ]; then $(PRINTF) "duremark rv32i ... [SKIP: no $(RVCROSS)gcc]\n"; else \
+	    $(PRINTF) "duremark rv32i ... "; \
 	    if $(TIMEOUT) $(if $(TIMEOUT),90) ./$(BIN) -r $(DUREMARK_ELF) > $(TMPDIR)/duremark.out 2>/dev/null \
 	        && cmp -s tests/expected/duremark.out $(TMPDIR)/duremark.out; \
 	    then $(call notice, [OK]); \
-	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; fi
+	    else $(PRINTF) "DRIFT or VM error\n"; exit 1; fi; fi
 
 # Deep pre-release gate: the standard check plus the slow/opt-in exhaustive checks (RV32I conformance,
 # the Z3 ALU proof, the ASan+UBSan run, and the DureMark benchmark). Minutes; needs z3-solver + a
@@ -395,7 +417,7 @@ TMPDIR := $(shell mktemp -d)
 bench: $(STAGE0_C) $(RV32I_TRACE_INC) ## Run remote throughput benchmarks.
 	$(Q)ENABLE_RV32I=$(ENABLE_RV32I) sh scripts/bench.sh
 
-profile-duremark: muxleq.fth ## Profile DureMark on the remote host.
+profile-duremark: $(MUXLEQ_FTH) ## Profile DureMark on the remote host.
 	$(Q)sh scripts/duremark-profile.sh
 
 # RV32I instruction-level conformance. The official riscv-arch-test ELFs can't run
@@ -445,7 +467,7 @@ SANITIZE_FILES := chacha20 sieve editor tasker collatz eforth-does eof rv32i-run
 # (the last drives the normal $(BIN), which is a stub under ENABLE_RV32I=0), so
 # the suite only makes sense with RV32I enabled. Refuse other modes with a clear
 # message instead of failing obscurely mid-suite.
-sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec tests/loader-bad-operand.dec tests/loader-bad-fused-operand.dec ## Run ASan/UBSan validation.
+sanitize: $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT) $(if $(HAVE_RVCC),rvelf) tests/loader-bad-token.dec tests/loader-out-of-range.dec tests/loader-bad-operand.dec tests/loader-bad-fused-operand.dec ## Run ASan/UBSan validation.
 	$(Q)[ "$(ENABLE_RV32I)" = 1 ] || { echo "make sanitize requires ENABLE_RV32I=1 (it exercises -r and the RV32I paths)"; exit 1; }
 	$(Q)$(MUXLEQ_CC) $(SANFLAGS) $(RV32I_DEFS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
 	$(Q)$(foreach t,$(SANITIZE_FILES),\
@@ -455,26 +477,26 @@ sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT
 	    else $(PRINTF) "SANITIZER ERROR or timeout\n"; cat $(TMPDIR)/san.err; exit 1; \
 	    fi; \
 	)
-	$(Q)$(foreach e,$(RVELF_FILES),\
+	$(Q)$(if $(HAVE_RVCC),$(foreach e,$(RVELF_FILES),\
 	    $(PRINTF) "sanitize rv32i/$(e).elf ... "; \
 	    if $(SAN_RUN) -r $(RVELF_DIR)/$(e).elf >/dev/null 2>$(TMPDIR)/san.err; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; \
 	    fi; \
-	)
-	$(Q)$(foreach f,$(RVFLAT_FILES),\
+	),$(PRINTF) "sanitize rv32i/* ... [SKIP: no $(RVCROSS)gcc]\n")
+	$(Q)$(if $(HAVE_RVCC),$(foreach f,$(RVFLAT_FILES),\
 	    $(PRINTF) "sanitize rv32i/$(f).bin ... "; \
 	    if $(SAN_RUN) -r $(RVELF_DIR)/$(f).bin >/dev/null 2>$(TMPDIR)/san.err; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; \
 	    fi; \
-	)
+	))
 	# The emitted-image runners: -r only sanitizes the interpreter. Run each
 	# demo's native image through muxleq.san -x (16-bit) and -x32 (wide) so the
 	# run/run32 loops, load_muxleq32 parsing/allocation, index masking, and SMC
 	# operand patching are ASan/UBSan-checked -- the -O2 goldens compare only
 	# stdout and are blind to an out-of-bounds that does not change output.
-	$(Q)$(foreach e,$(RVELF_FILES),\
+	$(Q)$(if $(HAVE_RVCC),$(foreach e,$(RVELF_FILES),\
 	    $(PRINTF) "sanitize -x/-x32 native runner rv32i/$(e).elf ... "; \
 	    if ./$(RVOPT) -mux $(RVELF_DIR)/$(e).elf > $(TMPDIR)/san-x.dec 2>$(TMPDIR)/san.err \
 	        && $(SAN_RUN) -x $(TMPDIR)/san-x.dec >/dev/null 2>$(TMPDIR)/san.err \
@@ -483,7 +505,7 @@ sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; \
 	    fi; \
-	)
+	))
 	$(Q)$(PRINTF) "sanitize loader rejects ... "; \
 	    ! $(SAN_RUN) -x tests/loader-bad-token.dec >/dev/null 2>$(TMPDIR)/san.err \
 	        && grep -q 'bad cell' $(TMPDIR)/san.err \
@@ -499,8 +521,8 @@ sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT
 	        && ! grep -Eq 'ERROR: AddressSanitizer|runtime error:' $(TMPDIR)/san.err \
 	        || { $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; }; \
 	    $(call notice, [OK])
-	$(Q)$(CC) $(SANFLAGS) -o $(TMPDIR)/rvopt.san $(RVOPT).c
-	$(Q)$(foreach e,$(RVELF_FILES),\
+	$(Q)$(CC) $(SANFLAGS) -o $(TMPDIR)/rvopt.san rvopt.c
+	$(Q)$(if $(HAVE_RVCC),$(foreach e,$(RVELF_FILES),\
 	    $(PRINTF) "sanitize rvopt emit rv32i/$(e).elf ... "; \
 	    if ASAN_OPTIONS=detect_leaks=0 sh -c '$(TMPDIR)/rvopt.san -mux $(RVELF_DIR)/$(e).elf >/dev/null \
 	        && $(TMPDIR)/rvopt.san -dump $(RVELF_DIR)/$(e).elf | $(TMPDIR)/rvopt.san -check - >/dev/null' \
@@ -508,7 +530,7 @@ sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; \
 	    fi; \
-	)
+	),$(PRINTF) "sanitize rvopt emit rv32i/* ... [SKIP: no $(RVCROSS)gcc]\n")
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    $(PRINTF) "sanitize rvopt emit fuzz (every op path incl LB/LH/LHU/SH, SRL/SRA, JALR) ... "; \
 	    if python3 scripts/rvopt-fuzz.py --rvopt $(TMPDIR)/rvopt.san --n 25 --body 14 --seed 1 \
@@ -524,8 +546,8 @@ sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT
 	    fi; \
 	else $(PRINTF) "sanitize rvopt emit fuzz: python3 absent, skipping\n"; fi
 
-clean: ## Remove built binaries and objects.
-	$(RM) $(BIN) $(RVOPT) .enable-rv32i
+clean: ## Remove built binaries and the relink sentinel.
+	$(RM) $(BIN) $(RVOPT) $(ENABLE_SENTINEL)
 
-distclean: clean ## Remove generated bootstrap artifacts too.
-	$(RM) $(STAGE0_C) $(STAGE0_DEC) $(STAGE1_DEC) rv32i-traces.inc
+distclean: clean ## Remove the whole build/ tree (generated image too).
+	$(RM) -r $(OUT)
