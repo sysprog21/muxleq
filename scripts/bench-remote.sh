@@ -38,13 +38,19 @@ run() {
     "$@" >input.tmp
     ./muxleq -s <input.tmp >/dev/null 2>stats.tmp
     ops=$(awk '/dispatched instructions:/ { print $3 }' stats.tmp)
-    [ -n "$ops" ] || { echo "bench: $name produced no dispatch count" >&2; exit 1; }
+    [ -n "$ops" ] || {
+        echo "bench: $name produced no dispatch count" >&2
+        exit 1
+    }
     best=
     i=0
     while [ "$i" -lt "$REPS" ]; do
         /usr/bin/time -p ./muxleq <input.tmp >/dev/null 2>time.tmp
         t=$(awk '/^user/ { print $2 }' time.tmp)
-        [ -n "$t" ] || { echo "bench: $name produced no timing" >&2; exit 1; }
+        [ -n "$t" ] || {
+            echo "bench: $name produced no timing" >&2
+            exit 1
+        }
 
         # a 0.00s sample means the workload is too short to time reliably -- the
         # min would latch onto it and divide by zero below, so fail loud
@@ -63,8 +69,8 @@ run() {
 }
 
 echo "=== muxleq throughput on $(hostname), best user of $REPS reps (Mops/s = M dispatched instructions/s) ==="
-run ms-timer  sh -c "echo '$TIME ms bye'"
-run chacha20  cat tests/chacha20.fth
+run ms-timer sh -c "echo '$TIME ms bye'"
+run chacha20 cat tests/chacha20.fth
 run self-host cat build/muxleq.fth
 awk -v o="$TOTAL_OPS" -v t="$TOTAL_T" 'BEGIN {
     printf "  %-11s %15s ops  sum  %8.3fs  %9.1f Mops/s\n", "overall", o, t, o / t / 1e6 }'
