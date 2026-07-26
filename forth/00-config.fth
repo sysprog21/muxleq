@@ -18,7 +18,7 @@ only forth definitions hex
 \ Feature Configuration
 1 constant opt.multi      ( Enable multitasking with "pause" primitive )
 1 constant opt.editor     ( Include block-based text editor )
-1 constant opt.better-see ( Enhanced decompiler for "see" command )
+1 constant opt.decompiler ( Enhanced decompiler for "see" command )
 1 constant opt.control    ( Extended control structures do/loop, case/of )
 1 constant opt.allocate   ( Dynamic memory allocation allocate/free )
 1 constant opt.glossary   ( Word glossary and analysis tools )
