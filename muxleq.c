@@ -11,6 +11,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -540,16 +541,84 @@ static void load_rv32i(const char *path)
     prefix_len = p;
 }
 
+/* -x FILE: load a standalone MUXLEQ image (decimal cells, one per line -- the
+ * stage0.dec format) into m[] and run it from pc 0, replacing the baked eForth
+ * image. This is how host-emitted native code runs on the two ops with no
+ * eForth layer: 'rvopt -mux prog > prog.dec' then './muxleq -x prog.dec'.
+ * Untrusted input, so bounds-check like the -r loader: reject an image larger
+ * than the cell array or a non-numeric cell; never partially load.
+ */
+static void load_muxleq(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "muxleq: cannot open '%s'\n", path);
+        exit(1);
+    }
+    memset(m, 0, sizeof m); /* overwrite the baked eForth image */
+    size_t n = 0;
+
+    /* One whitespace-delimited token per cell. Parse with strtol so a token
+     * that is non-numeric, out of long range, or outside a 16-bit cell is
+     * rejected, not silently wrapped -- this is untrusted input. The %31s width
+     * caps the token so a pathological line cannot overflow the buffer.
+     */
+    for (char tok[32]; fscanf(f, "%31s", tok) == 1;) {
+        errno = 0;
+        char *end;
+        const long v = strtol(tok, &end, 10);
+        if (*end != '\0' || errno == ERANGE || v < -32768 || v > 65535) {
+            fprintf(stderr, "muxleq: '%s' has a bad cell '%s'\n", path, tok);
+            fclose(f);
+            exit(1);
+        }
+        if (n >= MEM_SIZE) {
+            fprintf(stderr, "muxleq: '%s' exceeds the %d-cell image\n", path,
+                    MEM_SIZE);
+            fclose(f);
+            exit(1);
+        }
+        m[n++] = (uint16_t) v;
+    }
+    const bool io_err = ferror(f);
+    fclose(f);
+    if (io_err) {
+        fprintf(stderr, "muxleq: error reading '%s'\n", path);
+        exit(1);
+    }
+    if (n == 0) {
+        fprintf(stderr, "muxleq: '%s' is empty\n", path);
+        exit(1);
+    }
+}
+
 int main(int argc, char **argv)
 {
+    /* -r (RV32I via the eForth runner) and -x (a standalone MUXLEQ image) each
+     * set up a whole run; they are mutually exclusive and single-use.
+     */
+    bool run_chosen = false;
     for (int i = 1; i < argc; i++) {
+        const bool is_r = !strcmp(argv[i], "-r"), is_x = !strcmp(argv[i], "-x");
         if (!strcmp(argv[i], "-s"))
             prof_stats = true;
         else if (!strcmp(argv[i], "-p"))
             prof_heat = true;
-        else if (!strcmp(argv[i], "-r") && i + 1 < argc)
-            load_rv32i(argv[++i]);
-        else
+        else if (is_r || is_x) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "muxleq: %s needs a FILE\n", argv[i]);
+                return 1;
+            }
+            if (run_chosen) {
+                fprintf(stderr, "muxleq: -r/-x already given\n");
+                return 1;
+            }
+            run_chosen = true;
+            if (is_r)
+                load_rv32i(argv[++i]);
+            else
+                load_muxleq(argv[++i]);
+        } else
             fprintf(stderr, "muxleq: ignoring unknown argument '%s'\n",
                     argv[i]);
     }

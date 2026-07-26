@@ -2351,8 +2351,8 @@ variable rvhalt  variable rvhpc  variable rvwp  variable rvwn  ( runner state )
 : rvrun ( haltpc -- )  rvhpc !  #0 rv-pclo ! #0 rv-pchi ! #0 rvhalt !
    [ 8000 ] literal #2 rvput                             ( sp x2 = 0x8000, top of 32 KiB guest RAM )
    begin rvrunning while  rvfetch rvstep
-     rv-state @ #1 = if rvsyscall then
-     rv-state @ #1 > if ." illegal instruction at " rv-pclo @ u. cr  #-1 rvhalt ! then
+     rv-state @ if  rv-state @ #1 = if rvsyscall             ( 1 = ecall to service )
+       else ." illegal instruction at " rv-pclo @ u. cr  #-1 rvhalt ! then  then ( 2 = trap )
      rvadv  repeat ;
 variable rvlp                      ( -- a : guest-cell load pointer, in cells )
 : rvorg  #0 rvlp ! ;               ( -- : reset the load pointer to guest cell 0 )

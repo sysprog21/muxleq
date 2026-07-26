@@ -56,7 +56,7 @@ prebuilt binary directly, with no host-side conversion:
 `riscv-none-elf-objcopy -O binary prog.elf prog.bin; ./muxleq -r prog.bin`. The `-r` flag loads the
 flat binary into guest RAM and runs it from entry 0 via the image's built-in runner (`rvrun`/`rvboot`,
 which also load inline-built programs with `rvorg`/`rvcell,`). Proven with a prebuilt `hello.elf`
-(73 bytes, prints "Hello World!" 5x, exits). Programs must fit the 1024-byte guest RAM.
+(prints its message 5x, exits). Programs must fit the 32 KiB guest RAM (see next paragraph).
 
 Scope of the shipped simulator: RV32I base only (no M/A/F/D, no CSRs, no interrupts); syscalls `write`
 and `exit` only; entry must be 0; guest RAM is 32 KiB (32768 bytes). The self-host memory ceiling is the
