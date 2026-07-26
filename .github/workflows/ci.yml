@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils-riscv64-unknown-elf \
+            build-essential \
+            clang \
+            gcc-riscv64-unknown-elf \
+            gforth
+      - name: Run pre-commit gate
+        run: make check RVCROSS=riscv64-unknown-elf-
+      - name: Publish RV32I test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv32i-binaries
+          path: |
+            build/rv32i/*.elf
+            build/rv32i/*.bin
+          if-no-files-found: error
+
+  check-all:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils-riscv64-unknown-elf \
+            build-essential \
+            clang \
+            gcc-riscv64-unknown-elf \
+            gforth \
+            python3-z3
+      - name: Run deep validation
+        run: make check-all RVCROSS=riscv64-unknown-elf-
+      - name: Publish RV32I test binaries (deep build)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv32i-binaries-deep
+          path: |
+            build/rv32i/*.elf
+            build/rv32i/*.bin
+          if-no-files-found: error

@@ -63,7 +63,7 @@ MUXLEQ from pure SUBLEQ.
 ## 2. Memory image
 
 The whole 32768-cell image is baked into the C binary at compile time (see the
-build pipeline). The current image occupies 10643 cells; the rest is working RAM
+build pipeline). The current image occupies 10632 cells; the rest is working RAM
 (stacks, buffers, dictionary growth). Key fixed locations near the base include
 the zero register (`zreg`, address 6, the MUX zero-mask), the `-1`/`1` constants,
 and the working registers `r0..r4`, followed by the dictionary and task blocks.

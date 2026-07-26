@@ -71,9 +71,10 @@ static uint16_t m[MEM_SIZE] = {
  * from scratch.
  */
 enum { OP_GET, OP_PUT, OP_MUX, OP_SUBLEQ, OP_COUNT };
-static bool prof_enabled = false; /* -s or -p given */
-static bool prof_stats = false;   /* -s: instruction mix */
-static bool prof_heat = false;    /* -p: PC heat map */
+static bool prof_enabled = false;      /* -s or -p given */
+static bool prof_stats = false;        /* -s: instruction mix */
+static bool prof_heat = false;         /* -p: PC heat map */
+static bool validate_operands = false; /* -x image: reject malformed a/b */
 static uint64_t prof_total = 0;
 static uint64_t prof_op[OP_COUNT] = {0};
 static uint64_t prof_heat_map[MEM_SIZE];
@@ -101,6 +102,9 @@ enum {
     RV32I_PC574 = 574,                /* indirect load/update/backedge trace */
     RV32I_PC574_END = 585,            /* last cell read by the PC574 trace */
     RV32I_PC574_PATCH_TARGET = 577,   /* PC574 writes PC577's source operand */
+    RV32I_PC772 = 772,                /* condition-folding loop */
+    RV32I_PC772_END = 825,            /* last cell read by the PC772 loop */
+    RV32I_PC823_BRANCH_TARGET = 825,  /* PC823's live branch target operand */
     RV32I_MOVE_C = NEGATIVE_FLAG | 6, /* MUX with zero-mask cell 6 */
 };
 
@@ -114,6 +118,7 @@ enum {
     RV32I_TRACE_DEC = 8,
     RV32I_TRACE_VALUE = 11,
     RV32I_TRACE_LIMIT = 12,
+    RV32I_TRACE_TMP = 13,
     RV32I_TRACE_CURSOR = 38,
     RV32I_TRACE_COND = 39,
     RV32I_TRACE_ALT_ADDR = 309,
@@ -142,18 +147,63 @@ static VM_ABI int dispatch(uint16_t pc,
                            uint16_t addr_b,
                            uint16_t addr_c);
 
-/* Fetch the next instruction's operands and tail-call dispatch. A negative
- * next_pc is the MUXLEQ halt / negative-branch marker (e.g. a 0xFFFF exit
- * target); check it here and halt BEFORE the loads, so the halt does not read
- * m[] out of bounds (m[next_pc + A..C] with next_pc >= 0x8000 is past the
- * 32768-cell array). dispatch() also halts on a negative pc by returning 0, and
- * it discards the fetched operands in that case, so returning 0 here is
- * byte-for-byte identical behavior without the OOB read.
+static inline bool can_fetch_instruction(uint16_t pc)
+{
+    return pc <= MEM_SIZE - INSN_SIZE;
+}
+
+static inline bool is_memory_addr(uint16_t addr)
+{
+    return addr < MEM_SIZE;
+}
+
+static int reject_bad_operand(uint16_t pc, const char *operand, uint16_t addr)
+{
+    fprintf(stderr, "muxleq: bad operand %s=%u at pc %u\n", operand,
+            (unsigned) addr, (unsigned) pc);
+    return 1;
+}
+
+static int validate_memory_operands(uint16_t pc,
+                                    uint16_t addr_a,
+                                    uint16_t addr_b)
+{
+    if (addr_a == IO_MARKER) {
+        if (UNLIKELY(!is_memory_addr(addr_b)))
+            return reject_bad_operand(pc, "b", addr_b);
+    } else if (addr_b == IO_MARKER) {
+        if (UNLIKELY(!is_memory_addr(addr_a)))
+            return reject_bad_operand(pc, "a", addr_a);
+    } else if (UNLIKELY(!is_memory_addr(addr_a))) {
+        return reject_bad_operand(pc, "a", addr_a);
+    } else if (UNLIKELY(!is_memory_addr(addr_b))) {
+        return reject_bad_operand(pc, "b", addr_b);
+    }
+    return 0;
+}
+
+#define VALIDATE_OPERANDS_OR_RETURN(pc, addr_a, addr_b)             \
+    do {                                                            \
+        if (UNLIKELY(validate_operands)) {                          \
+            const int rc__ =                                        \
+                validate_memory_operands((pc), (addr_a), (addr_b)); \
+            if (UNLIKELY(rc__ != 0))                                \
+                return rc__;                                        \
+        }                                                           \
+    } while (0)
+
+/* Fetch the next instruction's operands and tail-call dispatch. A pc above the
+ * last full instruction slot includes the MUXLEQ halt / negative-branch marker
+ * (e.g. a 0xFFFF exit target) and the final one/two cells of memory; halt
+ * BEFORE the loads so m[pc + A..C] never reads past the 32768-cell array.
+ * dispatch() also halts on an invalid pc by returning 0, and it discards the
+ * fetched operands in that case, so returning 0 here is byte-for-byte identical
+ * behavior without the OOB read.
  */
 #define FETCH_AND_DISPATCH(next_pc)                 \
     do {                                            \
         const uint16_t fpc = (next_pc);             \
-        if (UNLIKELY((fpc & NEGATIVE_FLAG) != 0))   \
+        if (UNLIKELY(!can_fetch_instruction(fpc)))  \
             return 0;                               \
         const uint16_t fa = m[fpc + A];             \
         const uint16_t fb = m[fpc + B];             \
@@ -195,6 +245,11 @@ static inline bool rv32i_pc499_static_hot_trace_cell(uint16_t addr)
            addr != RV32I_PC505_PATCH_TARGET && addr != RV32I_PC511_PATCH_TARGET;
 }
 
+static inline bool rv32i_pc772_static_hot_loop_cell(uint16_t addr)
+{
+    return addr >= RV32I_PC772 && addr <= RV32I_PC772_END;
+}
+
 static inline void store_cell(uint16_t addr, uint16_t value)
 {
     /* Test the flag first: it is false on every non-'-r' run, so the common hot
@@ -203,9 +258,22 @@ static inline void store_cell(uint16_t addr, uint16_t value)
     if (UNLIKELY(rv32i_pc430_enabled &&
                  (rv32i_static_hot_trace_cell(addr) ||
                   rv32i_pc499_static_hot_trace_cell(addr) ||
-                  rv32i_pc574_static_hot_trace_cell(addr))))
+                  rv32i_pc574_static_hot_trace_cell(addr) ||
+                  rv32i_pc772_static_hot_loop_cell(addr))))
         rv32i_pc430_enabled = false;
     m[addr] = value;
+}
+
+static inline void raw_store_cell(uint16_t addr, uint16_t value)
+{
+    m[addr] = value;
+}
+
+static inline uint16_t raw_subleq_cell(uint16_t addr_a, uint16_t addr_b)
+{
+    const uint16_t result = (uint16_t) (m[addr_b] - m[addr_a]);
+    raw_store_cell(addr_b, result);
+    return result;
 }
 
 #define EXEC_MOVE(a, b) store_cell(b, m[(a)])
@@ -213,6 +281,12 @@ static inline void store_cell(uint16_t addr, uint16_t value)
     const uint16_t result = (uint16_t) (m[(b)] - m[(a)]); \
     store_cell(b, result)
 #define EXEC_SUBLEQ_DROP(a, b) store_cell(b, (uint16_t) (m[(b)] - m[(a)]))
+#define EXEC_RAW_MOVE(a, b) raw_store_cell(b, m[(a)])
+#define EXEC_RAW_SUBLEQ(a, b, result)                     \
+    const uint16_t result = (uint16_t) (m[(b)] - m[(a)]); \
+    raw_store_cell(b, result)
+#define EXEC_RAW_SUBLEQ_DROP(a, b) \
+    raw_store_cell(b, (uint16_t) (m[(b)] - m[(a)]))
 #define SUBLEQ_BRANCHES(result) ((result) == 0 || ((result) & NEGATIVE_FLAG))
 
 /* Optional prefix input fed before real stdin: -r synthesizes an RV32I loader
@@ -269,13 +343,13 @@ static VM_ABI int mux(uint16_t pc,
 
     /* Look ahead for fusion opportunities after MUX */
     const uint16_t next_pc = pc + INSN_SIZE;
-    if (UNLIKELY((next_pc & NEGATIVE_FLAG) !=
-                 0)) /* PC went negative: halt (as dispatch would) */
+    if (UNLIKELY(!can_fetch_instruction(next_pc)))
         return 0;
 
     const uint16_t next_a = m[next_pc + A];
     const uint16_t next_b = m[next_pc + B];
     const uint16_t next_c = m[next_pc + C];
+    VALIDATE_OPERANDS_OR_RETURN(next_pc, next_a, next_b);
 
     /* Pattern 1: MUX + SUBLEQ */
     if (is_subleq_instruction(next_a, next_b, next_c)) {
@@ -286,10 +360,11 @@ static VM_ABI int mux(uint16_t pc,
         } else {
             /* Extend to 3-instruction fusion for common Forth patterns */
             const uint16_t third_pc = next_pc + INSN_SIZE;
-            if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
+            if (LIKELY(can_fetch_instruction(third_pc))) {
                 const uint16_t third_a = m[third_pc + A];
                 const uint16_t third_b = m[third_pc + B];
                 const uint16_t third_c = m[third_pc + C];
+                VALIDATE_OPERANDS_OR_RETURN(third_pc, third_a, third_b);
 
                 /* MUX + SUBLEQ + MOVE (common: load, operate, store) */
                 if (is_move_instruction(third_a, third_b, third_c)) {
@@ -311,10 +386,11 @@ static VM_ABI int mux(uint16_t pc,
          * manipulation)
          */
         const uint16_t third_pc = next_pc + INSN_SIZE;
-        if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
+        if (LIKELY(can_fetch_instruction(third_pc))) {
             const uint16_t third_a = m[third_pc + A];
             const uint16_t third_b = m[third_pc + B];
             const uint16_t third_c = m[third_pc + C];
+            VALIDATE_OPERANDS_OR_RETURN(third_pc, third_a, third_b);
 
             if (is_subleq_instruction(third_a, third_b, third_c)) {
                 EXEC_SUBLEQ(third_a, third_b, result);
@@ -350,13 +426,13 @@ static VM_ABI int subleq(uint16_t pc,
         FETCH_AND_DISPATCH(addr_c); /* Branch taken, cannot fuse. */
     } else {
         /* No branch - look for fusion opportunities */
-        if (UNLIKELY((next_pc & NEGATIVE_FLAG) !=
-                     0)) /* PC went negative: halt (as dispatch would) */
+        if (UNLIKELY(!can_fetch_instruction(next_pc)))
             return 0;
 
         const uint16_t next_a = m[next_pc + A];
         const uint16_t next_b = m[next_pc + B];
         const uint16_t next_c = m[next_pc + C];
+        VALIDATE_OPERANDS_OR_RETURN(next_pc, next_a, next_b);
 
         /* Pattern 1: SUBLEQ + SUBLEQ */
         if (is_subleq_instruction(next_a, next_b, next_c)) {
@@ -368,10 +444,11 @@ static VM_ABI int subleq(uint16_t pc,
                 /* Try to extend: SUBLEQ + SUBLEQ + MOVE (arithmetic + cleanup)
                  */
                 const uint16_t third_pc = next_pc + INSN_SIZE;
-                if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
+                if (LIKELY(can_fetch_instruction(third_pc))) {
                     const uint16_t third_a = m[third_pc + A];
                     const uint16_t third_b = m[third_pc + B];
                     const uint16_t third_c = m[third_pc + C];
+                    VALIDATE_OPERANDS_OR_RETURN(third_pc, third_a, third_b);
 
                     if (is_move_instruction(third_a, third_b, third_c)) {
                         EXEC_MOVE(third_a, third_b);
@@ -388,10 +465,11 @@ static VM_ABI int subleq(uint16_t pc,
         else if (is_move_instruction(next_a, next_b, next_c)) {
             EXEC_MOVE(next_a, next_b);
             const uint16_t third_pc = next_pc + INSN_SIZE;
-            if (LIKELY(!(third_pc & NEGATIVE_FLAG))) {
+            if (LIKELY(can_fetch_instruction(third_pc))) {
                 const uint16_t third_a = m[third_pc + A];
                 const uint16_t third_b = m[third_pc + B];
                 const uint16_t third_c = m[third_pc + C];
+                VALIDATE_OPERANDS_OR_RETURN(third_pc, third_a, third_b);
 
                 if (is_subleq_instruction(third_a, third_b, third_c)) {
                     EXEC_SUBLEQ(third_a, third_b, result2);
@@ -422,8 +500,8 @@ static VM_ABI int super_rv32i_pc454(UNUSED uint16_t pc,
      * trace cursor through that patched destination, restore the cursor from
      * the trace value, then branch back to PC430.
      */
-    EXEC_SUBLEQ_DROP(RV32I_TRACE_STRIDE, RV32I_PC460_DEST_SOURCE);
-    EXEC_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC460_PATCH_TARGET);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_TRACE_STRIDE, RV32I_PC460_DEST_SOURCE);
+    EXEC_RAW_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC460_PATCH_TARGET);
 
     const uint16_t pc460_b = m[RV32I_PC460_PATCH_TARGET];
     if (UNLIKELY(pc460_b == IO_MARKER ||
@@ -431,8 +509,8 @@ static VM_ABI int super_rv32i_pc454(UNUSED uint16_t pc,
         FETCH_AND_DISPATCH(RV32I_PC460);
 
     EXEC_MOVE(RV32I_TRACE_CURSOR, pc460_b);
-    EXEC_MOVE(RV32I_TRACE_VALUE, RV32I_TRACE_CURSOR);
-    EXEC_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    EXEC_RAW_MOVE(RV32I_TRACE_VALUE, RV32I_TRACE_CURSOR);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
     FETCH_AND_DISPATCH(RV32I_PC430);
 }
 
@@ -445,20 +523,20 @@ static VM_ABI int super_rv32i_pc430(UNUSED uint16_t pc,
      * indirectly, update cursor/limit cells, then either enter the PC454 trace
      * or fold the PC448 fall-through epilogue.
      */
-    EXEC_MOVE(RV32I_TRACE_CURSOR, RV32I_PC430_PATCH_TARGET);
-    EXEC_MOVE(m[RV32I_PC430_PATCH_TARGET], RV32I_TRACE_VALUE);
-    EXEC_SUBLEQ_DROP(RV32I_TRACE_STRIDE, RV32I_TRACE_CURSOR);
-    EXEC_MOVE(RV32I_TRACE_BASE, RV32I_TRACE_LIMIT);
-    EXEC_SUBLEQ_DROP(RV32I_TRACE_VALUE, RV32I_TRACE_LIMIT);
+    EXEC_RAW_MOVE(RV32I_TRACE_CURSOR, RV32I_PC430_PATCH_TARGET);
+    EXEC_RAW_MOVE(m[RV32I_PC430_PATCH_TARGET], RV32I_TRACE_VALUE);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_TRACE_STRIDE, RV32I_TRACE_CURSOR);
+    EXEC_RAW_MOVE(RV32I_TRACE_BASE, RV32I_TRACE_LIMIT);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_TRACE_VALUE, RV32I_TRACE_LIMIT);
 
-    EXEC_SUBLEQ(RV32I_ZERO_CELL, RV32I_TRACE_LIMIT, result2);
+    EXEC_RAW_SUBLEQ(RV32I_ZERO_CELL, RV32I_TRACE_LIMIT, result2);
     if (UNLIKELY(SUBLEQ_BRANCHES(result2)))
         MUST_TAIL return super_rv32i_pc454(RV32I_PC454, RV32I_TRACE_STRIDE,
                                            RV32I_PC460_DEST_SOURCE,
                                            RV32I_PC454_FALLTHROUGH);
 
-    EXEC_MOVE(RV32I_TRACE_VALUE, RV32I_PC448_BRANCH_TARGET);
-    EXEC_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    EXEC_RAW_MOVE(RV32I_TRACE_VALUE, RV32I_PC448_BRANCH_TARGET);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
     FETCH_AND_DISPATCH(m[RV32I_PC448_BRANCH_TARGET]);
 }
 
@@ -470,8 +548,8 @@ static VM_ABI int super_rv32i_pc499(UNUSED uint16_t pc,
     /* PC499..517: update two computed address cells, use each as a patched MOVE
      * operand, restore the trace condition cell, then branch back to PC430.
      */
-    EXEC_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_TRACE_ALT_ADDR);
-    EXEC_MOVE(RV32I_TRACE_ALT_ADDR, RV32I_PC505_PATCH_TARGET);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_TRACE_ALT_ADDR);
+    EXEC_RAW_MOVE(RV32I_TRACE_ALT_ADDR, RV32I_PC505_PATCH_TARGET);
 
     const uint16_t pc505_b = m[RV32I_PC505_PATCH_TARGET];
     if (UNLIKELY(pc505_b == IO_MARKER ||
@@ -479,14 +557,14 @@ static VM_ABI int super_rv32i_pc499(UNUSED uint16_t pc,
         FETCH_AND_DISPATCH(RV32I_PC505_PATCH_TARGET - 1);
     EXEC_MOVE(RV32I_TRACE_COND, pc505_b);
 
-    EXEC_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC511_PATCH_TARGET);
+    EXEC_RAW_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC511_PATCH_TARGET);
     const uint16_t pc511_a = m[RV32I_PC511_PATCH_TARGET];
     if (UNLIKELY(pc511_a == IO_MARKER))
         FETCH_AND_DISPATCH(RV32I_PC511_PATCH_TARGET);
-    EXEC_MOVE(pc511_a, RV32I_TRACE_COND);
+    EXEC_RAW_MOVE(pc511_a, RV32I_TRACE_COND);
 
-    EXEC_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_PC460_DEST_SOURCE);
-    EXEC_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_PC460_DEST_SOURCE);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
     FETCH_AND_DISPATCH(RV32I_PC430);
 }
 
@@ -499,16 +577,56 @@ static VM_ABI int super_rv32i_pc574(UNUSED uint16_t pc,
      * into the trace cursor, decrement that address cell, then branch back to
      * PC430.
      */
-    EXEC_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC574_PATCH_TARGET);
+    EXEC_RAW_MOVE(RV32I_PC460_DEST_SOURCE, RV32I_PC574_PATCH_TARGET);
 
     const uint16_t pc577_a = m[RV32I_PC574_PATCH_TARGET];
     if (UNLIKELY(pc577_a == IO_MARKER))
         FETCH_AND_DISPATCH(RV32I_PC574_PATCH_TARGET);
 
-    EXEC_MOVE(pc577_a, RV32I_TRACE_CURSOR);
-    EXEC_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_PC460_DEST_SOURCE);
-    EXEC_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    EXEC_RAW_MOVE(pc577_a, RV32I_TRACE_CURSOR);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_PC460_DEST_SOURCE);
+    EXEC_RAW_SUBLEQ_DROP(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
     FETCH_AND_DISPATCH(RV32I_PC430);
+}
+
+static VM_ABI int super_rv32i_pc772(UNUSED uint16_t pc,
+                                    UNUSED uint16_t addr_a,
+                                    UNUSED uint16_t addr_b,
+                                    UNUSED uint16_t addr_c)
+{
+    /* PC772..823: tight condition-folding loop. It only mutates trace data
+     * cells and reads PC823's live branch target when the loop exits.
+     */
+    for (;;) {
+        raw_subleq_cell(RV32I_TRACE_LIMIT, RV32I_ZERO_CELL);
+        raw_subleq_cell(RV32I_ZERO_CELL, RV32I_TRACE_LIMIT);
+        raw_subleq_cell(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+
+        if (!SUBLEQ_BRANCHES(
+                raw_subleq_cell(RV32I_ZERO_CELL, RV32I_TRACE_COND))) {
+            raw_subleq_cell(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+        } else {
+            raw_store_cell(RV32I_TRACE_TMP, m[RV32I_TRACE_COND]);
+            raw_subleq_cell(RV32I_TRACE_STRIDE, RV32I_TRACE_TMP);
+            if (!SUBLEQ_BRANCHES(
+                    raw_subleq_cell(RV32I_ZERO_CELL, RV32I_TRACE_TMP)))
+                raw_subleq_cell(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+            else
+                raw_subleq_cell(RV32I_TRACE_STRIDE, RV32I_TRACE_LIMIT);
+        }
+
+        raw_subleq_cell(RV32I_TRACE_COND, RV32I_ZERO_CELL);
+        raw_subleq_cell(RV32I_ZERO_CELL, RV32I_TRACE_COND);
+        raw_subleq_cell(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+        raw_subleq_cell(RV32I_TRACE_DEC, RV32I_TRACE_VALUE);
+        if (SUBLEQ_BRANCHES(
+                raw_subleq_cell(RV32I_ZERO_CELL, RV32I_TRACE_VALUE))) {
+            raw_store_cell(RV32I_TRACE_COND, m[RV32I_TRACE_LIMIT]);
+            raw_subleq_cell(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+            FETCH_AND_DISPATCH(m[RV32I_PC823_BRANCH_TARGET]);
+        }
+        raw_subleq_cell(RV32I_ZERO_CELL, RV32I_ZERO_CELL);
+    }
 }
 
 static VM_ABI int dispatch(uint16_t pc,
@@ -516,9 +634,11 @@ static VM_ABI int dispatch(uint16_t pc,
                            uint16_t addr_b,
                            uint16_t addr_c)
 {
-    /* Halt if the program counter becomes negative. */
-    if (UNLIKELY((pc & NEGATIVE_FLAG) != 0))
+    /* Halt if the program counter cannot address a full instruction. */
+    if (UNLIKELY(!can_fetch_instruction(pc)))
         return 0;
+
+    VALIDATE_OPERANDS_OR_RETURN(pc, addr_a, addr_b);
 
     if (UNLIKELY(prof_enabled)) {
         prof_total++;
@@ -547,6 +667,11 @@ static VM_ABI int dispatch(uint16_t pc,
                  addr_b == RV32I_PC574_PATCH_TARGET && addr_c == RV32I_MOVE_C &&
                  m[RV32I_PC460_DEST_SOURCE] != IO_MARKER))
         MUST_TAIL return super_rv32i_pc574(pc, addr_a, addr_b, addr_c);
+    if (UNLIKELY(pc == RV32I_PC772 && rv32i_pc430_enabled &&
+                 addr_a == RV32I_TRACE_LIMIT && addr_b == RV32I_ZERO_CELL &&
+                 addr_c == RV32I_PC772 + INSN_SIZE))
+        MUST_TAIL return super_rv32i_pc772(pc, addr_a, addr_b, addr_c);
+
     /* Dispatch to the appropriate handler based on the operand values. */
     if (UNLIKELY(addr_a == IO_MARKER))
         MUST_TAIL return get(pc, addr_a, addr_b, addr_c);
@@ -740,9 +865,18 @@ static void load_rv32i(const char *path)
         exit(1);
     }
 
+    /* Per cell we emit at most "FFFF rvcell, " (13 chars) plus a newline every
+     * eighth line, so 14 bytes/cell bounds the body; 64 covers the rvorg prefix
+     * and rvboot suffix (below) with slack. Tie the two magic numbers to the
+     * literals so a format change cannot silently under-allocate.
+     */
+    _Static_assert(sizeof "FFFF rvcell, " <= 14,
+                   "-r per-cell buffer too small");
+    _Static_assert(
+        sizeof "' ) <ok> ! hex rvorg\n" + sizeof "\nrvboot bye\n" <= 64,
+        "-r framing buffer too small");
     const size_t cells = (n + 1) / 2;
-    char *buf =
-        malloc(cells * 14 + 64); /* "FFFF rvcell, " (13) per cell + framing */
+    char *buf = malloc(cells * 14 + 64);
     if (!buf) {
         fprintf(stderr, "muxleq: out of memory\n");
         exit(1);
@@ -783,6 +917,7 @@ static void load_muxleq(const char *path)
         exit(1);
     }
     memset(m, 0, sizeof m); /* overwrite the baked eForth image */
+    validate_operands = true;
     size_t n = 0;
 
     /* One whitespace-delimited token per cell. Parse with strtol so a token

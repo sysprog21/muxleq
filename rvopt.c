@@ -619,7 +619,7 @@ static void emit_sle0(int *p, int a, int b, int L, int T)
 /* Once SLE0 proves a-b <= 0 and leaves it in T, distinguish a-b == 0 (a==b)
  * from a-b < 0 (a!=b) by adding 1 (SUBLEQ of the -1 cell): '(a-b)+1 <= 0' iff
  * a-b < 0, '> 0' iff a-b == 0. Two signed SLE0 tests would be WRONG -- a-b ==
- * 0x8000 reads BOTH a-b and b-a as signed<=0 (codex 019f7e73).
+ * 0x8000 reads BOTH a-b and b-a as signed<=0.
  *
  * EQ16(a,b,L): branch to L iff a==b, else fall through. 5 instructions.
  */

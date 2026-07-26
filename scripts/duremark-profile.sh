@@ -20,7 +20,7 @@ quote_env_value() {
 files="muxleq.c build/muxleq.fth tests/rv32i/duremark/duremark.elf scripts/duremark-profile-remote.sh"
 
 for f in $files; do
-    [ -f "$f" ] || { echo "profile-duremark: missing $f" >&2; exit 1; }
+    [ -e "$f" ] || { echo "profile-duremark: missing $f" >&2; exit 1; }
 done
 
 {

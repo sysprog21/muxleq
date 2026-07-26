@@ -79,7 +79,7 @@ cells -- of which none exist today (the biggest demo, bsort, emits ~4300 cells p
 Split the decision by the actual need:
 
 1. For OPTIMIZATION HEADROOM (the reason the optimizer passes read ~0 on the -O2 demos): the wider VM is the
-   WRONG fix. The cheap fix is an UN-OPTIMIZED benchmark -- BUILT (tests/rv32i/unopt, 6cebd17): a base-ISA
+   WRONG fix. The cheap fix is an UN-OPTIMIZED benchmark -- BUILT (tests/rv32i/unopt): a base-ISA
    -O0 xorshift kernel, entry-0, write/exit, fits 32768 cells, emits ~13477 cells (5.6x the same source at
    -O2's 2407), byte-identical vs -r, wired into verify-rvopt-mux. MEASURED REFINEMENT of the earlier claim:
    the -O0 headroom is register SPILLS, NOT folding -- unopt dumps 17 LOAD + 14 STORE (every local spilled

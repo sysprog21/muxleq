@@ -16,7 +16,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order (the fast "budget" guard fails before the slow bootstrap).
 .NOTPARALLEL:
-.PHONY: run bootstrap clean distclean check check-all budget golden golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent
+.PHONY: FORCE help run bootstrap clean distclean check check-all budget golden golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent
 
 BIN := $(OUT)/muxleq
 MUXLEQ_FTH := $(OUT)/muxleq.fth
@@ -30,7 +30,7 @@ STAGE1_DEC := $(OUT)/stage1.dec
 RVOPT := $(OUT)/rvopt
 MUXLEQ_FORTH_MODULES := $(wildcard forth/*.fth)
 
-all: $(BIN)
+all: $(BIN) ## Build the default muxleq VM.
 
 $(OUT):
 	$(Q)mkdir -p $@
@@ -53,9 +53,16 @@ $(RVELF_DIR)/unopt.elf: | $(RVELF_DIR)
 $(DUREMARK_ELF): | $(RVELF_DIR)
 	$(Q)$(MAKE) --no-print-directory -C tests/rv32i/duremark OUT=$(CURDIR)/$(RVELF_DIR) CROSS=$(RVCROSS)
 
+help: ## List public make targets.
+	$(Q)printf "%-24s %s\n" "$(BIN)" "Build the default muxleq VM."
+	$(Q)printf "%-24s %s\n" "$(RVOPT)" "Build the standalone RV32I to MUXLEQ optimizer."
+	$(Q)awk 'BEGIN { FS = ":.*##"; } /^[A-Za-z0-9_.-]+:.*##/ { printf "%-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
 $(BIN): muxleq.c $(STAGE0_C) | $(OUT)
 	$(VECHO) "  CC+LD\t$@\n"
 	$(Q)$(MUXLEQ_CC) $(CFLAGS) -I$(OUT) -o $@ muxleq.c
+
+FORCE:
 
 # Standalone RV32I->MUXLEQ optimizer. Built outside the image, so it costs zero
 # self-host cells; not a prerequisite of the default build. The -dump/-check
@@ -69,7 +76,7 @@ $(RVOPT): rvopt.c | $(OUT)
 # RV32I op in isolation), and the differential fuzz (random programs, native -x
 # vs -r). The 7-demo + unopt + SMC-reject differential lives in the gate (run by
 # "make check"); this target is its synthetic-coverage complement.
-verify-rvopt-mux: $(BIN) $(RVOPT)
+verify-rvopt-mux: $(BIN) $(RVOPT) ## Verify 16-bit native rvopt emission.
 	$(Q)$(RUN) ./$(BIN) -x tests/native-smoke.dec > $(TMPDIR)/native-smoke.out 2>&1 \
 	    && cmp -s tests/expected/native-smoke.out $(TMPDIR)/native-smoke.out \
 	    || { echo "verify-rvopt-mux: native-smoke output mismatch"; exit 1; }
@@ -84,7 +91,7 @@ verify-rvopt-mux: $(BIN) $(RVOPT)
 # (MOVE, SUBLEQ arithmetic + branch-to-halt, PUT at the 32-bit encoding), per-op
 # fixtures, and the wide differential fuzz. The 7-demo + unopt + SMC-reject
 # differential lives in the gate (run by "make check").
-verify-mux32: $(BIN) $(RVOPT)
+verify-mux32: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	$(Q)$(RUN) ./$(BIN) -x32 tests/mux32-smoke.dec > $(TMPDIR)/mux32-smoke.out 2>&1 \
 	    && cmp -s tests/expected/mux32-smoke.out $(TMPDIR)/mux32-smoke.out \
 	    || { echo "verify-mux32: -x32 wide-VM smoke output mismatch"; exit 1; }
@@ -103,7 +110,7 @@ verify-mux32: $(BIN) $(RVOPT)
 # SMC guard must still reject self-modifying guest code. ~15 s (no fuzz, no
 # rv32ui): the exhaustive layers stay in verify-rvopt-mux/verify-riscv-tests and
 # check-all. Self-contained (committed .elf/.bin + prebuilt binaries, no toolchain).
-verify-rvopt-gate: $(BIN) $(RVOPT) $(if $(HAVE_RVCC),rvelf $(RVELF_DIR)/unopt.elf)
+verify-rvopt-gate: $(BIN) $(RVOPT) $(if $(HAVE_RVCC),rvelf $(RVELF_DIR)/unopt.elf) ## Run fast rvopt differential checks.
 	$(Q)for e in $(RVELF_FILES); do \
 	    ./$(RVOPT) -mux $(RVELF_DIR)/$$e.elf > $(TMPDIR)/gate-$$e.dec 2>/dev/null \
 	        && $(RUN) ./$(BIN) -x $(TMPDIR)/gate-$$e.dec > $(TMPDIR)/gate-$$e.x 2>&1 \
@@ -140,7 +147,7 @@ verify-rvopt-gate: $(BIN) $(RVOPT) $(if $(HAVE_RVCC),rvelf $(RVELF_DIR)/unopt.el
 	    || { echo "verify-rvopt-gate: multi-ret JALR -mux32 differs from -r"; exit 1; }
 	$(Q)$(PRINTF) "verify-rvopt-gate: native/JALR "; $(call notice, [OK])
 
-verify-duremark-rvopt: $(RVOPT) $(DUREMARK_ELF)
+verify-duremark-rvopt: $(RVOPT) $(DUREMARK_ELF) ## Verify current rvopt DureMark limits.
 	$(Q)! ./$(RVOPT) -mux $(DUREMARK_ELF) >/dev/null 2>$(TMPDIR)/duremark-rvopt.err \
 	    && grep -q 'unsupported JALR at pc' $(TMPDIR)/duremark-rvopt.err \
 	    || { echo "verify-duremark-rvopt: -mux must reject DureMark runtime JALR"; exit 1; }
@@ -149,7 +156,7 @@ verify-duremark-rvopt: $(RVOPT) $(DUREMARK_ELF)
 	    || { echo "verify-duremark-rvopt: -mux32 must reject unresolved DureMark ecall"; exit 1; }
 	$(Q)$(PRINTF) "verify-duremark-rvopt: DureMark limits "; $(call notice, [OK])
 
-verify-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-range.dec
+verify-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-range.dec tests/loader-bad-operand.dec tests/loader-bad-fused-operand.dec ## Verify malformed image rejection.
 	$(Q)for f in tests/loader-bad-token.dec tests/loader-out-of-range.dec; do \
 	    ! ./$(BIN) -x $$f >/dev/null 2>$(TMPDIR)/loader.err \
 	        && grep -q 'bad cell' $(TMPDIR)/loader.err \
@@ -158,6 +165,12 @@ verify-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-ran
 	        && grep -q 'bad cell' $(TMPDIR)/loader.err \
 	        || { echo "verify-loader-rejects: -x32 accepted $$f"; exit 1; }; \
 	done
+	$(Q)! ./$(BIN) -x tests/loader-bad-operand.dec >/dev/null 2>$(TMPDIR)/loader.err \
+	    && grep -q 'bad operand a=32768 at pc 0' $(TMPDIR)/loader.err \
+	    || { echo "verify-loader-rejects: -x accepted invalid operand"; exit 1; }
+	$(Q)! ./$(BIN) -x tests/loader-bad-fused-operand.dec >/dev/null 2>$(TMPDIR)/loader.err \
+	    && grep -q 'bad operand a=32768 at pc 3' $(TMPDIR)/loader.err \
+	    || { echo "verify-loader-rejects: -x accepted invalid fused operand"; exit 1; }
 	$(Q)yes 0 | head -n 32769 > $(TMPDIR)/loader-oversized.dec; \
 	    ! ./$(BIN) -x $(TMPDIR)/loader-oversized.dec >/dev/null 2>$(TMPDIR)/loader.err \
 	        && grep -q 'exceeds' $(TMPDIR)/loader.err \
@@ -173,7 +186,7 @@ verify-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-ran
 # PASS/FAIL) and run through -r, the native -mux emitter, AND the wide -mux32
 # emitter (which reaches ld_st, over the 16-bit ceiling). Needs the RISC-V
 # toolchain; skips gracefully when absent, like the differential fuzz above.
-verify-riscv-tests: $(BIN) $(RVOPT)
+verify-riscv-tests: $(BIN) $(RVOPT) ## Run rv32ui compliance tests when toolchain exists.
 	$(Q)if command -v $(RVCROSS)gcc >/dev/null 2>&1; then \
 	    $(MAKE) --no-print-directory -C tests/rv32i/riscv-tests check check-mux check-x32 \
 	        CROSS=$(RVCROSS) MUXLEQ=$(CURDIR)/$(BIN) RVOPT=$(CURDIR)/$(RVOPT) \
@@ -187,10 +200,10 @@ verify-riscv-tests: $(BIN) $(RVOPT)
 # BODY default 24 keeps ~88% of programs under the 32768-cell image (bigger just
 # skips more, since load/store and branch ops are 2 words each). Failure prints a
 # --seed/--only/--body repro command.
-fuzz-rvopt: $(BIN) $(RVOPT)
+fuzz-rvopt: $(BIN) $(RVOPT) ## Differential-fuzz rvopt emitted programs.
 	$(Q)python3 scripts/rvopt-fuzz.py --n $(if $(N),$(N),64) --body $(if $(BODY),$(BODY),24) --seed $(if $(SEED),$(SEED),1)
 
-run: $(BIN)
+run: $(BIN) ## Run the interactive VM.
 	$(Q)./$(BIN)
 
 # Source formatter and lint. C sources are reformatted in place with
@@ -205,7 +218,7 @@ run: $(BIN)
 CFMT_SRC := muxleq.c rvopt.c
 PYFMT_SRC := $(wildcard scripts/*.py)
 FORTH_SRC := $(MUXLEQ_FORTH_MODULES) $(wildcard tests/*.fth)
-indent:
+indent: ## Format C/Python and lint Forth sources.
 	$(Q)if command -v clang-format >/dev/null 2>&1; then \
 	    clang-format -i $(CFMT_SRC) || exit 1; \
 	    $(PRINTF) "indent: clang-format C sources "; $(call notice, [OK]); \
@@ -261,7 +274,7 @@ RVELF_FILES := $(if $(HAVE_RVCC),hello fibonacci primes crc16 mul bgcd bsort)
 RVFLAT_FILES := $(if $(HAVE_RVCC),hello)
 RVELF_RUN = $(RUN) ./$(BIN) -r
 
-golden: $(BIN) $(if $(HAVE_RVCC),rvelf)
+golden: $(BIN) $(if $(HAVE_RVCC),rvelf) ## Run byte-exact golden output tests.
 	$(Q)test -n "$(TIMEOUT)" || $(PRINTF) \
 	    "golden: WARNING: no timeout(1)/gtimeout; a hung test (e.g. broken task switching) will not be bounded\n"
 	$(Q)$(foreach t,$(GOLDEN_FILES),\
@@ -289,7 +302,7 @@ golden: $(BIN) $(if $(HAVE_RVCC),rvelf)
 	    fi; \
 	)
 
-golden-mandel: $(BIN) tests/expected/mandel-prefix.out
+golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mandelbrot prefix.
 	$(Q)test -n "$(TIMEOUT)" || { echo "golden-mandel: timeout(1)/gtimeout required"; exit 1; }
 	$(Q)command -v stdbuf >/dev/null 2>&1 || { echo "golden-mandel: stdbuf required for killed-run stdout"; exit 1; }
 	$(Q)bytes=$$(wc -c < tests/expected/mandel-prefix.out); \
@@ -301,14 +314,14 @@ golden-mandel: $(BIN) tests/expected/mandel-prefix.out
 # The pre-commit gate: cell-budget guard + byte-exact golden diff + the rvopt native
 # differential (the AOT optimizer's -x/-x32 output must match -r) + the self-hosting
 # proof. rvopt runs before the slow bootstrap so an optimizer regression fails fast.
-check: budget golden verify-rvopt-gate bootstrap
+check: budget golden verify-rvopt-gate bootstrap ## Run the fast pre-commit gate.
 
 # Self-host ceiling guard. The image + its re-assembled copy + the metacompiler dictionary must all
 # fit 32768 cells (empirical hard ceiling ~12888, where bootstrap starts to fail). Fail loudly HERE if
 # stage0.dec exceeds the budget, instead of a cryptic -13/hang deep in "make bootstrap". Bump MAX_CELLS
 # consciously (with evidence bootstrap still holds) if the image legitimately needs to grow.
 MAX_CELLS ?= 12500
-budget: $(STAGE0_DEC)
+budget: $(STAGE0_DEC) ## Check the self-host image cell budget.
 	$(Q)cells=$$(grep -c . $(STAGE0_DEC)); \
 	    if [ "$$cells" -gt $(MAX_CELLS) ]; then \
 	        $(PRINTF) "budget: image is $$cells cells, over the $(MAX_CELLS)-cell budget (ceiling ~12888) -- shrink the image or bump MAX_CELLS if bootstrap still holds\n"; \
@@ -320,7 +333,7 @@ budget: $(STAGE0_DEC)
 # load, deliberately OUT of the fast "make check"; it runs in check-all and on demand. Needs the 32 KiB
 # guest window (its ~4.5 KB image never fit the old 1 KiB). The checksum is byte-identical to a native
 # build, so a drift means the RV32I microcode or the guest-RAM window regressed.
-duremark: $(BIN) $(if $(HAVE_RVCC),$(DUREMARK_ELF))
+duremark: $(BIN) $(if $(HAVE_RVCC),$(DUREMARK_ELF)) ## Run the RV32I DureMark benchmark.
 	$(Q)$(PRINTF) "duremark rv32i ... "; \
 	    if $(TIMEOUT) $(if $(TIMEOUT),90) ./$(BIN) -r $(DUREMARK_ELF) > $(TMPDIR)/duremark.out 2>/dev/null \
 	        && cmp -s tests/expected/duremark.out $(TMPDIR)/duremark.out; \
@@ -330,10 +343,10 @@ duremark: $(BIN) $(if $(HAVE_RVCC),$(DUREMARK_ELF))
 # Deep pre-release gate: the standard check plus the slow/opt-in exhaustive checks (RV32I conformance,
 # the Z3 ALU proof, the ASan+UBSan run, and the DureMark benchmark). Minutes; needs z3-solver + a
 # sanitizer-capable compiler.
-check-all: check verify-rv32i verify-microcode verify-rvopt-mux verify-mux32 verify-duremark-rvopt verify-loader-rejects verify-riscv-tests sanitize duremark
+check-all: check verify-rv32i verify-microcode verify-rvopt-mux verify-mux32 verify-duremark-rvopt verify-loader-rejects verify-riscv-tests sanitize duremark ## Run deep validation.
 
 # bootstrapping
-bootstrap: $(STAGE0_DEC) $(STAGE1_DEC)
+bootstrap: $(STAGE0_DEC) $(STAGE1_DEC) ## Prove self-host bootstrap is byte-exact.
 	$(Q)if diff $(STAGE0_DEC) $(STAGE1_DEC); then \
 	$(call notice, [OK]); \
 	else \
@@ -357,10 +370,10 @@ TMPDIR := $(shell mktemp -d)
 # shown bare. All params pass through the environment to scripts/bench.sh (which
 # defaults them): "BENCH_HOST=node2 TIME=20000 REPS=9 make bench" and "make bench
 # TIME=20000" both work. scripts/bench.sh ships the sources and runs bench-remote.sh.
-bench: $(STAGE0_C)
+bench: $(STAGE0_C) ## Run remote throughput benchmarks.
 	$(Q)sh scripts/bench.sh
 
-profile-duremark: muxleq.fth
+profile-duremark: muxleq.fth ## Profile DureMark on the remote host.
 	$(Q)sh scripts/duremark-profile.sh
 
 # RV32I instruction-level conformance. The official riscv-arch-test ELFs can't run
@@ -371,7 +384,7 @@ profile-duremark: muxleq.fth
 # the :a rvstep microcode, self-checking each. Slow (thousands of vectors through
 # the eForth text interpreter, minutes) so it is NOT part of "make check" -- run it
 # explicitly. Any FAIL or VM error (a stray "?") fails the target.
-verify-rv32i: $(BIN)
+verify-rv32i: $(BIN) ## Run generated RV32I instruction conformance.
 	$(Q)python3 scripts/rv32i-conformance.py > $(TMPDIR)/conform.fth
 	$(Q)./$(BIN) < $(TMPDIR)/conform.fth > $(TMPDIR)/conform.out 2>&1; \
 	    ok=$$(grep -c '^OK' $(TMPDIR)/conform.out); \
@@ -385,7 +398,7 @@ verify-rv32i: $(BIN)
 # in Z3 and proves it equals the true 32-bit result over the entire input space (conformance above
 # only samples). Needs the z3 Python package; host-side, no VM involvement, so it is NOT part of
 # "make check".
-verify-microcode:
+verify-microcode: ## Prove RV32I microcode with the Python/Z3 model.
 	$(Q)python3 scripts/verify-microcode.py
 
 # Build with AddressSanitizer + UndefinedBehaviorSanitizer and run every golden program plus the -r
@@ -406,8 +419,8 @@ SAN_RUN = ASAN_OPTIONS=detect_leaks=0 $(TIMEOUT) $(if $(TIMEOUT),120) $(TMPDIR)/
 # branch halt in the rest), rv32i-run the RV32I microcode + guest LB/SB + ecall -- plus the -r loader
 # and guest execution via the RVELF paths below.
 SANITIZE_FILES := chacha20 sieve editor tasker collatz eforth-does eof rv32i-run
-sanitize: $(if $(HAVE_RVCC),rvelf) stage0.c $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec
-	$(Q)$(MUXLEQ_CC) $(SANFLAGS) -o $(TMPDIR)/muxleq.san muxleq.c
+sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec tests/loader-bad-operand.dec tests/loader-bad-fused-operand.dec ## Run ASan/UBSan validation.
+	$(Q)$(MUXLEQ_CC) $(SANFLAGS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
 	$(Q)$(foreach t,$(SANITIZE_FILES),\
 	    $(PRINTF) "sanitize $(t) ... "; \
 	    if $(SAN_RUN) < tests/$(t).fth >/dev/null 2>$(TMPDIR)/san.err; \
@@ -451,6 +464,12 @@ sanitize: $(if $(HAVE_RVCC),rvelf) stage0.c $(BIN) $(RVOPT) tests/loader-bad-tok
 	        && ! $(SAN_RUN) -x32 tests/loader-out-of-range.dec >/dev/null 2>$(TMPDIR)/san.err \
 	        && grep -q 'bad cell' $(TMPDIR)/san.err \
 	        && ! grep -Eq 'ERROR: AddressSanitizer|runtime error:' $(TMPDIR)/san.err \
+	        && ! $(SAN_RUN) -x tests/loader-bad-operand.dec >/dev/null 2>$(TMPDIR)/san.err \
+	        && grep -q 'bad operand a=32768 at pc 0' $(TMPDIR)/san.err \
+	        && ! grep -Eq 'ERROR: AddressSanitizer|runtime error:' $(TMPDIR)/san.err \
+	        && ! $(SAN_RUN) -x tests/loader-bad-fused-operand.dec >/dev/null 2>$(TMPDIR)/san.err \
+	        && grep -q 'bad operand a=32768 at pc 3' $(TMPDIR)/san.err \
+	        && ! grep -Eq 'ERROR: AddressSanitizer|runtime error:' $(TMPDIR)/san.err \
 	        || { $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; }; \
 	    $(call notice, [OK])
 	$(Q)$(CC) $(SANFLAGS) -o $(TMPDIR)/rvopt.san $(RVOPT).c
@@ -478,8 +497,8 @@ sanitize: $(if $(HAVE_RVCC),rvelf) stage0.c $(BIN) $(RVOPT) tests/loader-bad-tok
 	    fi; \
 	else $(PRINTF) "sanitize rvopt emit fuzz: python3 absent, skipping\n"; fi
 
-clean:
+clean: ## Remove built binaries and objects.
 	$(RM) $(BIN) $(RVOPT)
 
-distclean: clean
+distclean: clean ## Remove generated bootstrap artifacts too.
 	$(RM) -r $(OUT)

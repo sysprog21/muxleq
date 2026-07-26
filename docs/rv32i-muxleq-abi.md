@@ -60,7 +60,7 @@ which also load inline-built programs with `rvorg`/`rvcell,`). Proven with a pre
 
 Scope of the shipped simulator: RV32I base only (no M/A/F/D, no CSRs, no interrupts); syscalls `write`
 and `exit` only; entry must be 0; guest RAM is 32 KiB (32768 bytes). The self-host memory ceiling is the
-binding constraint -- the image is 10643 cells and the hard ceiling is ~12888 (the self-host holds the running
+binding constraint -- the image is 10632 cells and the hard ceiling is ~12888 (the self-host holds the running
 image PLUS the copy it re-assembles PLUS the metacompiler dictionary, all in 32768 cells), so the
 generous guest-RAM budget the plan below assumed does NOT hold today. Bigger programs need the eForth
 teardown (Decision 1) -- NOT yet done. Built: an ELF PT_LOAD parser and the C runner. NOT built:
@@ -74,8 +74,8 @@ shift amount 0..31 + masking, signed/unsigned boundaries, 12-bit immediate sign 
 branches with scrambled B-immediates, JAL, JALR (incl. the `&~1` alignment), and LUI/AUIPC -- and
 drives the same operands through `rvstep`. `--verify-model` anchors the model to every vector in the
 Codex-verified `tests/rv32i-spec.fth` (133 ALU/branch/jump/upper-immediate cases) so it can't share
-a bug with the microcode. `make verify-rv32i` runs it (~minutes, not in `make check`); as of
-72a112b all 2974 vectors pass. Loads/stores + `ecall` are covered live in `tests/rv32i-run.fth`.
+a bug with the microcode. `make verify-rv32i` runs it (~minutes, not in `make check`);
+all 2974 vectors pass. Loads/stores + `ecall` are covered live in `tests/rv32i-run.fth`.
 
 ---
 
@@ -85,8 +85,8 @@ a bug with the microcode. `make verify-rv32i` runs it (~minutes, not in `make ch
 
 - MUXLEQ cells are 16-bit (`uint16_t`); the address space is 15-bit: `MEM_SIZE = 32768` cells
   (`muxleq.c`), i.e. 64 KiB of byte space if every cell holds two bytes.
-- The shipped eForth image currently occupies 10643 cells (`stage0.dec`); the rest is working RAM
-  (dictionary growth, stacks, buffers). So 22125 cells are free with the image resident.
+- The shipped eForth image currently occupies 10632 cells (`stage0.dec`); the rest is working RAM
+  (dictionary growth, stacks, buffers). So 22136 cells are free with the image resident.
 - MUXLEQ arithmetic is 16-bit two's complement; there is native same-lane MUX (bitwise select) but
   no cross-lane shift. Every 32-bit RV32I value is therefore TWO cells (low half / high half), and
   every op is written as explicit half-by-half microcode (see the MODEL section).
@@ -188,7 +188,7 @@ Register/scratch subtotal: **91 cells** (round up to 128 for alignment/growth he
 ## Cell budget (hand-worked)
 
 > SUPERSEDED by AS-BUILT: the interpreter came in at the HIGH end (~4400 cells of rv32i microcode;
-> full image 10643). Critically, the "~22 000–24 000 cells of guest RAM" row did NOT materialize as a
+> full image 10632). Critically, the "~22 000–24 000 cells of guest RAM" row did NOT materialize as a
 > baked buffer -- the self-host ceiling (image + its re-assembled copy + dictionary in 32768 cells) caps
 > the baked image near ~12888. Instead guest RAM was moved OUT of the image into a fixed high-memory
 > window (byte `$7000` = cell `$3800`, un-baked like `buf0`/`=thread`), giving 32 KiB (16384 cells) at
@@ -202,9 +202,9 @@ Register/scratch subtotal: **91 cells** (round up to 128 for alignment/growth he
 | Fetch/decode/dispatch loop             | ~200         | fetch (2-cell load), field extraction, jump table |
 | Per-op microcode (`.sl` routines)      | ~1500–4000   | OPTIMISTIC placeholder, ~40 base ops. Each MUXLEQ instruction is 3 cells, and cross-cell carry / doubling-halving shifts / sub-cell loads are bulky, so real per-op cost may run 2–3× a naive estimate. MEASURE it; do not trust this number. |
 | Fixture area (raw instrs + presets)    | ~32          | a handful of hand-encoded instrs + register seeds |
-| Interpreter subtotal                   | **~2–4 K**   | under the 22125 free cells even at the high end |
+| Interpreter subtotal                   | **~2–4 K**   | under the 22136 free cells even at the high end |
 | Guest RAM for a full ELF               | ~22 000–24 000 | stale baked-buffer estimate; the shipped runner uses a 32 KiB high-memory window |
-| Guest RAM if image torn down           | up to ~30 000 | would free the 10643-cell image, but is not needed for the shipped 32 KiB window |
+| Guest RAM if image torn down           | up to ~30 000 | would free the 10632-cell image, but is not needed for the shipped 32 KiB window |
 
 Takeaway: the interpreter fits comfortably with the image resident even if the microcode is 2–3× my
 estimate. A full compliance ELF is the only place the budget could bind, and the guest-RAM
