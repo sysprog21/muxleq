@@ -670,6 +670,7 @@ system[
 : rp! r> swap [ {rp} half ] literal [!] >r ; compile-only
 : hex [ $10 ] literal base ! ;     ( -- : hexadecimal base )
 : decimal [ $A ] literal base ! ;  ( -- : decimal base )
+: octal [ $8 ] literal base ! ;    ( -- : octal base )
 :to ] #-1 state ! ;                ( -- : return to compile mode )
 :to [  #0 state ! ; immediate      ( -- : initiate command mode )
 : nip swap drop ;                  ( x y -- y : remove second item )
@@ -722,6 +723,7 @@ system[
 2 constant cell                    ( -- u : bytes in cells )
 : cell+ cell + ;                   ( a -- a : increment address by cell width )
 : cells 2* ;                       ( u -- u : multiply # of cells to get bytes )
+: th cells + ;                     ( a n -- a' : address of the n-th cell of array a )
 : cell- cell - ;                   ( a -- a : decrement address by cell width )
 : execute 2/ >r ;                  ( xt -- : execute an execution token )
 :s @execute ( ?dup 0= ?exit ) @ execute ;s ( xt -- )
@@ -742,6 +744,8 @@ system[
 : set-current current ! ;          ( -- wid : set definitions vocab. )
 :s last get-current @ ;s           ( -- wid : get last defined word )
 : pick sp@ + [@] ;                 ( nu...n0 u -- nu : pick item on stack )
+: 2swap rot >r rot r> ;            ( a b c d -- c d a b )
+: 2over [ 3 ] literal pick [ 3 ] literal pick ; ( a b c d -- a b c d a b )
 : +! 2/ tuck [@] + swap [!] ;      ( u a -- : add value to cell )
 : lshift negate shift ;            ( u n -- u : left shift 'u' by 'n' )
 
@@ -791,6 +795,9 @@ system[ user tup =cell tallot ]system
 :m ." .$ $literal ;m               \ --, ccc" : compile string
 :m $" ($) $literal ;m              \ --, ccc" : compile string
 : space bl emit ;                  ( -- : emit a space )
+: chars ;                          ( n -- n : char count to au; identity, bytes are the unit )
+: spaces                           ( n -- : emit n spaces, nothing for n<=0 )
+  begin dup 0> while space 1- repeat drop ;
 
 \ Exception Handling
 : catch                            ( xt -- exception# | 0 )
@@ -812,7 +819,7 @@ system[ user tup =cell tallot ]system
 
 : abort #-1 throw ;                ( -- : abort execution )
 :s (abort) do$ swap if count type abort then drop ;s ( n -- )
-:s depth [ {sp0} ] literal @ sp@ - 1- ;s ( -- n : stack depth )
+: depth [ {sp0} ] literal @ sp@ - 1- ;  ( -- n : stack depth; forth vocab for ceForth conformance )
 :s ?depth depth >= [ -$4 ] literal and throw ;s ( ??? n -- )
 
 \ Double-Precision Arithmetic
@@ -848,6 +855,9 @@ system[ user tup =cell tallot ]system
 : /mod over 0< swap m/mod ;        ( u1 u2 -- u1%u2 u1/u2 )
 : mod /mod drop ;                  ( u1 u2 -- u1%u2 )
 : /   /mod nip ;                   ( u1 u2 -- u1/u2 )
+: m*  2dup xor 0< >r abs swap abs um* r> if dnegate then ; ( n n -- d : signed double product )
+: */mod >r m* r> m/mod ;           ( n1 n2 n3 -- rem quot : n1*n2/n3, double intermediate )
+: */  */mod nip ;                  ( n1 n2 n3 -- quot : scaling multiply then divide )
 
 \ Terminal I/O and Line Editing
 :s (emit) pause opEmit ;s          ( c -- : output byte to terminal )
@@ -923,6 +933,7 @@ system[ user tup =cell tallot ]system
 : <# this [ =num ] literal + hld ! ; ( -- : start numeric output )
 : sign 0>= ?exit [char] - hold ;   ( n -- )
 : u.r >r #0 <# #s #> r> over - bl banner type ; ( u r -- )
+: .r >r dup >r abs #0 <# #s r> sign #> r> over - bl banner type ; ( n r -- : signed, right-justified in field r )
 : u. space #0 u.r ;                ( u -- : unsigned numeric output )
 
 opt.divmod [if]
@@ -1159,9 +1170,11 @@ root[
    get-current ! ;
 :to variable create #0 , ;
 :to constant create -cell allot compile (const) , ;
+:to value    create -cell allot compile (const) , ;  ( n --, "name" : a mutable constant )
 :to user create -cell allot compile (user)
    cell user? +! user? @ , ;
 : >body cell+ ;                    ( a -- a : move to a create word's body )
+:to to token find ?found cfa >body ! ; ( n --, "name" : store n into the named value )
 :s (does) 2r> 2* swap >r ;s compile-only
 :s (comp)
   r> [ {last} ] literal @ cfa

@@ -1,0 +1,24 @@
+example: ChaCha20-Poly1305  ok
+ ok
+ChaCha20-Poly1305 Complete Cipher Test 
+==================================== 
+Setting up ChaCha20... Key: 1111 2222 3333 4444 5555 6666 7777 8888 Counter: 1, Nonce: 1001 2002 3003 
+Initial state: 
+ 25462 28237 25648
+ 1111 2222 3333
+ 5555 6666 7777
+ 1 1001 2002
+Generating keystream block... 
+After keystream generation: 
+ 25462 28237 25648
+ 2222 4444 6666
+ 11110 13332 15554
+ 2 2002 4004
+Setting up Poly1305... r-key: 1111 2222 3333 4444, s-key: 5555 6666 7777 8888 Testing encryption: Plaintext: 12345 
+Encrypting...  21327
+Processing authentication: 
+Authentication tag:  16276 19602 14474 5688
+Testing multiple block encryption: 
+Block 2 - Plaintext: 22222  13752
+Block 3 - Plaintext: 33333  -7869
+ChaCha20-Poly1305 complete cipher test finished. 

@@ -6,6 +6,11 @@
  * program counter moves to a negative address.
  */
 
+/* isatty()/fileno() are POSIX; request them under a strict -std=c99 on glibc
+ * (macOS exposes them regardless, so this only matters when building on Linux).
+ */
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -58,6 +63,23 @@ static uint64_t prof_total = 0;
 static uint64_t prof_op[OP_COUNT] = {0};
 static uint64_t prof_heat_map[MEM_SIZE];
 
+/* Classify a cell by its operands into GET/PUT/MUX/SUBLEQ. Single source of
+ * truth for the opcode class (stable under the image's operand self-
+ * modification); used by the fusion predicates and the profiler. The hot
+ * dispatch below open-codes the same decision with explicit branch hints, so
+ * keep the two in sync.
+ */
+static inline uint8_t classify(uint16_t a, uint16_t b, uint16_t c)
+{
+    if (a == IO_MARKER)
+        return OP_GET;
+    if (b == IO_MARKER)
+        return OP_PUT;
+    if ((c & NEGATIVE_FLAG) && (c != IO_MARKER))
+        return OP_MUX;
+    return OP_SUBLEQ;
+}
+
 /* Forward declarations for the mutually recursive VM functions. */
 static int dispatch(uint16_t pc,
                     uint16_t addr_a,
@@ -73,23 +95,18 @@ static int dispatch(uint16_t pc,
         MUST_TAIL return dispatch(next_pc, __a, __b, __c); \
     } while (0)
 
-/* Check if instruction is a move (MUX with mask=0) */
+/* A move is a MUX whose mask is zero (address 6 is hardwired 0). */
 static bool is_move_instruction(uint16_t a, uint16_t b, uint16_t c)
 {
-    if ((a == IO_MARKER) || (b == IO_MARKER))
+    if (classify(a, b, c) != OP_MUX)
         return false;
-    if (!((c & NEGATIVE_FLAG) && (c != IO_MARKER)))
-        return false;
-
     const uint16_t mask_addr = c & MEM_MASK;
     return (mask_addr == 6) || (m[mask_addr] == 0);
 }
 
-/* Check if instruction is a SUBLEQ */
 static bool is_subleq_instruction(uint16_t a, uint16_t b, uint16_t c)
 {
-    return (a != IO_MARKER) && (b != IO_MARKER) &&
-           !((c & NEGATIVE_FLAG) && (c != IO_MARKER));
+    return classify(a, b, c) == OP_SUBLEQ;
 }
 
 static int get(uint16_t pc,
@@ -280,16 +297,8 @@ static int dispatch(uint16_t pc,
         prof_total++;
         if (prof_heat)
             prof_heat_map[pc & MEM_MASK]++;
-        if (prof_stats) {
-            if (addr_a == IO_MARKER)
-                prof_op[OP_GET]++;
-            else if (addr_b == IO_MARKER)
-                prof_op[OP_PUT]++;
-            else if ((addr_c & NEGATIVE_FLAG) && (addr_c != IO_MARKER))
-                prof_op[OP_MUX]++;
-            else
-                prof_op[OP_SUBLEQ]++;
-        }
+        if (prof_stats)
+            prof_op[classify(addr_a, addr_b, addr_c)]++;
     }
 
     /* Dispatch to the appropriate handler based on the operand values. */

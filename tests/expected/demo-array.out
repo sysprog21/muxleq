@@ -1,0 +1,35 @@
+ ok
+ ok
+ ok
+ ok
+lesson 17 - array access  ok
+ ok
+create arr 5 cells allot 
+ ok
+ ok
+ ok
+ ok
+ ok
+999 arr ! 
+ ok
+111 arr 1 st ! 
+ ok
+222 arr 2 nd ! 
+ ok
+333 arr 3 rd ! 
+ ok
+444 arr 4 th ! 
+
+ ok
+ ok
+arr @      =>  999
+ ok
+arr 1 st @ =>  111
+ ok
+arr 2 nd @ =>  222
+ ok
+arr 3 rd @ =>  333
+ ok
+arr 4 th @ =>  444
+
+ ok

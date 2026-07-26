@@ -3,7 +3,6 @@ example: radix for number conversions  ok
  ok
  ok
  ok
- ok
 try converting numbers among different radices:  ok
 decimal 12345 hex .           =>  3039 ok
 decimal 100 binary .          =>  1100100 ok

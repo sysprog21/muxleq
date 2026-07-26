@@ -1,8 +1,7 @@
 .( example: radix for number conversions )
 
 decimal
-: octal  8 base !  ;
-: binary 2 base !  ;
+: binary 2 base !  ;               \ octal is now a muxleq built-in; only binary needs defining
 
 .( try converting numbers among different radices: )
 .( decimal 12345 hex .           => ) decimal 12345 hex  .

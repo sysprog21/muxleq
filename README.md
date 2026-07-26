@@ -62,6 +62,20 @@ then 21, adds them, prints the result, and adds a carriage return.
 New words are defined with `: <name> <definition> ;`.
 Once defined, the word `hello` can be executed by typing its name.
 
+### Testing, benchmarking, and internals
+
+- `make check` -- the pre-commit gate: byte-exact golden-output tests (`tests/*.fth` vs
+  `tests/expected/*.out`, each run time-bounded) plus the self-hosting bootstrap, which checks
+  the VM reproduces its own image byte-for-byte.
+- `make bench` -- times the VM on a quiet remote host (`node1` by default, override with
+  `BENCH_HOST`); localhost load makes wall-clock timing unreliable. Reports per-workload user
+  time and a deterministic instruction count.
+- `./muxleq -s` and `./muxleq -p` -- the built-in profiler: instruction mix and a per-PC heat
+  map. Default runs (no flags) are byte-identical, so the gates are unaffected.
+- [`docs/manual.md`](docs/manual.md) -- reference manual: the instruction set, memory image and
+  self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, and the eForth
+  environment.
+
 ## MUXLEQ Architecture
 The MUXLEQ architecture extends the classic SUBLEQ OISC with a second instruction to improve performance without significantly increasing implementation complexity.
 Existing SUBLEQ programs are generally compatible with MUXLEQ.

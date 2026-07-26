@@ -1,0 +1,18 @@
+\ Ported from externals/eforth/tests/demo/8_temperature.fs -- F<->C conversion. demo adapted: none.
+.( example 8. temperature conversion )
+
+variable t8
+: f>c ( nfarenheit -- ncelcius )
+        32 -
+        10 18 */
+        ;
+
+: c>f ( ncelcius -- nfarenheit )
+        18 10 */
+        32 +
+        ;
+
+.( 90 f>c . => ) 90 f>c . cr
+.( 0  c>f . => ) 0  c>f . cr
+
+bye

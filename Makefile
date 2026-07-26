@@ -1,13 +1,12 @@
 include mk/common.mk
 
-# All generated artifacts live under build/, so the working tree stays clean and
-# build/ is the single .gitignore entry.
+# Generated artifacts live under build/; it is the single .gitignore entry.
 OUT := build
 
 CFLAGS += -O2 -std=c99
 CFLAGS += -Wall -Wextra
 
-.PHONY: run bootstrap clean check golden golden-update
+.PHONY: run bootstrap clean distclean check golden golden-update bench
 
 BIN := $(OUT)/muxleq
 STAGE0_DEC := $(OUT)/stage0.dec
@@ -39,9 +38,13 @@ $(STAGE0_DEC): muxleq.fth | $(OUT)
 # and runs new words at runtime (the decode-once guard).
 GOLDEN_FILES := \
 	loops radix sqrt \
-	fibonacci bitcount clz crc log \
+	fibonacci bitcount clz crc log arith \
 	life rainbow control editor \
-	define
+	define chacha20 scheduler tasker sieve collatz base recurse rot13 double sort heap except \
+	demo-hello demo-f demo-loops demo-trig demo-multiply \
+	demo-array demo-does demo-ascii \
+	demo-text demo-money demo-temp demo-weather demo-calendar \
+	demo-fig demo-stack demo-msgpass demo-value
 
 # Bound each test run so a mis-fused interpreter that loops forever fails the
 # gate instead of hanging it -- an infinite loop is the likeliest fusion bug.
@@ -50,6 +53,8 @@ TIMEOUT := $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/
 GOLDEN_RUN = $(TIMEOUT) $(if $(TIMEOUT),20) ./$(BIN)
 
 golden: $(BIN)
+	$(Q)test -n "$(TIMEOUT)" || $(PRINTF) \
+	    "golden: WARNING: no timeout(1)/gtimeout; a hung test (e.g. broken task switching) will not be bounded\n"
 	$(Q)$(foreach t,$(GOLDEN_FILES),\
 	    $(PRINTF) "golden $(t) ... "; \
 	    if $(GOLDEN_RUN) < tests/$(t).fth > $(TMPDIR)/golden.out 2>/dev/null \
@@ -83,18 +88,16 @@ $(STAGE1_DEC): $(BIN) muxleq.fth | $(OUT)
 	$(VECHO)  "Bootstrapping... "
 	$(Q)./$(BIN) < muxleq.fth > $@
 
-TIME = 5000
 TMPDIR := $(shell mktemp -d)
-bench: $(BIN)
-	$(VECHO)  "Benchmarking... "
-	$(Q)(echo "${TIME} ms bye" | time -p ./$(BIN) > /dev/null) 2> $(TMPDIR)/bench ; \
-	if grep -q real $(TMPDIR)/bench; then \
-	$(call notice, [OK]); \
-	cat $(TMPDIR)/bench; \
-	else \
-	$(PRINTF) "Failed.\n"; \
-	exit 1; \
-	fi;
+
+# Consolidated benchmark suite. Builds and times the VM on a quiet remote host
+# (node1 by default) because localhost load makes wall-clock timing unreliable.
+# All params pass straight through the environment to scripts/bench.sh (which
+# defaults them), so both forms work: `BENCH_HOST=node2 TIME=20000 REPS=9 make
+# bench` and `make bench TIME=20000`. scripts/bench.sh ships the current sources
+# and runs scripts/bench-remote.sh there.
+bench: $(STAGE0_C)
+	$(Q)sh scripts/bench.sh
 
 clean:
 	$(RM) $(BIN)
