@@ -34,7 +34,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order (the fast "budget" guard fails before the slow bootstrap).
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all budget golden golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent
+.PHONY: FORCE help run bootstrap clean distclean check check-all budget golden golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent check-format
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -252,13 +252,24 @@ run: $(BIN) ## Run the interactive VM.
 # run here, because the metacompiler's label and fall-through idioms are hand-
 # tuned and do not nest mechanically. Each half degrades to a skip when its tool
 # is absent. The generated $(MUXLEQ_FTH) is not linted; its modules are.
-CFMT_SRC := muxleq.c rv32i.inc rvopt.c
+# Derived from the same pathspec .ci/check-format.sh checks, so "make indent"
+# formats exactly what CI enforces (tracked C/include sources outside tests/).
+CFMT_SRC := $(shell git ls-files -- '*.c' '*.inc' ':!tests/')
 PYFMT_SRC := $(wildcard scripts/*.py)
 FORTH_SRC := $(MUXLEQ_FORTH_MODULES) $(wildcard tests/*.fth)
+# clang-format output is version-sensitive, so the project pins version 20.
+# Detect a clang-format-20 binary first, otherwise accept a plain clang-format
+# only when it reports major version 20. A present but wrong-versioned
+# clang-format is an error; a missing one degrades to a skip.
+CLANG_FORMAT := $(shell command -v clang-format-20 2>/dev/null || \
+    { command -v clang-format >/dev/null 2>&1 && \
+      clang-format --version | grep -q 'version 20\.' && command -v clang-format; })
 indent: ## Format C/Python and lint Forth sources.
-	$(Q)if command -v clang-format >/dev/null 2>&1; then \
-	    clang-format -i $(CFMT_SRC) || exit 1; \
-	    $(PRINTF) "indent: clang-format C sources "; $(call notice, [OK]); \
+	$(Q)if [ -n "$(CLANG_FORMAT)" ]; then \
+	    $(CLANG_FORMAT) -i $(CFMT_SRC) || exit 1; \
+	    $(PRINTF) "indent: $(notdir $(CLANG_FORMAT)) C sources "; $(call notice, [OK]); \
+	elif command -v clang-format >/dev/null 2>&1; then \
+	    echo "indent: clang-format $$(clang-format --version | grep -oE '[0-9]+' | head -1) found, version 20 required"; exit 1; \
 	else $(PRINTF) "indent: clang-format absent, skipping C sources\n"; fi
 	$(Q)if command -v black >/dev/null 2>&1; then \
 	    black -q $(PYFMT_SRC) || exit 1; \
@@ -269,6 +280,13 @@ indent: ## Format C/Python and lint Forth sources.
 	    python3 scripts/forth-indent.py $(FORTH_SRC) || exit 1; \
 	    $(PRINTF) "indent: Forth sources clean "; $(call notice, [OK]); \
 	else $(PRINTF) "indent: python3 absent, skipping Forth lint\n"; fi
+
+# Check-only counterpart to indent, mirroring the CI format job: fail (do not
+# reformat) when a project C source drifts from clang-format 20 or lacks a
+# trailing newline. Same file scope as indent via .ci/check-format.sh.
+check-format: ## Verify C formatting and trailing newlines (no reformat).
+	$(Q).ci/check-newline.sh
+	$(Q).ci/check-format.sh
 
 $(STAGE0_C): $(STAGE0_DEC) | $(OUT)
 	$(Q)sed 's/$$/,/' $^ > $@
