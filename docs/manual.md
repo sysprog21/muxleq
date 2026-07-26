@@ -114,7 +114,9 @@ reproduces `stage0.dec` byte-for-byte:
 ```
 gforth muxleq.fth > stage0.dec        # Gforth builds the image
 sed 's/$/,/' stage0.dec > stage0.c    # cells become a C initializer list
-cc -o muxleq muxleq.c                 # stage0.c is #included into m[]
+python3 scripts/gen-rv32i-traces.py \
+    stage0.dec rv32i-traces.inc.in rv32i-traces.inc   # RV32I trace addresses
+cc -o muxleq muxleq.c                 # stage0.c + rv32i-traces.inc are #included
 ./muxleq < muxleq.fth > stage1.dec    # the VM re-builds the image
 diff stage0.dec stage1.dec            # must be identical
 ```

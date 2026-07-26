@@ -12,15 +12,20 @@ set -e
 HOST=${BENCH_HOST:-node1}
 TIME=${TIME:-5000}
 REPS=${REPS:-5}
+ENABLE_RV32I=${ENABLE_RV32I:-1}
 
 case $TIME in '' | *[!0-9]* | 0) echo "bench: TIME must be a positive integer" >&2; exit 1 ;; esac
 case $REPS in '' | *[!0-9]* | 0) echo "bench: REPS must be a positive integer" >&2; exit 1 ;; esac
+case $ENABLE_RV32I in 0 | 1) ;; *) echo "bench: ENABLE_RV32I must be 0 or 1" >&2; exit 1 ;; esac
 
 quote_env_value() {
     printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
 }
 
-files="muxleq.c stage0.c build/muxleq.fth tests/chacha20.fth scripts/bench-remote.sh"
+files="muxleq.c rv32i.inc stage0.c build/muxleq.fth tests/chacha20.fth scripts/bench-remote.sh"
+if [ "$ENABLE_RV32I" = 1 ]; then
+    files="$files build/rv32i-traces.inc"
+fi
 for f in $files; do
     [ -f "$f" ] || { echo "bench: missing $f (run 'make' first)" >&2; exit 1; }
 done
@@ -29,7 +34,7 @@ done
 # command line -- so nothing in TIME/REPS/CFLAGS can break out of the ssh shell.
 {
     printf "TIME=%s\nREPS=%s\nCFLAGS=" "$TIME" "$REPS"
-    quote_env_value "${BENCH_CFLAGS:--O2 -std=c99}"
+    quote_env_value "${BENCH_CFLAGS:--O2 -std=c99} -DENABLE_RV32I=$ENABLE_RV32I"
     printf "\n"
     if [ "${CC+x}" ]; then
         printf "CC="

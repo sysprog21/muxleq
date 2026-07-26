@@ -5,6 +5,18 @@ OUT := build
 
 CFLAGS += -O2 -std=c99
 CFLAGS += -Wall -Wextra
+# The RV32I toggle goes on the compile line, NOT into CFLAGS: a command-line
+# `make CFLAGS=...` override replaces CFLAGS wholesale and would otherwise drop
+# the -D, silently building the default despite ENABLE_RV32I=0.
+ENABLE_RV32I ?= 1
+ifeq ($(filter-out 0 1,$(ENABLE_RV32I)),)
+else
+$(error ENABLE_RV32I must be 0 or 1, got '$(ENABLE_RV32I)')
+endif
+RV32I_DEFS := -DENABLE_RV32I=$(ENABLE_RV32I)
+ifeq ($(ENABLE_RV32I),1)
+RV32I_TRACE_INC := $(OUT)/rv32i-traces.inc
+endif
 # Prefer clang for muxleq.c (musttail/preserve_none codegen), but honor an
 # explicit CC=... the user sets on the command line or in the environment.
 ifeq ($(origin CC),default)
@@ -27,6 +39,7 @@ DUREMARK_ELF := $(RVELF_DIR)/duremark.elf
 HAVE_RVCC := $(shell command -v $(RVCROSS)gcc 2>/dev/null)
 STAGE0_C := $(OUT)/stage0.c
 STAGE1_DEC := $(OUT)/stage1.dec
+ENABLE_SENTINEL := $(OUT)/.enable-rv32i
 RVOPT := $(OUT)/rvopt
 MUXLEQ_FORTH_MODULES := $(wildcard forth/*.fth)
 
@@ -54,13 +67,18 @@ $(DUREMARK_ELF): | $(RVELF_DIR)
 	$(Q)$(MAKE) --no-print-directory -C tests/rv32i/duremark OUT=$(CURDIR)/$(RVELF_DIR) CROSS=$(RVCROSS)
 
 help: ## List public make targets.
-	$(Q)printf "%-24s %s\n" "$(BIN)" "Build the default muxleq VM."
-	$(Q)printf "%-24s %s\n" "$(RVOPT)" "Build the standalone RV32I to MUXLEQ optimizer."
 	$(Q)awk 'BEGIN { FS = ":.*##"; } /^[A-Za-z0-9_.-]+:.*##/ { printf "%-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-$(BIN): muxleq.c $(STAGE0_C) | $(OUT)
+$(BIN): muxleq.c rv32i.inc $(RV32I_TRACE_INC) $(STAGE0_C) $(ENABLE_SENTINEL) | $(OUT)
 	$(VECHO) "  CC+LD\t$@\n"
-	$(Q)$(MUXLEQ_CC) $(CFLAGS) -I$(OUT) -o $@ muxleq.c
+	$(Q)$(MUXLEQ_CC) $(CFLAGS) $(RV32I_DEFS) -I$(OUT) -o $@ muxleq.c
+
+# ENABLE_RV32I only changes CFLAGS, which make does not track as a dependency,
+# so `make ENABLE_RV32I=0` after a default build would not relink. Record the
+# value in a sentinel rewritten only when it changes, and hang $(BIN) off it.
+$(ENABLE_SENTINEL): FORCE | $(OUT)
+	$(Q)printf '%s\n' '$(ENABLE_RV32I)' | cmp -s - $@ 2>/dev/null || \
+	    printf '%s\n' '$(ENABLE_RV32I)' >$@
 
 FORCE:
 
@@ -215,7 +233,7 @@ run: $(BIN) ## Run the interactive VM.
 # here, because the metacompiler's label and fall-through idioms are hand-tuned
 # and do not nest mechanically. Each half degrades to a skip when its tool is
 # absent.
-CFMT_SRC := muxleq.c rvopt.c
+CFMT_SRC := muxleq.c rv32i.inc rvopt.c
 PYFMT_SRC := $(wildcard scripts/*.py)
 FORTH_SRC := $(MUXLEQ_FORTH_MODULES) $(wildcard tests/*.fth)
 indent: ## Format C/Python and lint Forth sources.
@@ -235,6 +253,10 @@ indent: ## Format C/Python and lint Forth sources.
 
 $(STAGE0_C): $(STAGE0_DEC) | $(OUT)
 	$(Q)sed 's/$$/,/' $^ > $@
+
+$(OUT)/rv32i-traces.inc: $(STAGE0_DEC) rv32i-traces.inc.in scripts/gen-rv32i-traces.py | $(OUT)
+	$(VECHO) "  GEN\t$@\n"
+	$(Q)python3 scripts/gen-rv32i-traces.py $(STAGE0_DEC) rv32i-traces.inc.in $@
 
 $(MUXLEQ_FTH): $(MUXLEQ_FORTH_MODULES) scripts/update-muxleq-fth.sh | $(OUT)
 	$(Q)sh scripts/update-muxleq-fth.sh $@ $(MUXLEQ_FORTH_MODULES)
@@ -370,8 +392,8 @@ TMPDIR := $(shell mktemp -d)
 # shown bare. All params pass through the environment to scripts/bench.sh (which
 # defaults them): "BENCH_HOST=node2 TIME=20000 REPS=9 make bench" and "make bench
 # TIME=20000" both work. scripts/bench.sh ships the sources and runs bench-remote.sh.
-bench: $(STAGE0_C) ## Run remote throughput benchmarks.
-	$(Q)sh scripts/bench.sh
+bench: $(STAGE0_C) $(RV32I_TRACE_INC) ## Run remote throughput benchmarks.
+	$(Q)ENABLE_RV32I=$(ENABLE_RV32I) sh scripts/bench.sh
 
 profile-duremark: muxleq.fth ## Profile DureMark on the remote host.
 	$(Q)sh scripts/duremark-profile.sh
@@ -419,8 +441,13 @@ SAN_RUN = ASAN_OPTIONS=detect_leaks=0 $(TIMEOUT) $(if $(TIMEOUT),120) $(TMPDIR)/
 # branch halt in the rest), rv32i-run the RV32I microcode + guest LB/SB + ecall -- plus the -r loader
 # and guest execution via the RVELF paths below.
 SANITIZE_FILES := chacha20 sieve editor tasker collatz eforth-does eof rv32i-run
-sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec tests/loader-bad-operand.dec tests/loader-bad-fused-operand.dec ## Run ASan/UBSan validation.
-	$(Q)$(MUXLEQ_CC) $(SANFLAGS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
+# sanitize exercises -r, the rv32i-run microcode, and the rvopt differential
+# (the last drives the normal $(BIN), which is a stub under ENABLE_RV32I=0), so
+# the suite only makes sense with RV32I enabled. Refuse other modes with a clear
+# message instead of failing obscurely mid-suite.
+sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec tests/loader-bad-operand.dec tests/loader-bad-fused-operand.dec ## Run ASan/UBSan validation.
+	$(Q)[ "$(ENABLE_RV32I)" = 1 ] || { echo "make sanitize requires ENABLE_RV32I=1 (it exercises -r and the RV32I paths)"; exit 1; }
+	$(Q)$(MUXLEQ_CC) $(SANFLAGS) $(RV32I_DEFS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
 	$(Q)$(foreach t,$(SANITIZE_FILES),\
 	    $(PRINTF) "sanitize $(t) ... "; \
 	    if $(SAN_RUN) < tests/$(t).fth >/dev/null 2>$(TMPDIR)/san.err; \
@@ -498,7 +525,7 @@ sanitize: $(if $(HAVE_RVCC),rvelf) $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-
 	else $(PRINTF) "sanitize rvopt emit fuzz: python3 absent, skipping\n"; fi
 
 clean: ## Remove built binaries and objects.
-	$(RM) $(BIN) $(RVOPT)
+	$(RM) $(BIN) $(RVOPT) .enable-rv32i
 
 distclean: clean ## Remove generated bootstrap artifacts too.
-	$(RM) -r $(OUT)
+	$(RM) $(STAGE0_C) $(STAGE0_DEC) $(STAGE1_DEC) rv32i-traces.inc

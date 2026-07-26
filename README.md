@@ -185,7 +185,7 @@ $ make bootstrap
 
 This command executes the following steps:
 1. `gforth muxleq.fth > stage0.dec` - Uses Gforth to compile the first image (`stage0`).
-2. `cc -o muxleq muxleq.c` - Compiles the MUXLEQ virtual machine.
+2. `cc -o muxleq muxleq.c` - Compiles the MUXLEQ virtual machine (the generated `stage0.c` and `rv32i-traces.inc` are `#include`d).
 3. `./muxleq < muxleq.fth > stage1.dec` - Runs the `stage0` image inside the VM to compile a second image (`stage1`).
 4. `diff -w stage0.dec stage1.dec` - Compares the two images.
 

@@ -17,7 +17,7 @@ quote_env_value() {
     printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
 }
 
-files="muxleq.c build/muxleq.fth tests/rv32i/duremark/duremark.elf scripts/duremark-profile-remote.sh"
+files="muxleq.c rv32i.inc rv32i-traces.inc.in scripts/gen-rv32i-traces.py build/muxleq.fth tests/rv32i/duremark/duremark.elf scripts/duremark-profile-remote.sh"
 
 for f in $files; do
     [ -e "$f" ] || { echo "profile-duremark: missing $f" >&2; exit 1; }

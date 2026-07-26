@@ -27,6 +27,8 @@ echo "generate: gforth build/muxleq.fth > stage0.dec"
 gforth build/muxleq.fth >stage0.dec
 echo "generate: sed 's/$/,/' stage0.dec > stage0.c"
 sed 's/$/,/' stage0.dec >stage0.c
+echo "generate: python3 scripts/gen-rv32i-traces.py stage0.dec rv32i-traces.inc.in rv32i-traces.inc"
+python3 scripts/gen-rv32i-traces.py stage0.dec rv32i-traces.inc.in rv32i-traces.inc
 echo "build: $MUXLEQ_CC $CFLAGS -o muxleq muxleq.c"
 $MUXLEQ_CC $CFLAGS -o muxleq muxleq.c
 RUN=./muxleq
