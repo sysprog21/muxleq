@@ -6,13 +6,18 @@ implementation. The commit history records every measured optimization and the o
 
 ## As-built summary (what rvopt does today)
 
-`rvopt` (a standalone ~2600-line C compiler, zero image cells) turns an RV32I ELF32 / flat binary into a
+`rvopt` (a standalone ~3900-line C compiler, zero image cells) turns an RV32I ELF32 / flat binary into a
 graph IR (flat `struct node` array: linear decode + intra-block value/def-use edges + a memory-order
 chain) and emits one of:
 
-- `rvopt -mux prog` -- a standalone MUXLEQ image (`.dec`, decimal cells like `stage0.dec`) run by
-  `./muxleq -x`. The payoff path: runs on the two ops + fusion directly, no eForth/`vm`/`rvstep`.
-- `rvopt -dump` / `-check` -- textual IR round-trip for the folder/decode passes.
+- `rvopt -mux prog` -- a standalone 16-bit-cell MUXLEQ image (`.dec`, decimal cells like `stage0.dec`) run
+  by `./muxleq -x`. The payoff path: runs on the two ops + fusion directly, no eForth/`vm`/`rvstep`. A whole
+  32-bit register is a lo/hi cell pair, so arithmetic is 2-cell macros (carry/borrow votes, bit15 sign).
+- `rvopt -mux32 prog` -- a standalone 32-bit-cell WIDE image run by `./muxleq -x32` (a separate 2M-cell
+  runner, `NEG_FLAG = 1<<31`). A whole register is ONE cell, so the ALU is native single-cell SUBLEQ/MUX (no
+  lo/hi halves, no carry/borrow votes -- only the compares sign-flip at bit31); and the address space is not
+  capped at the 15-bit / 32768-cell wall, so large-`.data` programs the 16-bit image cannot hold now run.
+- "rvopt -dump" / "-check": textual IR round-trip for the folder and decode passes.
 
 Op coverage is COMPLETE for the rv32ui base set (ADD/SUB/SLT[U]/AND/OR/XOR + immediates, all shifts,
 LUI/AUIPC, all branches, JAL, computed/linking JALR, LB/LH/LHU/LW/SB/SH/SW, ecall write/exit).
@@ -25,11 +30,22 @@ for later passes; the current folder and forwarding use their own cprop / memory
 def-use arrays. Self-modifying guest code is DETECTED and cleanly REJECTED (the constant-target case);
 running SMC (hybrid deopt) is deferred until a real SMC program appears.
 
-Compliance: 39/40 rv32ui tests emit native and PASS (`make verify-riscv-tests`); the last skip (ld_st,
-~108k cells) overflows the 32768-cell image and, like 40/40 and larger real programs, is gated on a
-wider-address VM (see docs/design-wider-vm.md). Correctness net: differential vs `-r` (the SMC-correct,
-live-fetching oracle) plus a bounded randomized differential fuzzer (`scripts/rvopt-fuzz.py`, straight-line
-and bounded loops across the op paths), also run under ASan/UBSan via `make sanitize`.
+Compliance (`make verify-riscv-tests`): the 16-bit `-mux`/`-x` path is 39/40 rv32ui -- its one skip is
+ld_st, whose large `.data` needs ~76k cells to emit and so overflows the 32768-cell 16-bit image (rvopt
+aborts before emit: "image needs N cells (> 32768)"). The wide `-mux32`/`-x32` path is 40/40, INCLUDING
+ld_st (~188k cells): the 2M-cell runner holds it, so the wider-address VM that docs/design-wider-vm.md
+scoped is now built and closes the last compliance skip. Both paths reject self-modifying code (detect_smc)
+rather than miscompile it (`-mux32` only lowers a JALR whose target cprop resolves statically -- a
+runtime-computed JALR is a clean hard error, not silent). Correctness net: differential vs `-r` (the
+SMC-correct, live-fetching oracle)
+plus a bounded randomized differential fuzzer (`scripts/rvopt-fuzz.py`, straight-line and bounded loops
+across the op paths; `--wide` fuzzes `-mux32` too), all run under ASan/UBSan via `make sanitize` -- which now
+also sanitizes the `-x`/`-x32` runners, not just the `-r` interpreter.
+
+The design sections below (image layout `< 32768`, the lo/hi 2-cell 32-bit macros, per-op lowering) describe
+the 16-bit `-mux` backend, which is where the layout constraints and the optimizer passes live. The wide
+`-mux32` backend mirrors the same structure with a ONE-cell register file and a 2M-cell layout, replacing
+every 2-cell lo/hi/carry macro with a native single-cell op, built slice by slice.
 
 ## Goal and the one idea that makes it win
 
@@ -109,11 +125,14 @@ compute demos (a few hundred instrs) fit; DureMark (~4.5 KB guest) likely does n
   (SUBLEQ's `c`) to the taken block or fall through. This is branchless-friendly but branches are native
   and cheap here.
 - JAL: set link (pc+4 const) into rd + branch to the target block (direct, target known at emit time).
-- JALR (crisp v0 restriction, codex): a general JALR cannot "branch to the block whose address matches"
-  without a runtime return-dispatch table. v0 handles ONLY the `jalr x0,x1,0` return form every demo uses
-  (print_dec `ret`): the return address is a guest pc == a known leader; emit a small dispatch that maps
-  the computed target (in a scratch cell) to the matching emitted block via a compare chain / SMC-patched
-  jump over the finite set of call-return sites. General computed JALR is deferred until a demo needs it.
+- JALR (as-built): a general JALR cannot "branch to the block whose address matches" without a runtime
+  return-dispatch table. Two static forms ARE handled, and cover all of rv32ui + the demos: (1) a
+  STATIC-TARGET JALR whose `rs1` cprop resolves to a compile-time address (`resolve_jalr` records the
+  target node, like a JAL) -- emit a direct jump to that block plus the pc+4 link if rd != 0; (2) the
+  `jalr x0,x1,0` return form (print_dec `ret`) -- a single reachable `jal ra` call site whose return
+  address is checked against the stored value, then jump to the block after the call. Anything else (a
+  runtime-computed non-ret JALR, or a `ret` with more than one call site) is a clean hard error, not a
+  silent miscompile; it is deferred until a real program needs the runtime dispatch.
 - LOAD/STORE: address = reg+imm; SMC-patch the operand of a MOVE/SUBLEQ to that cell, execute; byte/half
   via MUX/shift + the alignment rules the microcode already enforces.
 - ecall: write(64) = a loop emitting a2 guest bytes from [a1] via `PUT`; exit(93) = branch negative (halt).
@@ -178,7 +197,8 @@ live in them -- macro-local discipline, not fresh physical temps per instruction
 
 ## Validation (the whole point is a measurable win)
 
-- Correctness: `./muxleq -x prog.dec` stdout must be byte-identical to BOTH `./muxleq -r prog.elf` on all 7 demos.
+- Correctness: "./muxleq -x prog.dec" stdout must be byte-identical to "./muxleq -r prog.elf" on all 7
+  demos plus the unopt loop, and the wide "./muxleq -x32 prog.dec" is validated the same way.
 - Performance: `./muxleq -s -x prog.dec` dispatched-op count must be BELOW `./muxleq -s -r prog.elf`. If it
   is not, native emission has failed its reason to exist -- report and diagnose, do not paper over.
   CAVEAT (codex): `-s < -r` can fail STRUCTURALLY on tiny/IO-heavy programs -- a fixed prologue, the constant
@@ -186,9 +206,11 @@ live in them -- macro-local discipline, not fresh physical temps per instruction
   the milestone on slices 1-3, and pick the first fair win target as a TIGHT COMPUTE LOOP with little I/O
   and no hard ops: `fibonacci` or `primes` FIRST, then `crc16`; leave `bgcd`/`bsort` until branches, shifts,
   and memory are solid; `hello` is an I/O-dominated smoke test, not a perf proof.
-- `make verify-rvopt-mux` (the differential over the 7 demos + unopt + fuzz + SMC reject) is wired into
-  `check-all`; `make verify-riscv-tests` runs the 39/40 rv32ui native-emit gate; `make sanitize` runs the
-  emitter (every op path + loop fuzz) under ASan/UBSan.
+- `make verify-rvopt-mux` (the 16-bit differential over the 7 demos + unopt + fuzz + SMC reject) and
+  `make verify-mux32` (the wide `-x32` smoke + fixtures + all 7 demos vs `-r` + `--wide` fuzz + SMC reject)
+  are wired into `check-all`; `make verify-riscv-tests` runs `check` (`-r` 40/40) + `check-mux` (16-bit
+  39/40, skip ld_st) + `check-x32` (wide 40/40, incl. ld_st); `make sanitize` runs the emitter (every op
+  path + loop fuzz, both `-mux` and `--wide`) AND the `-x`/`-x32` runners under ASan/UBSan.
 
 ## Staged slices (all landed -- the original build order, kept for the record)
 

@@ -31,7 +31,7 @@ ELFS = $(addsuffix .elf,$(TESTS))
 
 # The subset the native emitter `rvopt -mux` can lower today. The one remaining
 # skip is IMAGE-SIZE ONLY -- correct code that overflows the 32768-cell native
-# image: ld_st (large .data, ~108k cells). sra USED to overflow (33619 cells) but
+# image: ld_st (large .data, needs ~76k cells). sra USED to overflow (33619 cells) but
 # the cumulative optimizer work (const-OPIMM + mv folds, store-to-load forwarding,
 # the MUX-MAJ dispatch collapse) shrank it to 31981 -- under the ceiling with ~787
 # cells to spare -- so it now emits and PASSes native (39/40). That headroom is
@@ -43,6 +43,14 @@ ELFS = $(addsuffix .elf,$(TESTS))
 # SRL/SRA, computed JALR all landed). A test that fails to emit here is a regression.
 MUX_SKIP  = ld_st
 MUX_TESTS = $(filter-out $(MUX_SKIP),$(TESTS))
+
+# The WIDE emitter `rvopt -mux32`, run on the 2M-cell `-x32` runner, lowers the
+# ENTIRE rv32ui suite: 40/40. The wide address space is the whole point -- it
+# emits + PASSes ld_st (~188k cells), which the 16-bit -mux CANNOT (over its
+# 32768-cell ceiling). X32_SKIP is empty; any test that fails to emit here is a
+# regression.
+X32_SKIP  =
+X32_TESTS = $(filter-out $(X32_SKIP),$(TESTS))
 
 all: $(ELFS)
 
@@ -103,12 +111,30 @@ check-mux: $(addsuffix .elf,$(MUX_TESTS))
 	  echo "riscv-tests(-mux): $(words $(MUX_TESTS))/$(words $(TESTS)) rv32ui emit native + PASS (skip: $(MUX_SKIP))"; \
 	else exit 1; fi
 
+# Same byte-exact PASS gate as check-mux, but lowered by the WIDE emitter
+# `rvopt -mux32` and run on the 2M-cell `-x32` runner. Covers ld_st (the
+# wide-address payoff the 16-bit path cannot reach); a non-X32_SKIP test that
+# fails to emit is a regression.
+check-x32: $(addsuffix .elf,$(X32_TESTS))
+	@fail=0; for t in $(X32_TESTS); do \
+	  if $(RVOPT) -mux32 $$t.elf > .x32.dec 2>/dev/null; then \
+	    $(TIMEOUT) $(if $(TIMEOUT),20) $(MUXLEQ) -x32 .x32.dec > .check.out 2>/dev/null; \
+	    st=$$?; \
+	    if [ $$st -ne 0 ] || ! printf 'PASS\n' | cmp -s - .check.out; then \
+	      echo "  FAIL(x32): rv32ui-$$t (status $$st, got '`tr -d '\n' < .check.out`')"; fail=1; fi; \
+	  else echo "  FAIL(x32): rv32ui-$$t did not emit (rvopt -mux32 abort)"; fail=1; fi; \
+	done; \
+	$(RM) .x32.dec .check.out; \
+	if [ $$fail -eq 0 ]; then \
+	  echo "riscv-tests(-mux32): $(words $(X32_TESTS))/$(words $(TESTS)) rv32ui emit wide + PASS incl. ld_st$(if $(X32_SKIP), (skip: $(X32_SKIP)),)"; \
+	else exit 1; fi
+
 clean:
-	$(RM) *.elf .check.out .mux.dec
+	$(RM) *.elf .check.out .mux.dec .x32.dec
 
 # `distclean` also drops the upstream clone (re-fetched on next build).
 distclean: clean
 	$(RM) -r upstream upstream.tmp
 
 FORCE:
-.PHONY: all check check-mux clean distclean FORCE
+.PHONY: all check check-mux check-x32 clean distclean FORCE

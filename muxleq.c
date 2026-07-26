@@ -592,32 +592,147 @@ static void load_muxleq(const char *path)
     }
 }
 
+/* Wide (32-bit-cell) MUXLEQ VM -- the '-x32' runner for rvopt '-mux32' images.
+ *
+ * A SEPARATE interpreter from the 16-bit machine above: its cells are uint32_t,
+ * so the address space is far larger (bigger guest programs than the 15-bit
+ * wall allows) and a whole 32-bit RV32I register fits in ONE cell (native
+ * 32-bit SUBLEQ arithmetic, no lo/hi split). It runs on its OWN heap memory and
+ * never touches the baked eForth image in m[], so the self-host bootstrap is
+ * unaffected. Deliberately correctness-first: a plain fetch/dispatch loop with
+ * no fusion (the fused 16-bit path stays the perf demonstrator).
+ *
+ * Encoding scales the 16-bit one exactly: the sign/branch bit is 1<<31, the
+ * I/O/halt marker is 0xFFFFFFFF, MUX mask-address 6 is hardwired 0, and a MOVE
+ * is a MUX with c = (1<<31)|6. The array is a fixed power-of-two window that
+ * bounds untrusted input; every index is masked into it (a no-op for the valid
+ * < window-size addresses rvopt emits, and OOB-safe for a malformed image).
+ */
+#define MEM_SIZE32 (1 << 21) /* 2M cells (8 MiB); the wide-image ceiling */
+#define IDX32 (MEM_SIZE32 - 1)
+#define IO_MARKER32 0xFFFFFFFFu
+#define NEG_FLAG32 0x80000000u
+#define ADDR_MASK32 \
+    0x7FFFFFFFu /* strip the sign bit to get a MUX mask address */
+
+static uint32_t *load_muxleq32(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "muxleq: cannot open '%s'\n", path);
+        exit(1);
+    }
+    uint32_t *m32 = calloc(MEM_SIZE32, sizeof *m32);
+    if (!m32) {
+        fprintf(stderr, "muxleq: out of memory for the wide image\n");
+        exit(1);
+    }
+    size_t n = 0;
+
+    /* One decimal token per cell (the -mux32 .dec format). strtoll rejects a
+     * non-numeric / out-of-32-bit token instead of wrapping -- untrusted input.
+     * Signed (-1) and unsigned (4294967295) spellings of a cell both parse.
+     */
+    for (char tok[32]; fscanf(f, "%31s", tok) == 1;) {
+        errno = 0;
+        char *end;
+        const long long v = strtoll(tok, &end, 10);
+        if (*end != '\0' || errno == ERANGE || v < -2147483648LL ||
+            v > 4294967295LL) {
+            fprintf(stderr, "muxleq: '%s' has a bad cell '%s'\n", path, tok);
+            fclose(f);
+            free(m32);
+            exit(1);
+        }
+        if (n >= MEM_SIZE32) {
+            fprintf(stderr, "muxleq: '%s' exceeds the %d-cell wide image\n",
+                    path, MEM_SIZE32);
+            fclose(f);
+            free(m32);
+            exit(1);
+        }
+        m32[n++] = (uint32_t) v;
+    }
+    const bool io_err = ferror(f);
+    fclose(f);
+    if (io_err) {
+        fprintf(stderr, "muxleq: read error on '%s'\n", path);
+        free(m32);
+        exit(1);
+    }
+    if (n == 0) {
+        fprintf(stderr, "muxleq: '%s' is empty\n", path);
+        free(m32);
+        exit(1);
+    }
+    return m32;
+}
+
+static int run32(uint32_t *m32)
+{
+    uint32_t pc = 0;
+    for (;;) {
+        if (UNLIKELY(pc & NEG_FLAG32))
+            return 0; /* negative pc: halt (as the 16-bit dispatch does) */
+        const uint32_t a = m32[pc & IDX32];
+        const uint32_t b = m32[(pc + B) & IDX32];
+        const uint32_t c = m32[(pc + C) & IDX32];
+        if (a == IO_MARKER32) { /* GET: read one byte into m32[b] */
+            const int in = getchar();
+            if (UNLIKELY(in == EOF))
+                return 0;
+            m32[b & IDX32] = (uint32_t) in;
+            pc += INSN_SIZE;
+        } else if (b == IO_MARKER32) { /* PUT: emit m32[a]'s low byte */
+            if (UNLIKELY(putchar((int) (m32[a & IDX32] & 0xFF)) == EOF))
+                return 3;
+            pc += INSN_SIZE;
+        } else if ((c & NEG_FLAG32) && c != IO_MARKER32) { /* MUX */
+            const uint32_t maddr = c & ADDR_MASK32;
+            const uint32_t mask = (maddr == 6) ? 0 : m32[maddr & IDX32];
+            m32[b & IDX32] = (m32[a & IDX32] & ~mask) | (m32[b & IDX32] & mask);
+            pc += INSN_SIZE;
+        } else { /* SUBLEQ: m32[b] -= m32[a]; branch to c if signed <= 0 */
+            const uint32_t r = m32[b & IDX32] - m32[a & IDX32];
+            m32[b & IDX32] = r;
+            if (UNLIKELY(r == 0 || (r & NEG_FLAG32)))
+                pc = c;
+            else
+                pc += INSN_SIZE;
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     /* -r (RV32I via the eForth runner) and -x (a standalone MUXLEQ image) each
      * set up a whole run; they are mutually exclusive and single-use.
      */
     bool run_chosen = false;
+    uint32_t *m32 = NULL; /* set by -x32: run the wide VM instead of dispatch */
     for (int i = 1; i < argc; i++) {
         const bool is_r = !strcmp(argv[i], "-r"), is_x = !strcmp(argv[i], "-x");
+        const bool is_x32 = !strcmp(argv[i], "-x32");
         if (!strcmp(argv[i], "-s"))
             prof_stats = true;
         else if (!strcmp(argv[i], "-p"))
             prof_heat = true;
-        else if (is_r || is_x) {
+        else if (is_r || is_x || is_x32) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "muxleq: %s needs a FILE\n", argv[i]);
                 return 1;
             }
             if (run_chosen) {
-                fprintf(stderr, "muxleq: -r/-x already given\n");
+                fprintf(stderr, "muxleq: -r/-x/-x32 already given\n");
                 return 1;
             }
             run_chosen = true;
             if (is_r)
                 load_rv32i(argv[++i]);
-            else
+            else if (is_x)
                 load_muxleq(argv[++i]);
+            else
+                m32 = load_muxleq32(argv[++i]);
         } else
             fprintf(stderr, "muxleq: ignoring unknown argument '%s'\n",
                     argv[i]);
@@ -630,7 +745,14 @@ int main(int argc, char **argv)
     if (mode == _IOFBF)
         setvbuf(stdin, NULL, _IOFBF, BUFSIZ);
 
-    /* Fetch first instruction and start execution by calling the dispatcher. */
+    /* The wide VM is a separate run path; otherwise fetch the first 16-bit
+     * instruction and start the dispatcher.
+     */
+    if (m32) {
+        const int rc = run32(m32);
+        free(m32);
+        return rc;
+    }
     const uint16_t pc = 0;
     const int rc = dispatch(pc, m[pc + A], m[pc + B], m[pc + C]);
     if (prof_enabled)

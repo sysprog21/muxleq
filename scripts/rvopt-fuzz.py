@@ -10,6 +10,9 @@ is run two ways and the stdout is compared:
     oracle   = ./muxleq -r prog.bin           (the RV32I interpreter)
     emitted  = rvopt -mux prog.bin | muxleq -x prog.dec   (native two-op image)
 
+With --wide the emitter under test is the 32-bit-cell backend instead:
+    emitted  = rvopt -mux32 prog.bin | muxleq -x32 prog.dec
+
 A mismatch is an emitter bug -- the interpreter is the reference. Random
 hi-halves are deliberate: they exercise the 32-bit macro paths (carry/borrow
 votes, hi bitwise, bit-extract) that a later known-hi-zero pass will touch, so a
@@ -371,36 +374,38 @@ def run(cmd, stdin=None):
         return _Hang(cmd)
 
 
-def check_one(idx, blob, seeds, ops, muxleq, rvopt, tmp, keep):
+def check_one(idx, blob, seeds, ops, muxleq, rvopt, tmp, keep, wide=False):
+    emit_flag, run_flag = ("-mux32", "-x32") if wide else ("-mux", "-x")
     binp = os.path.join(tmp, "fuzz-%d.bin" % idx)
     with open(binp, "wb") as f:
         f.write(blob)
     ora = run([muxleq, "-r", binp])
-    emit = run([rvopt, "-mux", binp])
+    emit = run([rvopt, emit_flag, binp])
     if emit.returncode != 0 or not emit.stdout:
         msg = emit.stderr.decode(errors="replace").strip()
-        # A program too big for the 32768-cell MUXLEQ image is an expected abort,
-        # not a miscompile -- skip it (counted) rather than fail. Any OTHER
-        # nonzero exit (unsupported op, real crash) is a genuine failure.
-        if "image needs" in msg and "32768" in msg:
+        # A program too big for the MUXLEQ image (32768 cells for -mux, the 2M
+        # -x32 window for -mux32) is an expected abort, not a miscompile -- skip
+        # it (counted) rather than fail. Any OTHER nonzero exit (unsupported op,
+        # real crash) is a genuine failure.
+        if "image needs" in msg:
             return SKIP
-        return "rvopt -mux failed (rc=%d): %s" % (emit.returncode, msg)
+        return "rvopt %s failed (rc=%d): %s" % (emit_flag, emit.returncode, msg)
     decp = os.path.join(tmp, "fuzz-%d.dec" % idx)
     with open(decp, "wb") as f:
         f.write(emit.stdout)
-    nat = run([muxleq, "-x", decp])
+    nat = run([muxleq, run_flag, decp])
     want = model(seeds, ops)
     # A tool that prints the right bytes but exits nonzero is still a defect.
     if ora.returncode != 0:
         return "-r exited %d: %s" % (ora.returncode, ora.stderr.decode(errors="replace").strip())
     if nat.returncode != 0:
-        return "-x exited %d: %s" % (nat.returncode, nat.stderr.decode(errors="replace").strip())
+        return "%s exited %d: %s" % (run_flag, nat.returncode, nat.stderr.decode(errors="replace").strip())
     if ora.stdout != want:
         return "ORACLE (-r) disagrees with the Python model -- bug in the fuzzer/generator"
     if nat.stdout != ora.stdout:
         if keep:
             os.rename(binp, os.path.join(ROOT, "rvopt-fuzz-fail.bin"))
-        return "native -x %r != -r %r" % (nat.stdout, ora.stdout)
+        return "native %s %r != -r %r" % (run_flag, nat.stdout, ora.stdout)
     return None
 
 
@@ -412,6 +417,8 @@ def main(argv):
                     help="ALU ops per program (>~24 often overflows the 32768-cell image and is skipped)")
     ap.add_argument("--only", type=int, default=-1, help="run just program index I")
     ap.add_argument("--keep", action="store_true", help="save a failing .bin to the repo root")
+    ap.add_argument("--wide", action="store_true",
+                    help="test the 32-bit-cell backend (rvopt -mux32 | muxleq -x32) instead of -mux/-x")
     ap.add_argument("--rvopt", default=os.path.join(ROOT, "build", "rvopt"),
                     help="rvopt binary to test (e.g. a sanitizer build, to run every "
                          "emitter path under ASan/UBSan)")
@@ -431,14 +438,14 @@ def main(argv):
             # memory across a back-edge); the rest are straight-line.
             builder = build_loop_program if i % 3 == 0 else build_program
             blob, seeds, ops, desc = builder(rng, a.body)
-            err = check_one(i, blob, seeds, ops, muxleq, rvopt, tmp, a.keep)
+            err = check_one(i, blob, seeds, ops, muxleq, rvopt, tmp, a.keep, a.wide)
             if err is SKIP:
                 skipped += 1
                 continue
             if err:
                 print("FAIL program %d (seed %d): %s" % (i, a.seed, err), file=sys.stderr)
-                print("reproduce: scripts/rvopt-fuzz.py --seed %d --only %d --body %d --keep"
-                      % (a.seed, i, a.body), file=sys.stderr)
+                print("reproduce: scripts/rvopt-fuzz.py --seed %d --only %d --body %d --keep%s"
+                      % (a.seed, i, a.body, " --wide" if a.wide else ""), file=sys.stderr)
                 for d in desc:
                     print("   " + d, file=sys.stderr)
                 return 1
@@ -447,8 +454,8 @@ def main(argv):
         print("rvopt-fuzz: ALL %d programs overflowed the image -- lower --body" % skipped,
               file=sys.stderr)
         return 1
-    print("rvopt-fuzz: %d programs x %d ops OK (seed %d) native == -r (%d skipped, too big)"
-          % (tested, a.body, a.seed, skipped))
+    print("rvopt-fuzz%s: %d programs x %d ops OK (seed %d) native == -r (%d skipped, too big)"
+          % (" -mux32" if a.wide else "", tested, a.body, a.seed, skipped))
     return 0
 
 

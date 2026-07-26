@@ -70,8 +70,9 @@ Once defined, the word `hello` can be executed by typing its name.
 ### Testing, benchmarking, and internals
 
 - `make check` -- the pre-commit gate: byte-exact golden-output tests (`tests/*.fth` vs
-  `tests/expected/*.out`, each run time-bounded) plus the self-hosting bootstrap, which checks
-  the VM reproduces its own image byte-for-byte.
+  `tests/expected/*.out`, each run time-bounded), the `rvopt` AOT differential (its native
+  `-x`/`-x32` images must reproduce `-r` on every demo), plus the self-hosting bootstrap, which
+  checks the VM reproduces its own image byte-for-byte.
 - `make bench` -- times the VM on a quiet remote host (`node1` by default, override with
   `BENCH_HOST`); localhost load makes wall-clock timing unreliable. Reports per-workload user
   time and a deterministic instruction count.
@@ -81,6 +82,12 @@ Once defined, the word `hello` can be executed by typing its name.
   the RV32I microcode interpreter that the image itself assembles -- a RISC-V ISA hosted on the
   16-bit OISC. `make verify-rv32i` checks it against an independent reference model. See the
   manual's RV32I section.
+- `rvopt` -- a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat binary to a native
+  MUXLEQ image running on the two ops directly, with no interpreter layer: `rvopt -mux prog >
+  prog.dec` then `./muxleq -x prog.dec` for the 16-bit path (which beats `-r` on measured compute
+  targets), or `rvopt -mux32` then `./muxleq -x32` for the wide 32-bit-cell backend. The wide path
+  passes all 40 rv32ui compliance tests, including large programs the 16-bit image cannot hold; both
+  are differential-tested against `-r`. See [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
 - [`docs/manual.md`](docs/manual.md) -- reference manual: the instruction set, memory image and
   self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, the eForth
   environment, and the RV32I microcode runner.

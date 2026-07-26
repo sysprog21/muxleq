@@ -258,7 +258,10 @@ golden runner tests. The full register/memory ABI and encoding hazards are in
 `make check` is the pre-commit gate: `make golden` byte-compares a suite of
 deterministic programs against `tests/expected/*.out` (the VM must exit 0 and
 match, each run `timeout`-bounded so a mis-fused infinite loop fails rather than
-hangs), followed by `make bootstrap`. Regenerate goldens intentionally with
+hangs), then `make verify-rvopt-gate` (the standalone `rvopt` AOT optimizer's
+native `-x`/`-x32` images must reproduce the `-r` interpreter on every demo plus
+the unopt loop, and still reject self-modifying guest code), followed by
+`make bootstrap`. Regenerate goldens intentionally with
 `make golden-update`. `tests/define.fth` is the runtime define-and-execute guard
 (colon defs, `execute`, `does>`, `create`). `mandel` is manual-only (it does not
 self-halt).

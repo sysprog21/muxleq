@@ -2,18 +2,21 @@
  * rvopt -- standalone RV32I-to-MUXLEQ optimizer.
  *
  * Built OUTSIDE the self-hosted Forth image so it costs zero image cells. It
- * loads an RV32I program (the same ELF32-LE / flat binaries './muxleq -r'
- * accepts), decodes its words into an integer-indexed graph, and dumps or
- * checks that graph as text.
+ * loads an RV32I program (the same ELF32-LE / flat binaries "./muxleq -r"
+ * accepts), decodes its words into an integer-indexed graph, and lowers it to a
+ * standalone native MUXLEQ image (16-bit "-mux" for "./muxleq -x", or wide
+ * 32-bit-cell "-mux32" for "./muxleq -x32") that reproduces "./muxleq -r".
  *
- * Design, per TODO.md and the 'externals/ir' survey: nodes live in a plain
- * index-addressed array (indexes survive array growth; cached pointers do not),
- * and every node carries explicit control, memory, and value edges so later
- * passes have the dependencies spelled out rather than re-derived.
+ * Design, per the "externals/ir" survey: nodes live in a plain index-addressed
+ * array (indexes survive array growth; cached pointers do not), and every node
+ * carries explicit control, memory, and value edges so later passes have the
+ * dependencies spelled out rather than re-derived.
  *
  * Usage:
  *   rvopt -dump FILE    decode FILE, write the textual IR to stdout
  *   rvopt -check FILE    read a textual IR (use '-' for stdin), verify it
+ *   rvopt -mux FILE     lower to a native MUXLEQ image ("./muxleq -x")
+ *   rvopt -mux32 FILE   lower to a wide 32-bit-cell image ("./muxleq -x32")
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -583,6 +586,22 @@ static void emit_i(int *p, int a, int b, int c)
 {
     if (!g_sizing)
         printf("%d\n%d\n%d\n", a, b, c);
+    *p += 3;
+}
+
+/* Wide (32-bit-cell) emit for the -mux32 path: a cell can exceed a signed int
+ * (the MOVE mask constant 0x80000006, a full 32-bit li value), so take/print
+ * 64-bit and let ./muxleq -x32 fold each back to uint32 on load. MOVE32 is a
+ * MUX with mask-address 6 (hardwired 0); IOMARK32 (-1 == 0xFFFFFFFF) is I/O /
+ * halt.
+ */
+#define MOVE32 2147483654LL /* 0x80000006 = (1<<31) | 6 */
+#define IOMARK32 (-1LL)     /* 0xFFFFFFFF */
+
+static void emit_i32(int *p, long long a, long long b, long long c)
+{
+    if (!g_sizing)
+        printf("%lld\n%lld\n%lld\n", a, b, c);
     *p += 3;
 }
 
@@ -2742,6 +2761,986 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     free(na);
 }
 
+/* Data-cell layout of a wide (-mux32) image. */
+struct m32 {
+    int imm_base;   /* one cell per li / immediate-ALU / JAL-link value */
+    int reg_base;   /* 32-cell register file */
+    int z, neg1;    /* the constants 0 and -1 (the equality add-1 test) */
+    int sgn, one;   /* 0x80000000 (bit31 / sign flip) and 1 (the DEC) */
+    int t0, t1, t2; /* three scratch cells (also OL=t0, BT=t1 for memory) */
+    int sh1, sh2;   /* the two sign-flipped halves for a signed compare */
+    int m1f, mff;   /* 0x1F (shift-amount mask) and 0xFF (byte mask) */
+    int winmask;    /* guest RAM window size - 1 (in-window address mask) */
+    int rambc;      /* the ram_base value (added after the window mask) */
+    int rsite;      /* the single call site's return address (checked by ret) */
+    int mask_base;  /* 32 power-of-two cells 2^0..2^31 (shift bit extraction) */
+    int ram_base;   /* guest RAM window (one cell per byte), init from img */
+};
+
+/* An ALU funct3 the wide emitter lowers natively: ADD/SUB(0), SLT(2), SLTU(3),
+ * XOR(4), OR(6), AND(7). Shifts (1/5) are a later slice.
+ */
+static bool alu_f3_ok32(int f3)
+{
+    return f3 == 0 || f3 == 2 || f3 == 3 || f3 == 4 || f3 == 6 || f3 == 7;
+}
+
+/* A node the wide ALU slice can lower. A K_OP must ALSO carry the base-ISA
+ * funct7 (0x00, or 0x20 for SUB) -- else an RV32M or reserved encoding sharing
+ * a funct3 (MUL as ADD, DIV as XOR, ...) would silently mislower; a K_OPIMM has
+ * no funct7 field (the immediate occupies it) so funct3 alone decides.
+ */
+static bool op_ok32(const struct node *nd)
+{
+    if (nd->kind == K_OPIMM)
+        return alu_f3_ok32(nd->funct3);
+    if (nd->kind != K_OP || !alu_f3_ok32(nd->funct3))
+        return false;
+    const int f7 = (nd->word >> 25) & 0x7F;
+    return nd->funct3 == 0 ? (f7 == 0x00 || f7 == 0x20) : f7 == 0x00;
+}
+
+/* A load/store this slice lowers (its offset needs an imm cell): all of
+ * SB/SH/SW and LB/LH/LW/LBU/LHU. funct3 == 3 (RV64 doubleword) is excluded.
+ */
+static bool mem_ok32(const struct node *nd)
+{
+    return (nd->kind == K_STORE && nd->funct3 <= 2) || /* SB/SH/SW */
+           (nd->kind == K_LOAD && nd->funct3 <= 5 &&
+            nd->funct3 != 3); /* LB/LH/LW/LBU/LHU (funct3 0/1/2/4/5) */
+}
+
+/* A -mux32 node consumes an imm cell iff it is a li or an immediate ALU op
+ * (ADDI/ANDI/ORI/XORI, rd != x0). The count, emit, and data passes all key on
+ * this predicate so the imm-pool indices line up.
+ */
+static bool imm_op32(const struct node *nd)
+{
+    if (fold_kind(nd->word) == FOLD_LI12)
+        return true;
+    if (nd->kind == K_OPIMM && ((nd->word >> 7) & 31) &&
+        alu_f3_ok32(nd->funct3))
+        return true;
+    if ((nd->kind == K_LUI || nd->kind == K_AUIPC) && ((nd->word >> 7) & 31))
+        return true; /* upper immediate: a compile-time constant */
+    if (mem_ok32(nd))
+        return true; /* a load/store's byte offset */
+    if (nd->kind == K_JALR && nd->target != NONE && ((nd->word >> 7) & 31))
+        return true; /* static-target JALR link: pc+4 */
+    return nd->kind == K_JAL &&
+           ((nd->word >> 7) & 31); /* JAL-with-link: pc+4 */
+}
+
+/* Wide instruction shorthands. c = MOVE32 is a MOVE; c = *p+3 is a
+ * non-branching SUBLEQ (b -= a, then fall through -- the target is the next
+ * cell, so it is taken or not with the same effect); c = (1<<31)|mask is a MUX
+ * whose mask value is the cell at 'mask'.
+ */
+static void mov32(int *p, long long s, long long d)
+{
+    emit_i32(p, s, d, MOVE32);
+}
+static void subnb32(int *p, long long a, long long b)
+{
+    emit_i32(p, a, b, *p + 3);
+}
+static void mux32op(int *p, long long a, long long b, long long mask)
+{
+    emit_i32(p, a, b, (1LL << 31) | mask);
+}
+
+/* SLE0(a,b,L): t0 = a - b; branch to L if signed <= 0 (else fall through). */
+static void sle0_32(int *p,
+                    long long a,
+                    long long b,
+                    long long L,
+                    const struct m32 *m)
+{
+    mov32(p, a, m->t0);
+    emit_i32(p, b, m->t0, L);
+}
+
+/* EQ32 / NE32(a,b,L): branch to L iff a == b / a != b. SLE0 proves a-b <= 0,
+ * then adding 1 (SUBLEQ of -1) splits a-b < 0 (a<b) from a-b == 0 (equal).
+ * Correct for any 32-bit a,b: equality is exact regardless of a-b overflow.
+ * Each is a fixed-size block, so the two-pass sizing stays exact.
+ */
+static void eq32(int *p,
+                 long long a,
+                 long long b,
+                 long long L,
+                 const struct m32 *m)
+{
+    const long long start = *p, ne = start + 15; /* fall-through = not equal */
+    sle0_32(p, a, b, start + 9, m);  /* a-b<=0 -> C (start+9); else a>b */
+    emit_i32(p, m->z, m->z, ne);     /* a>b: not equal, skip */
+    emit_i32(p, m->neg1, m->t0, ne); /* C: (a-b)+1<=0 (a<b) -> not equal */
+    emit_i32(p, m->z, m->z, L);      /* a-b==0: equal -> L */
+}
+static void ne32(int *p,
+                 long long a,
+                 long long b,
+                 long long L,
+                 const struct m32 *m)
+{
+    const long long start = *p;
+    sle0_32(p, a, b, start + 9, m); /* a-b<=0 -> C; else a>b -> L */
+    emit_i32(p, m->z, m->z, L);     /* a>b: not equal -> L */
+    emit_i32(p, m->neg1, m->t0, L); /* C: a<b -> L; else a==b, fall through */
+}
+
+/* LTU32(a,b,Lless,Lge): branch to Lless if a <u b (unsigned), else to Lge. The
+ * borrow-out of a-b is bit31(MUX(b|d, b&d, a)), d = a-b -- the same one-MUX
+ * top-bit identity the 16-bit ltu16 uses, at bit31 -- then a bit31 test picks
+ * the target. A fixed 11-instruction (33-cell) block, so two-pass sizing stays
+ * exact.
+ */
+static void ltu32(int *p,
+                  long long a,
+                  long long b,
+                  long long Lless,
+                  long long Lge,
+                  const struct m32 *m)
+{
+    mov32(p, a, m->t0);
+    subnb32(p, b, m->t0); /* t0 = d = a - b */
+    mov32(p, b, m->t1);
+    mux32op(p, m->t0, m->t1, b); /* t1 = (d & ~b) | b = b | d */
+    mov32(p, b, m->t2);
+    mux32op(p, m->z, m->t2, m->t0);  /* t2 = b & d */
+    mux32op(p, m->t1, m->t2, a);     /* t2's bit31 = borrow = (a <u b) */
+    mux32op(p, m->z, m->t2, m->sgn); /* t2 &= 0x80000000 (isolate bit31) */
+    subnb32(p, m->one, m->t2);     /* t2 -= 1: -1 if clear, 0x7FFFFFFF if set */
+    emit_i32(p, m->z, m->t2, Lge); /* t2 <= 0 (bit31 clear, a >= b) -> Lge */
+    emit_i32(p, m->z, m->z, Lless); /* else (bit31 set, a < b) -> Lless */
+}
+
+/* sh = rs ^ 0x80000000 (subtracting SGN flips bit31 and nothing lower), mapping
+ * signed order onto the unsigned order LTU32 tests -- for BLT/BGE/SLT.
+ */
+static void signflip32(int *p, long long rs, long long sh, const struct m32 *m)
+{
+    mov32(p, rs, sh);
+    subnb32(p, m->sgn, sh);
+}
+
+/* acc <<= 1: acc = acc + acc. t1 = -acc first (reads acc), then acc -= t1. */
+static void dbl32(int *p, long long acc, const struct m32 *m)
+{
+    mov32(p, m->z, m->t1);
+    subnb32(p, acc, m->t1);
+    subnb32(p, m->t1, acc);
+}
+
+/* dst += m[cell] (cell holds a constant): t2 = -m[cell], then dst -= t2. */
+static void addcell32(int *p,
+                      long long dst,
+                      long long cell,
+                      const struct m32 *m)
+{
+    mov32(p, m->z, m->t2);
+    subnb32(p, cell, m->t2);
+    subnb32(p, m->t2, dst);
+}
+
+/* copybit: if bit sb of src is set, set bit db of dst (dst += 2^db). BT = src &
+ * 2^sb via a MUX with the 2^sb mask cell; a SUBLEQ then skips the add when the
+ * bit is clear. bit 31 (2^31 is negative) needs a DEC before the <=0 test so
+ * "set" reads as > 0, like the 16-bit copybit's bit15 case.
+ */
+static void copybit32(int *p,
+                      long long src,
+                      int sb,
+                      long long dst,
+                      int db,
+                      const struct m32 *m)
+{
+    mov32(p, src, m->t1);
+    mux32op(p, m->z, m->t1, m->mask_base + sb); /* t1 = src & 2^sb */
+    if (sb == 31)
+        subnb32(p, m->one, m->t1);     /* -1 if clear, 0x7FFFFFFF if set */
+    emit_i32(p, m->z, m->t1, *p + 12); /* clear -> skip the 9-cell add */
+    addcell32(p, dst, m->mask_base + db, m);
+}
+
+/* SLLI: rd = rs1 << k, k self-doublings of an accumulator. */
+static void shift_left32(int *p,
+                         long long rs1,
+                         long long rd,
+                         int k,
+                         const struct m32 *m)
+{
+    if (k == 0) {
+        mov32(p, rs1, rd);
+        return;
+    }
+    mov32(p, rs1, m->t0);
+    for (int i = 0; i < k; i++)
+        dbl32(p, m->t0, m);
+    mov32(p, m->t0, rd);
+}
+
+/* SRLI/SRAI: rd = rs1 >> k. Result bit d comes from source bit d+k; SRLI zeroes
+ * the top k bits (dmax = 31-k), SRAI fills them with the sign bit 31 (dmax =
+ * 31, source bit clamped to 31). Built bit-by-bit into a zeroed accumulator.
+ */
+static void shift_right32(int *p,
+                          long long rs1,
+                          long long rd,
+                          int k,
+                          bool arith,
+                          const struct m32 *m)
+{
+    if (k == 0) {
+        mov32(p, rs1, rd);
+        return;
+    }
+    mov32(p, m->z, m->t0); /* acc = 0 */
+    const int dmax = arith ? 31 : 31 - k;
+    for (int d = 0; d <= dmax; d++) {
+        int sbit = d + k;
+        if (sbit > 31)
+            sbit = 31; /* SRAI sign fill */
+        copybit32(p, rs1, sbit, m->t0, d, m);
+    }
+    mov32(p, m->t0, rd);
+}
+
+/* A shift this slice lowers: immediate SLLI (funct7 0x00), SRLI (0x00), SRAI
+ * (0x20), or register SLL (funct7 0x00) / SRL (0x00) / SRA (0x20). rd == x0 is
+ * a valid nop, admitted here and dropped at emit time.
+ */
+static bool shift_ok32(const struct node *nd)
+{
+    const int f7 = (nd->word >> 25) & 0x7F;
+    if (nd->kind == K_OP) { /* register shift: SLL, or SRL/SRA */
+        if (nd->funct3 == 1)
+            return f7 == 0x00;
+        return nd->funct3 == 5 && (f7 == 0x00 || f7 == 0x20);
+    }
+    if (nd->kind != K_OPIMM)
+        return false;
+    if (nd->funct3 == 1)
+        return f7 == 0x00;
+    if (nd->funct3 == 5)
+        return f7 == 0x00 || f7 == 0x20;
+    return false;
+}
+
+/* SLL: rd = rs1 << (rs2 & 0x1F), a count-down loop that doubles an accumulator
+ * the (runtime) shift-amount times. cnt = rs2 & 0x1F (t2), acc = rs1 (t0). The
+ * body dbl32 is 9 cells, so the whole loop is fixed-size and the self-relative
+ * loop/done addresses hold in both sizing and real passes.
+ */
+static void shift_left_reg32(int *p,
+                             long long rs1,
+                             long long rs2,
+                             long long rd,
+                             const struct m32 *m)
+{
+    mov32(p, rs2, m->t2);            /* cnt = rs2 */
+    mux32op(p, m->z, m->t2, m->m1f); /* cnt &= 0x1F */
+    mov32(p, rs1, m->t0);            /* acc = rs1 */
+    const long long loop = *p;
+    emit_i32(p, m->z, m->t2,
+             loop + 18);           /* cnt == 0 -> done (test+body+dec+jmp) */
+    dbl32(p, m->t0, m);            /* acc <<= 1 */
+    subnb32(p, m->one, m->t2);     /* cnt -= 1 */
+    emit_i32(p, m->z, m->z, loop); /* back to the test */
+    mov32(p, m->t0, rd);           /* done: rd = acc */
+}
+
+/* Cell count of one shift_right32 by 1 (measured; SRL and SRA differ by the
+ * sign-fill copybit), for the register-shift loop's exit label.
+ */
+static int shr1_cells32(bool arith, const struct m32 *m)
+{
+    const bool save = g_sizing;
+    g_sizing = true;
+    int p = 0;
+    shift_right32(&p, 0, 0, 1, arith, m);
+    g_sizing = save;
+    return p;
+}
+
+/* SRL/SRA: rd = rs1 >> (rs2 & 0x1F), a count-down loop doing one right shift by
+ * 1 per step (shift_right32 k=1, logical or arithmetic). cnt = rs2 & 0x1F
+ * (sh2), acc = rs1 (sh1) -- NOT t0/t2, which shift_right32's copybit clobbers.
+ * The body is fixed-size, so the self-relative loop/done addresses hold in both
+ * passes.
+ */
+static void shift_right_reg32(int *p,
+                              long long rs1,
+                              long long rs2,
+                              long long rd,
+                              bool arith,
+                              const struct m32 *m)
+{
+    mov32(p, rs2, m->sh2);            /* cnt = rs2 */
+    mux32op(p, m->z, m->sh2, m->m1f); /* cnt &= 0x1F */
+    mov32(p, rs1, m->sh1);            /* acc = rs1 */
+    const long long loop = *p;
+    /* test(3) + body + dec(3) + jmp(3) = 9 + shr1_cells before the done mov. */
+    const long long done = loop + 9 + shr1_cells32(arith, m);
+    emit_i32(p, m->z, m->sh2, done);               /* cnt == 0 -> done */
+    shift_right32(p, m->sh1, m->sh1, 1, arith, m); /* acc >>= 1 */
+    subnb32(p, m->one, m->sh2);                    /* cnt -= 1 */
+    emit_i32(p, m->z, m->z, loop);                 /* back to the test */
+    mov32(p, m->sh1, rd);                          /* done: rd = acc */
+}
+
+/* OL (t0) = the NATIVE cell address of guest byte (rs1 + imm + k): compute the
+ * guest address, mask it into the power-of-two RAM window, then add ram_base.
+ * The window is one cell per guest byte, so byte k is one cell past byte 0.
+ */
+static void emit_addr32(int *p,
+                        long long rs1,
+                        long long imm_cell,
+                        int k,
+                        const struct m32 *m)
+{
+    mov32(p, rs1, m->t0);             /* OL = rs1 */
+    addcell32(p, m->t0, imm_cell, m); /* OL += imm (guest address) */
+    for (int j = 0; j < k; j++)
+        addcell32(p, m->t0, m->one, m);  /* OL += k (the k-th byte's cell) */
+    mux32op(p, m->z, m->t0, m->winmask); /* OL &= window-1 (in-window) */
+    addcell32(p, m->t0, m->rambc, m);    /* OL += ram_base (native cell) */
+}
+
+/* Store m[val] to the guest cell OL points at, by self-modifying a MOVE's dest
+ * operand to OL then running it. (OL must already hold the native address.)
+ */
+static void store_at32(int *p, long long val, const struct m32 *m)
+{
+    const long long mi = *p + 3;        /* the store MOVE lands here */
+    emit_i32(p, m->t0, mi + 1, MOVE32); /* patch its dest operand := OL */
+    emit_i32(p, val, 0, MOVE32); /* MOVE m[val] -> m[OL] (dest patched) */
+}
+
+/* Load the guest cell OL points at into m[dst], by self-modifying a MOVE's
+ * source operand to OL then running it.
+ */
+static void load_at32(int *p, long long dst, const struct m32 *m)
+{
+    const long long mi = *p + 3;    /* the load MOVE lands here */
+    emit_i32(p, m->t0, mi, MOVE32); /* patch its source operand := OL */
+    emit_i32(p, 0, dst, MOVE32);    /* MOVE m[OL] -> m[dst] (source patched) */
+}
+
+/* SB: store rs2's low byte to guest[rs1+imm]. BT (t1) = rs2 & 0xFF (the RAM
+ * cell holds a bare byte), then an SMC store.
+ */
+static void emit_store_byte32(int *p,
+                              long long rs2,
+                              long long rs1,
+                              long long imm_cell,
+                              const struct m32 *m)
+{
+    mov32(p, rs2, m->t1);
+    mux32op(p, m->z, m->t1, m->mff); /* BT = rs2 & 0xFF */
+    emit_addr32(p, rs1, imm_cell, 0, m);
+    store_at32(p, m->t1, m);
+}
+
+/* LBU: rd = guest[rs1+imm] (a bare 0..255 byte, so zero-extended for free). */
+static void emit_load_byte_u32(int *p,
+                               long long rd,
+                               long long rs1,
+                               long long imm_cell,
+                               const struct m32 *m)
+{
+    emit_addr32(p, rs1, imm_cell, 0, m);
+    load_at32(p, m->t1, m); /* BT = the byte */
+    mov32(p, m->t1, rd);    /* rd = byte (high bits already 0) */
+}
+
+/* dst = byte 'bi' of src (bits [8*bi, 8*bi+7] moved down to [0,7]) via 8
+ * copybits. Used to split a word into its four RAM-cell bytes. copybit uses
+ * t1/t2, so dst must be sh1/sh2 (not a scratch cell).
+ */
+static void extract_byte32(int *p,
+                           long long src,
+                           int bi,
+                           long long dst,
+                           const struct m32 *m)
+{
+    mov32(p, m->z, dst);
+    for (int j = 0; j < 8; j++)
+        copybit32(p, src, 8 * bi + j, dst, j, m);
+}
+
+/* Sign-extend the value in 'acc' in place: if bit 'sb' is set, set every bit
+ * above it (sb+1..31). copybit re-reads acc's bit sb (never modified, since
+ * only higher bits change) and ORs 2^hb into the currently-zero high bits.
+ */
+static void sign_extend32(int *p, long long acc, int sb, const struct m32 *m)
+{
+    for (int hb = sb + 1; hb <= 31; hb++)
+        copybit32(p, acc, sb, acc, hb, m);
+}
+
+/* SB/SH/SW as 'n' little-endian bytes (n = 2 half, 4 word; SB uses the cheaper
+ * masked emit_store_byte32). The address is computed once; OL walks to the next
+ * cell after each byte.
+ */
+static void emit_store_bytes32(int *p,
+                               long long rs2,
+                               long long rs1,
+                               long long imm_cell,
+                               int n,
+                               const struct m32 *m)
+{
+    emit_addr32(p, rs1, imm_cell, 0, m);
+    for (int i = 0; i < n; i++) {
+        extract_byte32(p, rs2, i, m->sh1, m); /* sh1 = byte i */
+        store_at32(p, m->sh1, m);             /* m[OL] = byte i */
+        if (i < n - 1)
+            addcell32(p, m->t0, m->one, m); /* OL += 1 (next byte cell) */
+    }
+}
+
+/* LH/LHU/LW as 'n' little-endian bytes (n = 2 half, 4 word; LBU uses the
+ * cheaper emit_load_byte_u32). Each RAM cell holds a bare 0..255 byte; copybit
+ * places byte i's 8 bits at rd bits [8*i, 8*i+7], disjoint so the accumulator
+ * ORs cleanly. 'sign' fills the top bits from the last byte's high bit (LH).
+ */
+static void emit_load_bytes32(int *p,
+                              long long rd,
+                              long long rs1,
+                              long long imm_cell,
+                              int n,
+                              bool sign,
+                              const struct m32 *m)
+{
+    emit_addr32(p, rs1, imm_cell, 0, m);
+    mov32(p, m->z, m->sh2); /* acc = 0 */
+    for (int i = 0; i < n; i++) {
+        load_at32(p, m->sh1, m); /* sh1 = byte i */
+        for (int j = 0; j < 8; j++)
+            copybit32(p, m->sh1, j, m->sh2, 8 * i + j, m);
+        if (i < n - 1)
+            addcell32(p, m->t0, m->one, m); /* OL += 1 */
+    }
+    if (sign)
+        sign_extend32(p, m->sh2, 8 * n - 1, m); /* LH: fill from bit 8n-1 */
+    mov32(p, m->sh2, rd);                       /* rd = the assembled value */
+}
+
+/* LB: rd = sign-extended guest[rs1+imm] (a bare 0..255 byte; bit 7 fills bits
+ * 8..31). Like LBU plus the sign fill.
+ */
+static void emit_load_byte_s32(int *p,
+                               long long rd,
+                               long long rs1,
+                               long long imm_cell,
+                               const struct m32 *m)
+{
+    emit_addr32(p, rs1, imm_cell, 0, m);
+    load_at32(p, m->sh1, m);        /* sh1 = byte (0..255) */
+    sign_extend32(p, m->sh1, 7, m); /* fill bits 8..31 from bit 7 */
+    mov32(p, m->sh1, rd);
+}
+
+/* The value a -mux32 imm cell holds: a JAL link is its return address (pc+4),
+ * an AUIPC is pc + (imm<<12), everything else (li, immediate ALU, LUI) is the
+ * (already <<12 for LUI) immediate.
+ */
+static long long imm_value32(const struct node *nd)
+{
+    if (nd->kind == K_JAL || nd->kind == K_JALR)
+        return nd->pc + 4; /* JAL/JALR link: return address */
+    if (nd->kind == K_AUIPC)
+        return nd->pc + (uint32_t) nd->imm;
+    return nd->imm;
+}
+
+/* Native address of a branch/jump target. Like mux_target, but also resolves a
+ * jump to the word ONE PAST the last instruction (pc == 4*(count-1)) to
+ * na[count] = the epilogue, so a program that jumps to its end (rather than an
+ * ecall/ret) lands correctly instead of erroring.
+ */
+static long long mux_target32(const struct graph *g,
+                              const struct node *nd,
+                              const int *na)
+{
+    const uint32_t t = nd->pc + (uint32_t) nd->imm;
+    const int tn = addr2node(g, t);
+    if (tn != NONE)
+        return na[tn];
+    if (!(t & 3) && t == 4u * (uint32_t) (g->count - 1))
+        return na[g->count]; /* jump past the end -> the epilogue */
+    fprintf(stderr, "rvopt -mux32: branch target out of range at pc %u\n",
+            nd->pc);
+    exit(1);
+}
+
+/* Cell count of emit_addr32 with k=0 (measured, not a formula), for the write
+ * loop's exit label.
+ */
+static int addr_cells32(const struct m32 *m)
+{
+    const bool save = g_sizing;
+    g_sizing = true;
+    int p = 0;
+    emit_addr32(&p, 0, 0, 0, m);
+    g_sizing = save;
+    return p;
+}
+
+/* A write(fd, a1, a2): PUT the a2 bytes of live guest RAM from guest address
+ * a1, one per iteration. sh1 walks the guest pointer, sh2 counts down. Each
+ * byte's native cell is chosen by SMC (emit_addr32) and PUT via a patched
+ * output instruction, so it reads live RAM and is correct after any store. The
+ * fd (a0) is ignored, matching the -r runner (all output goes to stdout). This
+ * dynamic loop covers every write; the -mux static-buffer fold is not ported.
+ */
+static void emit_write_dyn32(int *p, const struct m32 *m)
+{
+    const long long a1 = m->reg_base + 11, a2 = m->reg_base + 12;
+    mov32(p, a1, m->sh1); /* PTR = a1 (guest buffer address) */
+    mov32(p, a2, m->sh2); /* CNT = a2 (length) */
+    const long long loop = *p;
+
+    /* eq32 (not a signed SUBLEQ) so any 32-bit length terminates exactly: 15
+     * (eq32) + addr + 3 (patch) + 3 (PUT) + 9 (PTR+=1) + 3 (CNT-=1) + 3.
+     */
+    const long long done = loop + 36 + addr_cells32(m);
+    eq32(p, m->sh2, m->z, done, m);     /* CNT == 0 -> done */
+    emit_addr32(p, m->sh1, m->z, 0, m); /* t0 = ram_base + (PTR & winmask) */
+    const long long mi = *p + 3;        /* the PUT lands here */
+    emit_i32(p, m->t0, mi, MOVE32);     /* patch its source operand := OL */
+    emit_i32(p, 0, IOMARK32, 0);     /* PUT m[OL] -> stdout (source patched) */
+    addcell32(p, m->sh1, m->one, m); /* PTR += 1 */
+    subnb32(p, m->one, m->sh2);      /* CNT -= 1 (non-branching) */
+    emit_i32(p, m->z, m->z, loop);   /* back to the test */
+}
+
+/* 'ret' (jalr x0,x1,0): jump to the single call site's return address, but only
+ * when ra actually equals it (rsite) -- staying correct however the callee was
+ * entered; a mismatch halts rather than misjump. ne32 (12 cells) branches away
+ * on ra != rsite, so nomatch = start + 12 + 3 (past the return branch).
+ */
+static void emit_ret32(int *p, const int *na, int ret_node, const struct m32 *m)
+{
+    const long long ra = m->reg_base + 1; /* x1 = ra */
+    const long long start = *p, nomatch = start + 15;
+    ne32(p, ra, m->rsite, nomatch, m);     /* ra != rsite -> nomatch */
+    emit_i32(p, m->z, m->z, na[ret_node]); /* ra matches -> return */
+    emit_i32(p, m->z, m->z, IOMARK32);     /* no match -> halt (defensive) */
+}
+
+/* Emit one wide instruction: li, or the native single-cell ALU. Every ALU form
+ * computes into a scratch cell (t0) then MOVEs to rd, so rd may alias rs1/rs2.
+ * The second operand is rs2's cell (K_OP) or the imm cell (K_OPIMM).
+ */
+static void emit_one32(const struct graph *g,
+                       int i,
+                       const struct sysinfo *sys,
+                       int ret_node,
+                       const struct m32 *m,
+                       const int *na,
+                       int *p,
+                       int *imm)
+{
+    const struct node *nd = &g->n[i];
+    const int rd = (nd->word >> 7) & 31;
+    const int fk = fold_kind(nd->word);
+    if (fk == FOLD_DEADI)
+        return; /* nop */
+    if (fk == FOLD_LI12) {
+        mov32(p, m->imm_base + *imm, m->reg_base + rd); /* rd = imm */
+        (*imm)++;
+        return;
+    }
+    if (nd->kind == K_JAL) {
+        if (rd) { /* link = pc+4 into rd (its imm cell) */
+            mov32(p, m->imm_base + *imm, m->reg_base + rd);
+            (*imm)++;
+        }
+        emit_i32(p, m->z, m->z,
+                 mux_target32(g, nd, na)); /* unconditional jump */
+        return;
+    }
+    if (nd->kind == K_LUI || nd->kind == K_AUIPC) {
+        if (rd) { /* a compile-time constant (imm<<12, or pc+imm<<12) into rd */
+            mov32(p, m->imm_base + *imm, m->reg_base + rd);
+            (*imm)++;
+        }
+        return;
+    }
+    if (nd->kind == K_BRANCH) {
+        const long long L = mux_target32(g, nd, na); /* taken target */
+        const long long s1 = m->reg_base + nd->rs1, s2 = m->reg_base + nd->rs2;
+        const long long start = *p;
+        switch (nd->funct3) {
+        case 0:
+            eq32(p, s1, s2, L, m);
+            break;
+        case 1:
+            ne32(p, s1, s2, L, m);
+            break;
+        case 6: /* BLTU: less -> L, else fall (past the 33-cell block) */
+            ltu32(p, s1, s2, L, start + 33, m);
+            break;
+        case 7: /* BGEU: not-less -> L, less -> fall */
+            ltu32(p, s1, s2, start + 33, L, m);
+            break;
+        case 4: /* BLT: signed, via the sign-flipped halves */
+            signflip32(p, s1, m->sh1, m);
+            signflip32(p, s2, m->sh2, m);
+            ltu32(p, m->sh1, m->sh2, L, start + 45, m);
+            break;
+        default: /* BGE (funct3 == 5): the BLT targets swapped */
+            signflip32(p, s1, m->sh1, m);
+            signflip32(p, s2, m->sh2, m);
+            ltu32(p, m->sh1, m->sh2, start + 45, L, m);
+            break;
+        }
+        return;
+    }
+    if (nd->kind ==
+        K_STORE) { /* SB/SH/SW (no rd; an imm cell for the offset) */
+        const long long rs2c = m->reg_base + nd->rs2,
+                        rs1c = m->reg_base + nd->rs1, ic = m->imm_base + *imm;
+        if (nd->funct3 == 0)
+            emit_store_byte32(p, rs2c, rs1c, ic, m); /* SB: masked low byte */
+        else /* SH (funct3 1) = 2 bytes, SW (funct3 2) = 4 bytes */
+            emit_store_bytes32(p, rs2c, rs1c, ic, nd->funct3 == 1 ? 2 : 4, m);
+        (*imm)++;
+        return;
+    }
+    if (nd->kind == K_LOAD) { /* LB/LH/LW/LBU/LHU */
+        if (rd) {
+            const long long rdc = m->reg_base + rd,
+                            rs1c = m->reg_base + nd->rs1,
+                            ic = m->imm_base + *imm;
+            switch (nd->funct3) {
+            case 0: /* LB: signed byte */
+                emit_load_byte_s32(p, rdc, rs1c, ic, m);
+                break;
+            case 4: /* LBU: unsigned byte */
+                emit_load_byte_u32(p, rdc, rs1c, ic, m);
+                break;
+            case 1: /* LH: signed half */
+                emit_load_bytes32(p, rdc, rs1c, ic, 2, true, m);
+                break;
+            case 5: /* LHU: unsigned half */
+                emit_load_bytes32(p, rdc, rs1c, ic, 2, false, m);
+                break;
+            default: /* LW (funct3 2): word */
+                emit_load_bytes32(p, rdc, rs1c, ic, 4, false, m);
+            }
+        }
+        (*imm)++; /* the imm cell is consumed even when rd == x0 */
+        return;
+    }
+    if (nd->kind == K_SYSTEM) { /* ecall: exit (halt) or write (PUT loop) */
+        if (sys[i].kind == SYS_EXIT)
+            emit_i32(p, m->z, m->z, IOMARK32); /* halt (SUBLEQ Z,Z,-1) */
+        else                                   /* SYS_WRITE / SYS_WRITE_DYN */
+            emit_write_dyn32(p, m);
+        return;
+    }
+    if (nd->kind == K_JALR) {
+        /* Static-target JALR (resolve_jalr set nd->target from a compile-time
+         * rs1): write the pc+4 link if rd != 0, then jump to the resolved cell.
+         * The runtime rs1 is irrelevant -- the target is a compile-time address
+         * -- so this is correct even for 'jalr rd, rd, 0'.
+         */
+        if (nd->target != NONE) {
+            if (rd) { /* link = pc+4 into rd (its imm cell) */
+                mov32(p, m->imm_base + *imm, m->reg_base + rd);
+                (*imm)++;
+            }
+            emit_i32(p, m->z, m->z, na[nd->target]); /* jump to the target */
+            return;
+        }
+        /* Else 'jalr x0, x1, 0' (= ret) with one known call site. */
+        if (rd == 0 && nd->rs1 == 1 && nd->imm == 0 && ret_node != NONE) {
+            emit_ret32(p, na, ret_node, m);
+            return;
+        }
+        fprintf(stderr, "rvopt -mux32: unsupported JALR at pc %u\n", nd->pc);
+        exit(1);
+    }
+    if (!rd)
+        return; /* ALU writing x0: result discarded, no imm cell consumed */
+    if (nd->kind == K_OPIMM && (nd->funct3 == 1 || nd->funct3 == 5)) {
+        /* SLLI / SRLI / SRAI: the shift amount is baked in, so no imm cell. */
+        const long long rs1c = m->reg_base + nd->rs1, rdc = m->reg_base + rd;
+        const int k = nd->imm & 31;
+        if (nd->funct3 == 1)
+            shift_left32(p, rs1c, rdc, k, m);
+        else
+            shift_right32(p, rs1c, rdc, k, (nd->word & 0x40000000) != 0, m);
+        return;
+    }
+    if (nd->kind == K_OP && nd->funct3 == 1) { /* SLL: register shift left */
+        shift_left_reg32(p, m->reg_base + nd->rs1, m->reg_base + nd->rs2,
+                         m->reg_base + rd, m);
+        return;
+    }
+    if (nd->kind == K_OP &&
+        nd->funct3 == 5) { /* SRL/SRA: register shift right */
+        shift_right_reg32(p, m->reg_base + nd->rs1, m->reg_base + nd->rs2,
+                          m->reg_base + rd, (nd->word & 0x40000000) != 0, m);
+        return;
+    }
+    const long long a = m->reg_base + nd->rs1;
+    const long long b =
+        nd->kind == K_OPIMM ? m->imm_base + *imm : m->reg_base + nd->rs2;
+    if (nd->funct3 == 2 || nd->funct3 == 3) {
+        /* SLT / SLTU: rd = (a < b) ? 1 : 0. LTU32 branches to a 1-into-rd or a
+         * 0-into-rd block; SLT sign-flips first. The block sizes below are
+         * fixed so the branch offsets are exact in both passes.
+         */
+        const long long rdc = m->reg_base + rd, start = *p;
+        if (nd->funct3 == 3) { /* SLTU */
+            ltu32(p, a, b, start + 33, start + 39,
+                  m);                            /* less->set, ge->clear */
+            mov32(p, m->one, rdc);               /* set: rd = 1 */
+            emit_i32(p, m->z, m->z, start + 42); /* jump past clear */
+            mov32(p, m->z, rdc);                 /* clear: rd = 0 */
+        } else {                                 /* SLT (signed) */
+            signflip32(p, a, m->sh1, m);
+            signflip32(p, b, m->sh2, m);
+            ltu32(p, m->sh1, m->sh2, start + 45, start + 51, m);
+            mov32(p, m->one, rdc);               /* set: rd = 1 */
+            emit_i32(p, m->z, m->z, start + 54); /* jump past clear */
+            mov32(p, m->z, rdc);                 /* clear: rd = 0 */
+        }
+        if (nd->kind == K_OPIMM)
+            (*imm)++;
+        return;
+    }
+    switch (nd->funct3) {
+    case 0: /* ADD, or SUB when K_OP funct7 == 0x20 */
+        if (nd->kind == K_OP && ((nd->word >> 25) & 0x7F) == 0x20) {
+            mov32(p, a, m->t0);   /* t0 = rs1 */
+            subnb32(p, b, m->t0); /* t0 -= rs2 */
+        } else {
+            mov32(p, a, m->t0);       /* t0 = rs1 */
+            mov32(p, m->z, m->t1);    /* t1 = 0 */
+            subnb32(p, b, m->t1);     /* t1 = -b */
+            subnb32(p, m->t1, m->t0); /* t0 -= (-b) = rs1 + b */
+        }
+        break;
+    case 7: /* AND: t0 = (0 & ~b) | (rs1 & b) */
+        mov32(p, a, m->t0);
+        mux32op(p, m->z, m->t0, b);
+        break;
+    case 6: /* OR: t0 = (rs1 & ~b) | (b & b) = rs1 | b */
+        mov32(p, b, m->t0);
+        mux32op(p, a, m->t0, b);
+        break;
+    default: /* XOR (4): (rs1 & ~b) | (b & ~rs1), the two halves disjoint */
+        mov32(p, m->z, m->t1);
+        mux32op(p, a, m->t1, b); /* t1 = rs1 & ~b */
+        mov32(p, m->z, m->t2);
+        mux32op(p, b, m->t2, a); /* t2 = b & ~rs1 */
+        mov32(p, m->t2, m->t0);
+        mux32op(p, m->t1, m->t0, m->t2); /* t0 = (t1 & ~t2) | t2 = t1 | t2 */
+        break;
+    }
+    mov32(p, m->t0, m->reg_base + rd); /* rd = result */
+    if (nd->kind == K_OPIMM)
+        (*imm)++;
+}
+
+/* Emit a WIDE (32-bit-cell) standalone MUXLEQ image for './muxleq -x32'. The
+ * payoff over -mux: a whole 32-bit RV32I register lives in ONE cell, so the ALU
+ * is native single-cell SUBLEQ/MUX (no lo/hi halves, no carry/borrow votes) and
+ * the address space is not capped at 32768 cells. Built in slices like -mux
+ * was; through SLICE 2c this covers li + the native ALU + SLT/SLTU + LUI/AUIPC
+ * + all six branches + JAL (with an na[] target map), enough to run the rvopt-*
+ * control-flow fixtures. Later slices add shifts, memory, and ecalls. Reuses
+ * the shared front end; an unsupported op is a hard error until its slice
+ * lands. The epilogue PUTs each defined register's low byte then halts.
+ */
+static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
+{
+    struct sysinfo *sys = xcalloc((size_t) g->count, sizeof *sys);
+    bool *reach = xcalloc((size_t) g->count, sizeof *reach);
+    resolve_jalr(g);
+    analyze_syscalls(g, used, sys);
+    mark_reachable(g, sys, reach);
+    detect_smc(g, sys, reach); /* refuse self-modifying code, never miscompile
+                                  it (same guard as -mux); run it under -r
+                                  */
+
+    /* The single call site for a 'ret' (jalr x0,x1,0): the one reachable `jal
+     * ra,...` (rd == x1); ret returns to the word after it, checked at run time
+     * against ra. More than one call site would need a dispatch (no demo needs
+     * it), so ret_node stays NONE and a reachable ret aborts.
+     */
+    int ret_node = NONE, nlink = 0;
+    uint32_t ret_addr = 0;
+    for (int i = 1; i < g->count; i++)
+        if (reach[i] && g->n[i].kind == K_JAL &&
+            ((g->n[i].word >> 7) & 31) == 1) {
+            nlink++;
+            ret_addr = g->n[i].pc + 4;
+            ret_node = addr2node(g, ret_addr);
+        }
+    if (nlink != 1)
+        ret_node = NONE;
+
+    int nimm = 0; /* imm cells; defined regs get a PUT + the halt */
+    bool def[32] = {false};
+    for (int i = 1; i < g->count; i++) {
+        if (!reach[i])
+            continue;
+        const struct node *nd = &g->n[i];
+        const int rd = (nd->word >> 7) & 31;
+        const int fk = fold_kind(nd->word);
+        if (fk == FOLD_DEADI)
+            continue; /* nop */
+        if (fk == FOLD_LI12) {
+            nimm++;
+            def[rd] = true;
+            continue;
+        }
+        if (op_ok32(nd)) {
+            if (rd) { /* rd == x0 is a nop: no cell, no def */
+                def[rd] = true;
+                if (nd->kind == K_OPIMM)
+                    nimm++;
+            }
+            continue;
+        }
+        if (nd->kind == K_JAL || nd->kind == K_LUI || nd->kind == K_AUIPC) {
+            if (rd) { /* JAL-link pc+4, or an upper-immediate constant, into rd
+                       */
+                nimm++;
+                def[rd] = true;
+            }
+            continue;
+        }
+        if (shift_ok32(nd)) {
+            if (rd) /* SLLI/SRLI/SRAI or SLL: defines rd, no imm cell */
+                def[rd] = true;
+            continue;
+        }
+        if (nd->kind == K_BRANCH && nd->funct3 != 2 && nd->funct3 != 3)
+            continue; /* BEQ/BNE/BLT/BGE/BLTU/BGEU: no imm, no def */
+        if (mem_ok32(nd)) {
+            nimm++; /* the byte offset */
+            if (nd->kind == K_LOAD && rd)
+                def[rd] = true; /* LBU defines rd (SB does not) */
+            continue;
+        }
+        if (nd->kind == K_SYSTEM && sys[i].kind != SYS_BAD)
+            continue; /* ecall: exit/write, no imm cell, no def */
+        if (nd->kind == K_JALR && nd->target != NONE) {
+            if (rd) { /* static-target JALR: pc+4 link into rd */
+                nimm++;
+                def[rd] = true;
+            }
+            continue;
+        }
+        if (nd->kind == K_JALR && rd == 0 && nd->rs1 == 1 && nd->imm == 0 &&
+            ret_node != NONE)
+            continue; /* ret: no imm cell, no def */
+        fprintf(stderr,
+                "rvopt -mux32: unsupported op at pc %u (no computed JALR / "
+                "unresolved ecall yet)\n",
+                nd->pc);
+        free(sys);
+        free(reach);
+        exit(1);
+    }
+    int ndef = 0;
+    for (int r = 0; r < 32; r++)
+        ndef += def[r];
+
+    /* Sizing pass: variable-size ops mean the code length is not a formula --
+     * run the emitter with output suppressed to fill na[] (branch/jump targets)
+     * and measure the op length. A forward branch reads a not-yet-set na entry
+     * here, but output is suppressed and every block is fixed-size, so the
+     * count is exact; the real pass sees the fully-filled na[].
+     */
+    int *na = xcalloc((size_t) g->count + 1, sizeof *na);
+    struct m32 m = {0};
+    g_sizing = true;
+    int p = 0, imm = 0;
+    for (int i = 1; i < g->count; i++) {
+        na[i] = p;
+        if (reach[i])
+            emit_one32(g, i, sys, ret_node, &m, na, &p, &imm);
+    }
+    g_sizing = false;
+    na[g->count] = p;                    /* a jump past the end lands here */
+    const int code = p + 3 * (ndef + 1); /* ops + one PUT per def reg + halt */
+
+    /* Layout: code | imm cells | 32-cell regfile | constants Z/-1/0x80000000/1
+     * | scratch t0/t1/t2 | sign-flip sh1/sh2 | 0x1F, 0xFF | winmask, rambc |
+     * rsite | 2^0..2^31 mask pool | the guest RAM window (one cell per byte).
+     */
+    m.imm_base = code;
+    m.reg_base = m.imm_base + nimm;
+    m.z = m.reg_base + 32;
+    m.neg1 = m.z + 1;
+    m.sgn = m.neg1 + 1;
+    m.one = m.sgn + 1;
+    m.t0 = m.one + 1;
+    m.t1 = m.t0 + 1;
+    m.t2 = m.t1 + 1;
+    m.sh1 = m.t2 + 1;
+    m.sh2 = m.sh1 + 1;
+    m.m1f = m.sh2 + 1;
+    m.mff = m.m1f + 1;
+    m.winmask = m.mff + 1;
+    m.rambc = m.winmask + 1;
+    m.rsite = m.rambc + 1;
+    m.mask_base = m.rsite + 1;
+    m.ram_base = m.mask_base + 32;
+    int winsize =
+        1; /* smallest power of two covering the touched guest bytes */
+    while (winsize < (int) used)
+        winsize <<= 1;
+    if (m.ram_base + winsize >
+        (1 << 21)) { /* the -x32 2M-cell window ceiling */
+        fprintf(stderr, "rvopt -mux32: image needs %d cells (> %d)\n",
+                m.ram_base + winsize, 1 << 21);
+        free(na);
+        free(sys);
+        free(reach);
+        exit(1);
+    }
+
+    p = imm = 0;
+    for (int i = 1; i < g->count; i++)
+        if (reach[i])
+            emit_one32(g, i, sys, ret_node, &m, na, &p, &imm);
+    for (int r = 0; r < 32; r++)
+        if (def[r])
+            emit_i32(&p, m.reg_base + r, IOMARK32, 0); /* PUT rd's low byte */
+    emit_i32(&p, m.z, m.z, IOMARK32); /* halt (SUBLEQ Z,Z,-1) */
+
+    /* Data: imm values (program order, matching the imm cells), regfile, then
+     * the constants Z/-1/0x80000000/1, the zeroed t0/t1/t2/sh1/sh2, 0x1F/0xFF,
+     * winmask/rambc, rsite (ret's return address), the 2^0..2^31 mask pool, and
+     * the guest RAM window.
+     */
+    for (int i = 1; i < g->count; i++)
+        if (reach[i] && imm_op32(&g->n[i]))
+            printf("%lld\n", imm_value32(&g->n[i]));
+    for (int r = 0; r < 32; r++)
+        printf("0\n"); /* regfile (x0 stays 0) */
+    printf("0\n-1\n2147483648\n1\n0\n0\n0\n0\n0\n31\n255\n");
+    /* Z, -1, SGN(0x80000000), 1, t0, t1, t2, sh1, sh2, 0x1F, 0xFF */
+    printf("%d\n%d\n", winsize - 1, m.ram_base); /* winmask, rambc */
+    printf("%u\n", ret_addr);                    /* rsite (ret's ra check) */
+    for (int b = 0; b < 32; b++)
+        printf("%lld\n", 1LL << b); /* mask pool 2^0 .. 2^31 */
+    for (int k = 0; k < winsize; k++)
+        printf("%u\n",
+               k < (int) used ? img[k] : 0); /* guest RAM, init from img */
+    free(na);
+    free(sys);
+    free(reach);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && !strcmp(argv[1], "-dump")) {
@@ -2777,19 +3776,35 @@ int main(int argc, char **argv)
     }
     if (argc == 3 && !strcmp(argv[1], "-check"))
         return check_ir(argv[2]);
-    if (argc == 3 && !strcmp(argv[1], "-mux")) {
-        size_t used;
-        unsigned char *img = load_guest(argv[2], &used);
-        struct graph g = decode_graph(img, used);
-        emit_mux(&g, img, used);
-        free_graph(&g);
-        free(img);
-        return 0;
-    }
+
+    /* Both emitters share one pipeline -- load guest image, decode to the
+     * graph, emit, free -- and differ only in which backend runs. Table-drive
+     * them so adding a backend is one row, not another copy of the boilerplate.
+     */
+    static const struct {
+        const char *opt;
+        void (*emit)(struct graph *, const unsigned char *, size_t);
+    } emitters[] = {
+        {"-mux", emit_mux},
+        {"-mux32", emit_mux32},
+    };
+    if (argc == 3)
+        for (size_t i = 0; i < sizeof emitters / sizeof *emitters; i++)
+            if (!strcmp(argv[1], emitters[i].opt)) {
+                size_t used;
+                unsigned char *img = load_guest(argv[2], &used);
+                struct graph g = decode_graph(img, used);
+                emitters[i].emit(&g, img, used);
+                free_graph(&g);
+                free(img);
+                return 0;
+            }
 
     fprintf(stderr,
             "usage: rvopt -dump FILE    (decode, write textual IR)\n"
             "       rvopt -check FILE   ('-' = stdin, verify textual IR)\n"
-            "       rvopt -mux FILE     (emit native MUXLEQ .dec image)\n");
+            "       rvopt -mux FILE     (emit native MUXLEQ .dec image)\n"
+            "       rvopt -mux32 FILE   (emit a wide 32-bit-cell image for "
+            "-x32)\n");
     return 2;
 }
