@@ -121,7 +121,8 @@ static void *xcalloc(size_t count, size_t size)
 
 static uint32_t rd32(const unsigned char *p)
 {
-    return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t) p[3] << 24;
+    return (uint32_t) p[0] | (uint32_t) p[1] << 8 | (uint32_t) p[2] << 16 |
+           (uint32_t) p[3] << 24;
 }
 static uint16_t rd16(const unsigned char *p)
 {
@@ -433,7 +434,7 @@ static void reg(char *buf, int r)
     if (r == NONE)
         strcpy(buf, "-");
     else
-        sprintf(buf, "x%d", r);
+        snprintf(buf, 8, "x%d", r);
 }
 
 static void dump_graph(const struct graph *g, const char *path)
@@ -2221,8 +2222,8 @@ static void emit_one(const struct graph *g,
     if (nd->kind == K_BRANCH) {
         const int L = mux_target(g, nd, na);
         const int ft = na[i + 1]; /* not-taken = next instruction */
-        const int s1 = m->reg_base + 2 * ((nd->word >> 15) & 31);
-        const int s2 = m->reg_base + 2 * ((nd->word >> 20) & 31);
+        const int s1 = m->reg_base + 2 * (int) ((nd->word >> 15) & 31);
+        const int s2 = m->reg_base + 2 * (int) ((nd->word >> 20) & 31);
         switch (nd->funct3) {
         case 0: /* BEQ: taken iff lo==lo AND hi==hi */
             emit_ne16(p, s1, s2, ft, m->t0, m->z, m->neg1);
