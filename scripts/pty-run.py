@@ -112,7 +112,12 @@ def main():
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
+        # It ignored SIGTERM: kill, reap, and fail. A process that had to be
+        # SIGKILLed was stuck, so its captured screen cannot be trusted.
         proc.kill()
+        proc.wait()
+        sys.stderr.write("pty-run: editor did not exit on SIGTERM; killed\n")
+        return 1
 
     # Keep only the last full repaint (everything after the final clear-screen),
     # strip CSI escapes and carriage returns, then re-chunk the 16x64 grid into

@@ -74,8 +74,7 @@
 #define EDIT_RAW_ON 0xFF01u
 #define EDIT_RAW_OFF 0xFF00u
 #define EDIT_PEEK 0xFF02u
-#define EDIT_PEEK_MS \
-    50 /* ttimeoutlen: an arrow burst arrives together, <50ms */
+#define EDIT_PEEK_MS 50 /* ttimeoutlen: an arrow burst arrives <50ms apart */
 
 /* Cell 6 is hardwired to 0, so a MUX whose mask address is 6 masks against zero
  * and is therefore a pure MOVE. Both the 16-bit and wide VMs and the RV32I MOVE
@@ -662,8 +661,7 @@ static void load_muxleq(const char *path)
 #define IDX32 (MEM_SIZE32 - 1)
 #define IO_MARKER32 0xFFFFFFFFu
 #define NEG_FLAG32 0x80000000u
-#define ADDR_MASK32 \
-    0x7FFFFFFFu /* strip the sign bit to get a MUX mask address */
+#define ADDR_MASK32 0x7FFFFFFFu /* strip sign bit to get a MUX mask address */
 
 static uint32_t *load_muxleq32(const char *path)
 {
@@ -804,12 +802,12 @@ static void restore_and_reraise(int sig)
     raise(sig);
 }
 
-static void install_restore(int sig)
+static void install_handler(int sig, void (*handler)(int), int flags)
 {
     struct sigaction sa;
-    sa.sa_handler = restore_and_reraise;
+    sa.sa_handler = handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESETHAND; /* one-shot: default disposition on re-raise */
+    sa.sa_flags = flags;
     sigaction(sig, &sa, NULL);
 }
 
@@ -849,27 +847,22 @@ static bool terminal_setup(void)
     tty_interactive = true;
     atexit(leave_raw_mode);
 
-    /* Restore on any signal that would otherwise leave the tty raw. SIGQUIT
-     * matters because ISIG is kept (^\ terminates); SIGHUP on session loss;
-     * SIGSEGV so a crash never wedges the terminal.
+    /* Terminating signals: restore the tty, then re-raise from the default
+     * disposition (SA_RESETHAND). SIGQUIT because ISIG is kept (^\ terminates);
+     * SIGHUP on session loss; SIGSEGV so a crash never wedges the terminal.
      */
-    install_restore(SIGINT);
-    install_restore(SIGTERM);
-    install_restore(SIGQUIT);
-    install_restore(SIGHUP);
-    install_restore(SIGSEGV);
+    install_handler(SIGINT, restore_and_reraise, SA_RESETHAND);
+    install_handler(SIGTERM, restore_and_reraise, SA_RESETHAND);
+    install_handler(SIGQUIT, restore_and_reraise, SA_RESETHAND);
+    install_handler(SIGHUP, restore_and_reraise, SA_RESETHAND);
+    install_handler(SIGSEGV, restore_and_reraise, SA_RESETHAND);
 
     /* ^Z / fg: keep the tty sane across job-control stops (see
      * suspend_handler). Persistent (no SA_RESETHAND); SA_RESTART so the
      * editor's blocked read resumes cleanly instead of failing with EINTR.
      */
-    struct sigaction jc;
-    sigemptyset(&jc.sa_mask);
-    jc.sa_flags = SA_RESTART;
-    jc.sa_handler = suspend_handler;
-    sigaction(SIGTSTP, &jc, NULL);
-    jc.sa_handler = resume_handler;
-    sigaction(SIGCONT, &jc, NULL);
+    install_handler(SIGTSTP, suspend_handler, SA_RESTART);
+    install_handler(SIGCONT, resume_handler, SA_RESTART);
     return true;
 }
 
@@ -910,15 +903,19 @@ int main(int argc, char **argv)
     prof_enabled = prof_stats || prof_heat;
 
     /* An interactive tty starts cooked (the REPL wants kernel echo + line
-     * editing); the editor toggles raw via put(). Unbuffer both streams so the
-     * editor's raw-mode redraws are not hidden behind a line buffer. Buffering
-     * is set exactly once per stream (a second setvbuf is undefined). Non-tty
-     * stdin (pipes, goldens, bootstrap) keeps its byte-identical buffered
-     * behavior.
+     * editing); the editor toggles raw via put(). Unbuffer stdin so keystrokes
+     * (and the peek poll) see bytes live, and unbuffer stdout ONLY when it is
+     * the terminal the editor redraws -- a redirected stdout stays fully
+     * buffered so batch output is not a syscall per byte. Buffering is set
+     * exactly once per stream (a second setvbuf is undefined). Non-tty stdin
+     * (pipes, goldens, bootstrap) keeps its byte-identical buffered behavior.
      */
     if (terminal_setup()) {
         setvbuf(stdin, NULL, _IONBF, 0);
-        setvbuf(stdout, NULL, _IONBF, 0);
+        if (isatty(fileno(stdout)))
+            setvbuf(stdout, NULL, _IONBF, 0);
+        else
+            setvbuf(stdout, NULL, _IOFBF, BUFSIZ);
     } else {
         const int mode = isatty(fileno(stdout)) ? _IOLBF : _IOFBF;
         setvbuf(stdout, NULL, mode, BUFSIZ);
