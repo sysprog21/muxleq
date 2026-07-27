@@ -184,8 +184,8 @@ point `else` and bare integer literals are NOT yet available -- use `if … exit
 Results:
 - CORRECT: the elision fires -- `: foo dup ;` compiles `foo`'s body cell0 = 786 (the dup PRIMITIVE),
   not 5011 (the dup wrapper). All 46 computational goldens (incl. `define` -- the runtime-compile
-  guard -- `chacha20`, and every `rv32i` test) stay byte-exact. Only the address-dependent `editor`
-  memory-dump golden shifts (expected image-layout drift, would just need a rebaseline).
+  guard -- `chacha20`, and every `rv32i` test) stay byte-exact. (The one address-dependent golden,
+  the old `editor` memory dump, was since retired along with the line editor.)
 - BOOTSTRAP HOLDS byte-exact. Note: the self-host DOES run target `compile,` for its
   working-dictionary tooling; what stays byte-exact is the DUMPED image (emitted via macros/`t,`),
   so bootstrap is unaffected either way.

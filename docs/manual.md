@@ -237,6 +237,39 @@ Each item below is a one-liner you can paste into `make run`.
 - `." text"` outside a definition is fragile. Common error codes: `-4` (stack underflow),
   `-13` (undefined word / compile-only misuse), `-14` (execution/output error).
 
+### Block editor
+
+The editor (`opt.editor`, `forth/65-optional-editor.fth`, entered with `editor`) is a modal,
+full-screen, vi-style editor over the block model -- the block buffer IS the file.
+Normal mode: `hjkl` (or the arrow keys) move, `i` insert, `x` delete a character.
+Colon commands:
+`:w` saves (`update flush`), `:n`/`:p` step to the next/previous block, `:N` jumps
+to block N (valid blocks are 1..127), `:z` blanks the current block, `:x` saves and
+compiles (`load`) the block on exit, `:q` quits; `ZZ` also quits. The current block
+number shows on the status line. It reads single keystrokes, so it needs an
+interactive terminal (the VM puts a tty into raw mode; see the interpreter section).
+
+A block is a fixed 1 KiB grid of 16 rows x 64 columns with NO newline concept.
+What is implemented today:
+
+- Cursor is `(x, y)` clamped to a constant `x 0..63`, `y 0..15` -- unlike a
+  variable-length-line editor, there is no per-line length to clamp against.
+- A row is always 64 cells, some of them spaces; trailing blanks are
+  indistinguishable from typed spaces.
+- `x` (delete char) shifts the row left from the cursor and blank-fills column 63.
+- Insert (`i`) overwrites the cell at the cursor and advances, clamping at column
+  63 -- a deliberately simple model; a true shift-right insert (dropping column
+  63 on overflow) is a later refinement.
+- `:w` maps to `update flush`; block selection (`:n`/`:p`/`:N`) clamps to 1..127;
+  `ZZ`/`:q` exit.
+
+Motions still to be added carry pinned conventions so they need no rework when
+built: `0` to column 0, `$` to the last non-blank column (column 0 if the row is
+blank), `^` to the first non-blank column; `dd` deletes a row (rows below shift
+up, row 15 blank-fills) and `o`/`O` open a blank row (the row pushed off the
+16-row grid is lost); `w`/`b` treat each row as one line, stepping over
+whitespace-delimited words and crossing to the adjacent row at the 64-column edge.
+
 ## 7. RV32I microcode runner
 
 MUXLEQ stays a 16-bit OISC; on top of it the image assembles a fetch-decode-execute
