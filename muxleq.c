@@ -12,11 +12,13 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
 #include <unistd.h>
 
 #ifndef ENABLE_RV32I
@@ -690,6 +692,77 @@ static int run32(uint32_t *m32)
     }
 }
 
+/* Terminal raw mode for interactive use. eForth's accept/ktap already echo and
+ * edit input one character at a time, so the kernel's cooked line discipline
+ * fights the image: it double-echoes and buffers a whole line before delivering
+ * a byte. Put an interactive tty into cbreak -- ICANON and ECHO off, everything
+ * else (ISIG for ^C, ICRNL, OPOST) left intact -- so the image owns echo and
+ * sees each keystroke immediately. That is what eForth's reader wants anyway
+ * and what a modal editor requires. Non-tty stdin (pipes, the goldens,
+ * bootstrap) is never touched, so their byte streams are unchanged.
+ */
+static struct termios cooked_termios;
+static volatile sig_atomic_t raw_mode_active = 0;
+
+static void leave_raw_mode(void)
+{
+    if (raw_mode_active) {
+        raw_mode_active = 0; /* clear first: idempotent under a nested signal */
+        tcsetattr(STDIN_FILENO, TCSANOW, &cooked_termios);
+    }
+}
+
+/* Terminating signal: restore the tty, then die from the same signal. Installed
+ * with SA_RESETHAND, so the disposition is already the default when we re-raise
+ * (no handler recursion); leave_raw_mode() is idempotent for good measure. Only
+ * async-signal-safe calls (tcsetattr, raise) run here.
+ */
+static void restore_and_reraise(int sig)
+{
+    leave_raw_mode();
+    raise(sig);
+}
+
+static void install_restore(int sig)
+{
+    struct sigaction sa;
+    sa.sa_handler = restore_and_reraise;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND; /* one-shot: default disposition on re-raise */
+    sigaction(sig, &sa, NULL);
+}
+
+/* Returns true iff an interactive tty was switched into raw mode; the caller
+ * then owns the matching (unbuffered) stdio buffering. Suspend/resume (^Z) is
+ * deliberately NOT handled here -- it belongs to the editor's own input loop,
+ * which knows when raw mode is active and can be validated on a real terminal.
+ */
+static bool enter_raw_mode(void)
+{
+    if (!isatty(STDIN_FILENO))
+        return false;
+    if (tcgetattr(STDIN_FILENO, &cooked_termios) != 0)
+        return false;
+    struct termios raw = cooked_termios;
+    raw.c_lflag &= ~(tcflag_t) (ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;  /* VMIN drives blocking: a read waits for one byte */
+    raw.c_cc[VTIME] = 0; /* no inter-byte timer */
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0)
+        return false;
+    raw_mode_active = 1;
+    atexit(leave_raw_mode);
+    /* Restore on any signal that would otherwise leave the tty in cbreak.
+     * SIGQUIT matters because ISIG is kept (^\ terminates); SIGHUP on session
+     * loss; SIGSEGV so a crash never wedges the terminal.
+     */
+    install_restore(SIGINT);
+    install_restore(SIGTERM);
+    install_restore(SIGQUIT);
+    install_restore(SIGHUP);
+    install_restore(SIGSEGV);
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     /* -r (RV32I via the eForth runner) and -x (a standalone MUXLEQ image) each
@@ -726,11 +799,23 @@ int main(int argc, char **argv)
     }
     prof_enabled = prof_stats || prof_heat;
 
-    /* Set I/O buffering: line for interactive, full for piped. */
-    const int mode = isatty(fileno(stdout)) ? _IOLBF : _IOFBF;
-    setvbuf(stdout, NULL, mode, BUFSIZ);
-    if (mode == _IOFBF)
-        setvbuf(stdin, NULL, _IOFBF, BUFSIZ);
+    /* Raw mode (interactive tty stdin) dictates the buffering, so decide it
+     * first and set each stream's buffering exactly once (a second setvbuf on a
+     * stream is undefined). Non-tty stdin skips raw mode, so pipes, the
+     * goldens, and bootstrap keep their byte-identical buffered behavior.
+     */
+    if (enter_raw_mode()) {
+        /* Unbuffered both ways: keystrokes arrive live, and echo/redraw are not
+         * hidden behind a line buffer until a newline.
+         */
+        setvbuf(stdin, NULL, _IONBF, 0);
+        setvbuf(stdout, NULL, _IONBF, 0);
+    } else {
+        const int mode = isatty(fileno(stdout)) ? _IOLBF : _IOFBF;
+        setvbuf(stdout, NULL, mode, BUFSIZ);
+        if (mode == _IOFBF)
+            setvbuf(stdin, NULL, _IOFBF, BUFSIZ);
+    }
 
     /* The wide VM is a separate run path; otherwise fetch the first 16-bit
      * instruction and start the dispatcher.
