@@ -1,0 +1,4 @@
+# The modal-editor screen golden is a fixed 16x64 grid: trailing spaces on a row
+# are the editor's actual output and are byte-significant, so exempt it from
+# whitespace checks (git diff --check).
+tests/expected/editor-pty.out -whitespace

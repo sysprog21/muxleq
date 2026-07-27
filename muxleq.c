@@ -12,11 +12,14 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
 #include <unistd.h>
 
 #ifndef ENABLE_RV32I
@@ -58,6 +61,20 @@
 #define MEM_MASK (MEM_SIZE - 1)
 #define IO_MARKER ((uint16_t) -1)
 #define NEGATIVE_FLAG MEM_SIZE
+
+/* Editor terminal-mode control. The modal editor emits these sentinels through
+ * the normal output path; put() intercepts them. eForth's emit hands put() the
+ * full 16-bit cell unmasked, so these three values are RESERVED as out-of-band
+ * editor control codes rather than emitted: conforming byte output is 0..255
+ * (any other high value still truncates through putchar as before), and nothing
+ * in the image emits 0xFF00-0xFF02. Kept in sync with the raw-on/raw-off/peek
+ * words in forth/65-optional-editor.fth. EDIT_PEEK arms a one-shot timed read
+ * so the editor can tell a lone ESC from an arrow key's "ESC [ A" burst.
+ */
+#define EDIT_RAW_ON 0xFF01u
+#define EDIT_RAW_OFF 0xFF00u
+#define EDIT_PEEK 0xFF02u
+#define EDIT_PEEK_MS 50 /* ttimeoutlen: an arrow burst arrives <50ms apart */
 
 /* Cell 6 is hardwired to 0, so a MUX whose mask address is 6 masks against zero
  * and is therefore a pure MOVE. Both the 16-bit and wide VMs and the RV32I MOVE
@@ -111,6 +128,15 @@ static VM_ABI int dispatch(uint16_t pc,
                            uint16_t addr_a,
                            uint16_t addr_b,
                            uint16_t addr_c);
+
+/* Editor-driven terminal-mode toggles (defined near main); put() calls them. */
+static void enter_raw_mode(void);
+static void leave_raw_mode(void);
+static volatile sig_atomic_t raw_mode_active = 0; /* editor holds the tty raw */
+static volatile sig_atomic_t raw_wanted =
+    0; /* editor intends raw (across ^Z) */
+static bool edit_peek_pending =
+    false; /* EDIT_PEEK armed a one-shot timed read */
 
 static inline bool can_fetch_instruction(uint16_t pc)
 {
@@ -251,6 +277,33 @@ static VM_ABI int get(uint16_t pc,
                       uint16_t addr_b,
                       UNUSED uint16_t addr_c)
 {
+    /* One-shot timed read: the editor arms this right after an ESC to tell a
+     * lone ESC from an arrow key's "ESC [ A" burst. If nothing is readable
+     * within the timeout, report "no key" (0x100) rather than blocking for a
+     * byte that a bare ESC will never send. Only meaningful on the interactive
+     * tty.
+     */
+    if (UNLIKELY(edit_peek_pending)) {
+        edit_peek_pending = false;
+        if (raw_mode_active && prefix_pos >= prefix_len) {
+            struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
+            int pr;
+            do {
+                pr = poll(&pfd, 1, EDIT_PEEK_MS);
+            } while (pr < 0 &&
+                     errno == EINTR); /* ^Z/SIGCONT: retry, never hang */
+            /* Timeout, a poll error, or a hangup with nothing readable all mean
+             * the ESC stood alone: hand back 0x100 -- positive (key? reads
+             * negatives as EOF) and out of byte range, so it is "no key", never
+             * a real char. Only a readable byte (POLLIN) falls through to the
+             * blocking read below.
+             */
+            if (pr <= 0 || !(pfd.revents & POLLIN)) {
+                store_cell(addr_b, 0x100);
+                FETCH_AND_DISPATCH(pc + INSN_SIZE);
+            }
+        }
+    }
     const int input = prefix_pos < prefix_len
                           ? (unsigned char) prefix_in[prefix_pos++]
                           : getchar();
@@ -266,7 +319,17 @@ static VM_ABI int put(uint16_t pc,
                       UNUSED uint16_t addr_b,
                       UNUSED uint16_t addr_c)
 {
-    if (UNLIKELY(putchar(m[addr_a]) == EOF))
+    const uint16_t out = m[addr_a];
+    if (UNLIKELY(out == EDIT_RAW_ON)) {
+        raw_wanted = 1;   /* remember intent so ^Z/fg can re-raw */
+        enter_raw_mode(); /* editor entry: raw single keys, no echo */
+    } else if (UNLIKELY(out == EDIT_RAW_OFF)) {
+        raw_wanted = 0;
+        leave_raw_mode(); /* editor exit: back to the cooked REPL */
+    } else if (UNLIKELY(out == EDIT_PEEK))
+        edit_peek_pending =
+            true; /* arm one-shot timed read (ESC disambiguation) */
+    else if (UNLIKELY(putchar(out) == EOF))
         return 3; /* Halt on output error. */
 
     FETCH_AND_DISPATCH(pc + INSN_SIZE);
@@ -598,8 +661,7 @@ static void load_muxleq(const char *path)
 #define IDX32 (MEM_SIZE32 - 1)
 #define IO_MARKER32 0xFFFFFFFFu
 #define NEG_FLAG32 0x80000000u
-#define ADDR_MASK32 \
-    0x7FFFFFFFu /* strip the sign bit to get a MUX mask address */
+#define ADDR_MASK32 0x7FFFFFFFu /* strip sign bit to get a MUX mask address */
 
 static uint32_t *load_muxleq32(const char *path)
 {
@@ -690,6 +752,120 @@ static int run32(uint32_t *m32)
     }
 }
 
+/* Terminal modes for interactive use. The REPL wants the kernel's cooked line
+ * discipline (canonical input + echo, so typing and backspace Just Work), but
+ * the modal editor wants raw single keystrokes with NO echo -- otherwise
+ * command keys and arrow escapes would litter its screen with `^[` etc. They
+ * cannot share one mode, so the tty starts COOKED and the editor toggles raw:
+ * it emits the EDIT_RAW_ON / EDIT_RAW_OFF sentinels through the normal output
+ * path, which put() intercepts to enter/leave raw. Non-tty stdin (pipes, the
+ * goldens, bootstrap) never becomes interactive, so their byte streams are
+ * unchanged.
+ */
+static struct termios cooked_termios;
+static bool tty_interactive = false; /* stdin is an interactive tty */
+
+static void leave_raw_mode(void)
+{
+    if (raw_mode_active) {
+        raw_mode_active = 0; /* clear first: idempotent under a nested signal */
+        tcsetattr(STDIN_FILENO, TCSANOW, &cooked_termios);
+    }
+}
+
+/* Enter raw: ICANON + ECHO off (single keystrokes, no terminal echo -- the
+ * editor owns the screen), ISIG/ICRNL/OPOST left intact.
+ */
+static void enter_raw_mode(void)
+{
+    if (!tty_interactive || raw_mode_active)
+        return;
+    struct termios raw = cooked_termios;
+    raw.c_lflag &= ~(tcflag_t) (ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;  /* VMIN drives blocking: a read waits for one byte */
+    raw.c_cc[VTIME] = 0; /* no inter-byte timer */
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0)
+        raw_mode_active = 1;
+}
+
+/* Terminating signal: restore the tty, then die from the same signal. Installed
+ * with SA_RESETHAND, so the disposition is already the default when we re-raise
+ * (no handler recursion); leave_raw_mode() is idempotent for good measure.
+ * tcsetattr() is not on the POSIX async-signal-safe list, but restoring the
+ * terminal from a fatal-signal handler is the pragmatic tradeoff here: the
+ * alternative (a wedged, echo-less tty after a crash) is worse, and we re-raise
+ * immediately after.
+ */
+static void restore_and_reraise(int sig)
+{
+    leave_raw_mode();
+    raise(sig);
+}
+
+static void install_handler(int sig, void (*handler)(int), int flags)
+{
+    struct sigaction sa;
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = flags;
+    sigaction(sig, &sa, NULL);
+}
+
+/* Job control. ISIG is left intact, so ^Z in the editor raises SIGTSTP; without
+ * this it would stop the process with the tty still raw, wedging the shell.
+ * Restore cooked, then actually stop (SIGSTOP cannot be caught, so no re-arm
+ * dance). On resume re-enter raw if the editor still wants it -- the screen is
+ * stale until the next repaint, but input keeps working. Persistent handlers so
+ * repeated suspend/resume keep behaving.
+ */
+static void suspend_handler(UNUSED int sig)
+{
+    leave_raw_mode();
+    raise(SIGSTOP);
+}
+
+static void resume_handler(UNUSED int sig)
+{
+    if (raw_wanted)
+        enter_raw_mode();
+}
+
+/* Startup: note an interactive tty, save its cooked settings, and arm the
+ * restore handlers so an editor session that dies mid-raw never wedges the
+ * terminal. The tty stays cooked; only the editor switches it to raw (via
+ * put()).
+ *
+ * Returns true for an interactive tty, so the caller unbuffers stdio for live
+ * editor redraws.
+ */
+static bool terminal_setup(void)
+{
+    if (!isatty(STDIN_FILENO))
+        return false;
+    if (tcgetattr(STDIN_FILENO, &cooked_termios) != 0)
+        return false;
+    tty_interactive = true;
+    atexit(leave_raw_mode);
+
+    /* Terminating signals: restore the tty, then re-raise from the default
+     * disposition (SA_RESETHAND). SIGQUIT because ISIG is kept (^\ terminates);
+     * SIGHUP on session loss; SIGSEGV so a crash never wedges the terminal.
+     */
+    install_handler(SIGINT, restore_and_reraise, SA_RESETHAND);
+    install_handler(SIGTERM, restore_and_reraise, SA_RESETHAND);
+    install_handler(SIGQUIT, restore_and_reraise, SA_RESETHAND);
+    install_handler(SIGHUP, restore_and_reraise, SA_RESETHAND);
+    install_handler(SIGSEGV, restore_and_reraise, SA_RESETHAND);
+
+    /* ^Z / fg: keep the tty sane across job-control stops (see
+     * suspend_handler). Persistent (no SA_RESETHAND); SA_RESTART so the
+     * editor's blocked read resumes cleanly instead of failing with EINTR.
+     */
+    install_handler(SIGTSTP, suspend_handler, SA_RESTART);
+    install_handler(SIGCONT, resume_handler, SA_RESTART);
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     /* -r (RV32I via the eForth runner) and -x (a standalone MUXLEQ image) each
@@ -726,11 +902,26 @@ int main(int argc, char **argv)
     }
     prof_enabled = prof_stats || prof_heat;
 
-    /* Set I/O buffering: line for interactive, full for piped. */
-    const int mode = isatty(fileno(stdout)) ? _IOLBF : _IOFBF;
-    setvbuf(stdout, NULL, mode, BUFSIZ);
-    if (mode == _IOFBF)
-        setvbuf(stdin, NULL, _IOFBF, BUFSIZ);
+    /* An interactive tty starts cooked (the REPL wants kernel echo + line
+     * editing); the editor toggles raw via put(). Unbuffer stdin so keystrokes
+     * (and the peek poll) see bytes live, and unbuffer stdout ONLY when it is
+     * the terminal the editor redraws -- a redirected stdout stays fully
+     * buffered so batch output is not a syscall per byte. Buffering is set
+     * exactly once per stream (a second setvbuf is undefined). Non-tty stdin
+     * (pipes, goldens, bootstrap) keeps its byte-identical buffered behavior.
+     */
+    if (terminal_setup()) {
+        setvbuf(stdin, NULL, _IONBF, 0);
+        if (isatty(fileno(stdout)))
+            setvbuf(stdout, NULL, _IONBF, 0);
+        else
+            setvbuf(stdout, NULL, _IOFBF, BUFSIZ);
+    } else {
+        const int mode = isatty(fileno(stdout)) ? _IOLBF : _IOFBF;
+        setvbuf(stdout, NULL, mode, BUFSIZ);
+        if (mode == _IOFBF)
+            setvbuf(stdin, NULL, _IOFBF, BUFSIZ);
+    }
 
     /* The wide VM is a separate run path; otherwise fetch the first 16-bit
      * instruction and start the dispatcher.

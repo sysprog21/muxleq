@@ -34,7 +34,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order (the fast "budget" guard fails before the slow bootstrap).
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all budget golden golden-see golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent check-format
+.PHONY: FORCE help run bootstrap clean distclean check check-all budget golden golden-see golden-pty golden-mandel bench profile-duremark verify-rv32i verify-microcode verify-rvopt-mux verify-rvopt-gate verify-duremark-rvopt verify-loader-rejects verify-mux32 verify-riscv-tests fuzz-rvopt sanitize duremark indent check-format
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -324,12 +324,10 @@ GOLDEN_FILES := \
 	eforth-fig eforth-stack eforth-msgpass eforth-value
 
 # rv32i-spec/rv32i-run drive the microcode through Forth, so they only exist in
-# an ENABLE_RV32I=1 image. "editor" dumps a raw block buffer that overlays
-# resident image bytes, so its expected output is pinned to the RV32I-on layout
-# (the greeting output it computes is identical either way). All three are gated
-# on the microcode being present.
+# an ENABLE_RV32I=1 image. The modal editor is covered by golden-pty (a pty
+# capture), not a pipe golden.
 ifeq ($(ENABLE_RV32I),1)
-GOLDEN_FILES += editor rv32i-spec rv32i-run
+GOLDEN_FILES += rv32i-spec rv32i-run
 endif
 
 # Bound each test run so a mis-fused interpreter that loops forever fails the
@@ -389,6 +387,25 @@ golden-see: $(BIN) tests/expected/see.out ## Check the address-normalized `see` 
 	fi
 	$(Q)$(PRINTF) "golden-see: normalized decompiler output "; $(call notice, [OK])
 
+# Keystrokes for the pty editor tests: go to block 5, blank it, arrow-down one
+# row (this is the only path that drives the normal-mode ESC/arrow timed-peek --
+# EDIT_PEEK + the poll() in get() + varrow's CSI decode), insert text, repaint.
+# Shared by golden-pty and the sanitize pty run. A lone python3 guard on its own
+# recipe line only exits that line's subshell, so the whole target is one shell.
+EDITOR_KEYS := editor\r:5\r:z\033[BiHELLO ED\033:5\r
+
+golden-pty: $(BIN) tests/expected/editor-pty.out ## PTY-driven modal editor screen golden.
+	$(Q)if ! command -v python3 >/dev/null 2>&1; then \
+	    $(PRINTF) "golden-pty: python3 absent, skipping\n"; \
+	else \
+	    printf '$(EDITOR_KEYS)' | python3 scripts/pty-run.py ./$(BIN) > $(TMPDIR)/editor-pty.out; rc=$$?; \
+	    if [ $$rc -eq 77 ]; then $(PRINTF) "golden-pty: no pty available, skipping\n"; \
+	    elif [ $$rc -ne 0 ]; then echo "golden-pty: harness failed (rc=$$rc)"; exit 1; \
+	    elif cmp -s tests/expected/editor-pty.out $(TMPDIR)/editor-pty.out; then \
+	        $(PRINTF) "golden-pty: modal editor screen "; $(call notice, [OK]); \
+	    else echo "golden-pty: modal editor screen drift (see scripts/pty-run.py)"; exit 1; fi; \
+	fi
+
 golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mandelbrot prefix.
 	$(Q)test -n "$(TIMEOUT)" || { echo "golden-mandel: timeout(1)/gtimeout required"; exit 1; }
 	$(Q)command -v stdbuf >/dev/null 2>&1 || { echo "golden-mandel: stdbuf required for killed-run stdout"; exit 1; }
@@ -403,7 +420,7 @@ golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mand
 # proof. rvopt runs before the slow bootstrap so an optimizer regression fails fast.
 # verify-rvopt-gate is the rvopt differential; it uses the "-r" ELF loader as its
 # oracle, which ENABLE_RV32I=0 compiles out, so drop it when RV32I is disabled.
-check: budget golden golden-see $(if $(filter 1,$(ENABLE_RV32I)),verify-rvopt-gate) bootstrap ## Run the fast pre-commit gate.
+check: budget golden golden-see golden-pty $(if $(filter 1,$(ENABLE_RV32I)),verify-rvopt-gate) bootstrap ## Run the fast pre-commit gate.
 
 # Self-host ceiling guard. The image + its re-assembled copy + the metacompiler dictionary must all
 # fit 32768 cells (empirical hard ceiling ~12888, where bootstrap starts to fail). Fail loudly HERE if
@@ -504,11 +521,11 @@ SANFLAGS := -O2 -std=c99 -fsanitize=address,undefined -fno-sanitize-recover=all 
 SAN_RUN = ASAN_OPTIONS=detect_leaks=0 $(TIMEOUT) $(if $(TIMEOUT),120) $(TMPDIR)/muxleq.san
 # A curated set, not the whole golden suite: every test shares the same C interpreter, so running all
 # 47 (~7 min under sanitizers) is redundant. These exercise the DISTINCT C paths -- chacha20 the heavy
-# peek-ahead fusion, sieve array/loop memory, editor the block buffer, tasker the multitasker switch,
+# peek-ahead fusion, sieve array/loop memory, tasker the multitasker switch,
 # collatz recursion, eforth-does the self-modifying code field, eof the EOF-halt (vs the bye/negative-
 # branch halt in the rest), rv32i-run the RV32I microcode + guest LB/SB + ecall -- plus the -r loader
 # and guest execution via the RVELF paths below.
-SANITIZE_FILES := chacha20 sieve editor tasker collatz eforth-does eof rv32i-run
+SANITIZE_FILES := chacha20 sieve tasker collatz eforth-does eof rv32i-run
 # sanitize exercises -r, the rv32i-run microcode, and the rvopt differential
 # (the last drives the normal $(BIN), which is a stub under ENABLE_RV32I=0), so
 # the suite only makes sense with RV32I enabled. Refuse other modes with a clear
@@ -516,6 +533,15 @@ SANITIZE_FILES := chacha20 sieve editor tasker collatz eforth-does eof rv32i-run
 sanitize: $(STAGE0_C) $(RV32I_TRACE_INC) $(BIN) $(RVOPT) $(if $(HAVE_RVCC),rvelf) tests/loader-bad-token.dec tests/loader-out-of-range.dec tests/loader-bad-operand.dec tests/loader-bad-fused-operand.dec ## Run ASan/UBSan validation.
 	$(Q)[ "$(ENABLE_RV32I)" = 1 ] || { echo "make sanitize requires ENABLE_RV32I=1 (it exercises -r and the RV32I paths)"; exit 1; }
 	$(Q)$(MUXLEQ_CC) $(SANFLAGS) $(RV32I_DEFS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
+	$(Q)$(PRINTF) "sanitize editor (pty) ... "; \
+	    if ! command -v python3 >/dev/null 2>&1; then $(PRINTF) "[SKIP: no python3]\n"; \
+	    else \
+	        printf '$(EDITOR_KEYS)' | PTY_RUN_STDERR=1 ASAN_OPTIONS=detect_leaks=0 \
+	            python3 scripts/pty-run.py $(TMPDIR)/muxleq.san >/dev/null 2>$(TMPDIR)/san.err; rc=$$?; \
+	        if [ $$rc -eq 77 ]; then $(call notice, [SKIP: no pty]); \
+	        elif [ $$rc -eq 0 ]; then $(call notice, [OK]); \
+	        else $(PRINTF) "SANITIZER ERROR or harness failure\n"; cat $(TMPDIR)/san.err; exit 1; fi; \
+	    fi
 	$(Q)$(foreach t,$(SANITIZE_FILES),\
 	    $(PRINTF) "sanitize $(t) ... "; \
 	    if $(SAN_RUN) < tests/$(t).fth >/dev/null 2>$(TMPDIR)/san.err; \
