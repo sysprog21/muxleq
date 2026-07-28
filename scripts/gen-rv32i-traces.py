@@ -20,7 +20,6 @@ VALUE = 11
 LIMIT = 12
 CURSOR = 38
 COND = 39
-ALT_ADDR = 309
 
 
 def u16(n):
@@ -99,6 +98,45 @@ def find_trace(m, start, span, checks):
     )
 
 
+def find_pair_update(m, start, computed_dest, loader):
+    for pc in range(start, len(m) - 20):
+        alt_addr = at(m, pc, 1)
+        # alt_addr is emitted as a cell and used to index m[] at runtime; a
+        # drifted match holding a flag cell (>= MEM_SIZE) would index OOB.
+        if alt_addr >= MEM_SIZE:
+            continue
+        checks = [
+            (0, DEC),
+            (2, pc + 3),
+            (3, alt_addr),
+            (4, pc + 7),
+            (5, RV32I_MOVE_C),
+            (6, COND),
+            (7, ZERO),
+            (8, RV32I_MOVE_C),
+            (9, computed_dest),
+            (10, pc + 12),
+            (11, RV32I_MOVE_C),
+            (12, ZERO),
+            (13, COND),
+            (14, RV32I_MOVE_C),
+            (15, DEC),
+            (16, computed_dest),
+            (17, pc + 18),
+            (18, ZERO),
+            (19, ZERO),
+            (20, loader),
+        ]
+        if all(at(m, pc, o) == u16(v) for o, v in checks):
+            return pc, alt_addr
+    raise SystemExit(
+        "gen-rv32i-traces: pair-update trace not found in stage0.dec -- "
+        "muxleq.fth codegen likely changed the RV32I hot trace shape. Update "
+        "the patterns here, or build with ENABLE_RV32I=0 to skip the "
+        "superinstructions."
+    )
+
+
 def main(argv):
     if len(argv) != 4:
         raise SystemExit("usage: gen-rv32i-traces.py stage0.dec template output")
@@ -107,34 +145,7 @@ def main(argv):
     taken = at(m, loader, 17)
     computed_dest = at(m, taken, 1)
 
-    pair = find_trace(
-        m,
-        taken + 15,
-        20,
-        [
-            (0, lambda pc: DEC),
-            (1, lambda pc: ALT_ADDR),
-            (2, lambda pc: pc + 3),
-            (3, lambda pc: ALT_ADDR),
-            (4, lambda pc: pc + 7),
-            (5, lambda pc: RV32I_MOVE_C),
-            (6, lambda pc: COND),
-            (7, lambda pc: ZERO),
-            (8, lambda pc: RV32I_MOVE_C),
-            (9, lambda pc: computed_dest),
-            (10, lambda pc: pc + 12),
-            (11, lambda pc: RV32I_MOVE_C),
-            (12, lambda pc: ZERO),
-            (13, lambda pc: COND),
-            (14, lambda pc: RV32I_MOVE_C),
-            (15, lambda pc: DEC),
-            (16, lambda pc: computed_dest),
-            (17, lambda pc: pc + 18),
-            (18, lambda pc: ZERO),
-            (19, lambda pc: ZERO),
-            (20, lambda pc: loader),
-        ],
-    )
+    pair, alt_addr = find_pair_update(m, taken + 15, computed_dest, loader)
     reload = find_trace(
         m,
         pair + 21,
@@ -189,6 +200,7 @@ def main(argv):
         "loop_exit_operand": loader + 23,
         "patched_move_dest_operand": taken + 7,
         "computed_dest_cell": computed_dest,
+        "alt_addr_cell": alt_addr,
         "pair_update_loop": pair,
         "pair_update_loop_end": pair + 20,
         "altaddr_move_dest_operand": pair + 7,
