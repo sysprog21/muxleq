@@ -18,7 +18,6 @@ enum {
     RV32I_TRACE_TMP = 13,
     RV32I_TRACE_CURSOR = 38,
     RV32I_TRACE_COND = 39,
-    RV32I_TRACE_ALT_ADDR = 309,
 };
 
 struct rv32i_hot_trace {
@@ -26,6 +25,7 @@ struct rv32i_hot_trace {
     uint16_t taken_trace, taken_trace_end, taken_trace_fallthrough;
     uint16_t patched_move, indirect_load_operand, loop_exit_operand;
     uint16_t patched_move_dest_operand, computed_dest_cell;
+    uint16_t alt_addr_cell;
     uint16_t pair_update_loop, pair_update_loop_end;
     uint16_t altaddr_move_dest_operand, cond_restore_src_operand;
     uint16_t cursor_reload_trace, cursor_reload_trace_end;
@@ -130,8 +130,8 @@ static VM_ABI int rv32i_trace_pair_update(UNUSED uint16_t pc,
                                           UNUSED uint16_t addr_b,
                                           UNUSED uint16_t addr_c)
 {
-    EXEC_RAW_SUBLEQ_DROP(RV32I_TRACE_DEC, RV32I_TRACE_ALT_ADDR);
-    EXEC_RAW_MOVE(RV32I_TRACE_ALT_ADDR,
+    EXEC_RAW_SUBLEQ_DROP(RV32I_TRACE_DEC, rv32i_hot_layout.alt_addr_cell);
+    EXEC_RAW_MOVE(rv32i_hot_layout.alt_addr_cell,
                   rv32i_hot_layout.altaddr_move_dest_operand);
 
     const uint16_t patched_dest = m[rv32i_hot_layout.altaddr_move_dest_operand];
@@ -232,7 +232,7 @@ static VM_ABI int rv32i_trace_condition_fold(UNUSED uint16_t pc,
                                                (addr_c));                      \
         if (UNLIKELY((pc) == rv32i_hot_layout.pair_update_loop &&              \
                      (addr_a) == RV32I_TRACE_DEC &&                            \
-                     (addr_b) == RV32I_TRACE_ALT_ADDR &&                       \
+                     (addr_b) == rv32i_hot_layout.alt_addr_cell &&             \
                      (addr_c) ==                                               \
                          rv32i_hot_layout.pair_update_loop + INSN_SIZE))       \
             MUST_TAIL return rv32i_trace_pair_update((pc), (addr_a), (addr_b), \

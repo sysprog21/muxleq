@@ -8,6 +8,7 @@ static const struct rv32i_hot_trace rv32i_hot_layout = {
     .loop_exit_operand = ${loop_exit_operand},
     .patched_move_dest_operand = ${patched_move_dest_operand},
     .computed_dest_cell = ${computed_dest_cell},
+    .alt_addr_cell = ${alt_addr_cell},
     .pair_update_loop = ${pair_update_loop},
     .pair_update_loop_end = ${pair_update_loop_end},
     .altaddr_move_dest_operand = ${altaddr_move_dest_operand},
