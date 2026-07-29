@@ -197,7 +197,10 @@ If `build/stage0.dec` and `build/stage1.dec` are byte-for-byte identical, the
 bootstrap succeeds.
 
 ## License
-This project is released into the Public Domain.
+`MUXLEQ` is available under a permissive
+[MIT](https://opensource.org/license/mit)-style license.
+Use of this source code is governed by a MIT license that can be found
+in the [LICENSE](LICENSE) file. 
 It was originally written by [Richard James Howe](https://github.com/howerj).
 
 ## Reference
