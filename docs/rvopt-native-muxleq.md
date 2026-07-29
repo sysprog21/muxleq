@@ -27,11 +27,13 @@ Op coverage is COMPLETE for the rv32ui base set (ADD/SUB/SLT[U]/AND/OR/XOR + imm
 LUI/AUIPC, all branches, JAL, computed/linking JALR, LB/LH/LHU/LW/SB/SH/SW, ecall write/exit).
 
 Optimizations landed, each byte-identical vs `-r` and measured: the MUX-MAJ dispatch collapse
-(add/sub carry, ltu16 compare, bit15 test -- the big `-s` wins, crc16 -35% / fibonacci -32% vs the naive
-v0), SW high-byte/address-share, a const-OPIMM + mv-copy constant folder, and store-to-load forwarding
-(redundant same-block reloads → register copies; unopt -7.7%). def-use lists are built (shown in `-dump`)
-for later passes; the current folder and forwarding use their own cprop / memory-chain walks, not the
-def-use arrays. Self-modifying guest code is DETECTED and cleanly REJECTED (the constant-target case);
+(16-bit add/sub carry, ltu16 compare, bit15 test -- the big `-s` wins, crc16 -35% / fibonacci -32% vs the
+naive v0), SW high-byte/address-share, const-OPIMM + mv-copy folding, same-block store-to-load forwarding,
+and simple-loop register promotion. The shared folder/forwarding/promotion analyses now feed both `-mux`
+and `-mux32`; `-mux32` does not need the 16-bit MUX-MAJ carry/vote pass because each RV32I register is one
+32-bit cell. def-use lists are built (shown in `-dump`) for later passes; the current folder and forwarding
+use their own cprop / memory-chain walks, not the def-use arrays. Self-modifying guest code is DETECTED and
+cleanly REJECTED (the constant-target case);
 running SMC (hybrid deopt) is deferred until a real SMC program appears.
 
 Compliance (`make verify-riscv-tests`): the 16-bit `-mux`/`-x` path is 39/40 rv32ui -- its one skip is

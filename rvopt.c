@@ -581,6 +581,12 @@ static int check_ir(const char *path)
  */
 static bool g_sizing = false;
 
+/* 16-bit-cell opcodes (mirror MOVE32/IOMARK32 below). MOVE16 is a MUX with
+ * mask-address 6 (hardwired 0); IOMARK16 (0xFFFF) is the I/O / halt marker.
+ */
+#define MOVE16 32774   /* 0x8006 = (1 << 15) | 6 */
+#define IOMARK16 65535 /* 0xFFFF */
+
 /* Emit one MUXLEQ instruction (3 cells) and advance the native cell position.
  */
 static void emit_i(int *p, int a, int b, int c)
@@ -606,14 +612,14 @@ static void emit_i32(int *p, long long a, long long b, long long c)
     *p += 3;
 }
 
-/* SLE0(a,b,L): T := a (MOVE, mask 32774=0x8006); T -= b (SUBLEQ); branch to L
+/* SLE0(a,b,L): T := a (MOVE, mask MOVE16=0x8006); T -= b (SUBLEQ); branch to L
  * when the 16-bit result a-b is SIGNED <= 0 (the VM's branch test is result==0
  * || bit15, i.e. signed<=0 -- NOT unsigned<=; see the macro-design note).
  * 2 instructions.
  */
 static void emit_sle0(int *p, int a, int b, int L, int T)
 {
-    emit_i(p, a, T, 32774);
+    emit_i(p, a, T, MOVE16);
     emit_i(p, b, T, L);
 }
 
@@ -686,7 +692,7 @@ static void emit_bit15c_bt(int *p, int L, const struct mlayout *m)
 /* BIT15C(x,L): the tail above with x first MOVEd into BT. 4 instructions. */
 static void emit_bit15c(int *p, int x, int L, const struct mlayout *m)
 {
-    emit_i(p, x, m->bt, 32774); /* BT = x (MOVE) */
+    emit_i(p, x, m->bt, MOVE16); /* BT = x (MOVE) */
     emit_bit15c_bt(p, L, m);
 }
 
@@ -702,11 +708,11 @@ static void emit_ltu16(int *p, int a, int b, int L, const struct mlayout *m)
      * pairs), replacing the three bit15 votes. T0 = b|d, BT = b&d, then BT
      * bit15 = (a<u b), tested in place.
      */
-    emit_i(p, a, m->d, 32774);             /* D = a */
+    emit_i(p, a, m->d, MOVE16);            /* D = a */
     emit_i(p, b, m->d, *p + 3);            /* D = a - b = diff */
-    emit_i(p, b, m->t0, 32774);            /* T0 = b */
+    emit_i(p, b, m->t0, MOVE16);           /* T0 = b */
     emit_i(p, m->d, m->t0, 0x8000 | b);    /* T0 = (d & ~b) | b = b | d */
-    emit_i(p, b, m->bt, 32774);            /* BT = b */
+    emit_i(p, b, m->bt, MOVE16);           /* BT = b */
     emit_i(p, m->z, m->bt, 0x8000 | m->d); /* BT = b & d */
     emit_i(p, m->t0, m->bt, 0x8000 | a);   /* BT bit15 = (a <u b) */
     emit_bit15c_bt(p, *p + 9 + 3, m); /* bit15 clear (not less) -> skip JMP */
@@ -728,7 +734,7 @@ static int ltu16_cells(const struct mlayout *m)
 }
 
 /* MOVE the current 2-cell immediate constant into register rd's lo/hi pair (c =
- * 32774 = 0x8006, a mask-6 copy) and advance the immediate-pair index. Shared
+ * MOVE16 = 0x8006, a mask-6 copy) and advance the immediate-pair index. Shared
  * by a li and by a JAL-with-link's return address.
  */
 static void emit_imm_to_reg(int *p,
@@ -737,8 +743,8 @@ static void emit_imm_to_reg(int *p,
                             int rd,
                             int *imm)
 {
-    emit_i(p, imm_base + 2 * *imm, reg_base + 2 * rd, 32774);
-    emit_i(p, imm_base + 2 * *imm + 1, reg_base + 2 * rd + 1, 32774);
+    emit_i(p, imm_base + 2 * *imm, reg_base + 2 * rd, MOVE16);
+    emit_i(p, imm_base + 2 * *imm + 1, reg_base + 2 * rd + 1, MOVE16);
     (*imm)++;
 }
 
@@ -788,15 +794,15 @@ static void emit_bitwise_half(int *p,
 {
     switch (f3) {
     case 7: /* AND: out = a; out = (Z & ~b) | (out & b) = a & b */
-        emit_i(p, a, out, 32774);
+        emit_i(p, a, out, MOVE16);
         emit_i(p, m->z, out, 0x8000 | b);
         return;
     case 6: /* OR: out = b; out = (a & ~b) | (out & b) = (a&~b) | b = a|b */
-        emit_i(p, b, out, 32774);
+        emit_i(p, b, out, MOVE16);
         emit_i(p, a, out, 0x8000 | b);
         return;
     case 4: /* XOR: out = ~a; out = (a & ~b) | (out & b) = (a&~b)|(~a&b) */
-        emit_i(p, m->neg1, out, 32774);
+        emit_i(p, m->neg1, out, MOVE16);
         emit_i(p, a, out, *p + 3); /* out = ONES - a = ~a (falls through) */
         emit_i(p, a, out, 0x8000 | b);
         return;
@@ -818,16 +824,16 @@ static void emit_bitwise(int *p,
 {
     emit_bitwise_half(p, f3, m->ol, a_lo, b_lo, m);
     emit_bitwise_half(p, f3, m->oh, a_hi, b_hi, m);
-    emit_i(p, m->ol, rlo, 32774);
-    emit_i(p, m->oh, rhi, 32774);
+    emit_i(p, m->ol, rlo, MOVE16);
+    emit_i(p, m->oh, rhi, MOVE16);
 }
 
 /* 16-bit 'dst += src': T = -src (Z - src), then dst -= T. D is the temp. */
 static void emit_add16(int *p, int dst, int src, const struct mlayout *m)
 {
-    emit_i(p, m->z, m->d, 32774); /* T = 0 */
-    emit_i(p, src, m->d, *p + 3); /* T = -src (falls through) */
-    emit_i(p, m->d, dst, *p + 3); /* dst -= T => dst += src */
+    emit_i(p, m->z, m->d, MOVE16); /* T = 0 */
+    emit_i(p, src, m->d, *p + 3);  /* T = -src (falls through) */
+    emit_i(p, m->d, dst, *p + 3);  /* dst -= T => dst += src */
 }
 
 /* Materialize a compile-time 32-bit constant into rd (lo,hi) with NO immediate-
@@ -841,7 +847,7 @@ static void emit_const16(int *p,
                          uint32_t bits,
                          const struct mlayout *m)
 {
-    emit_i(p, m->z, rdst, 32774); /* rdst = 0 */
+    emit_i(p, m->z, rdst, MOVE16); /* rdst = 0 */
     for (int b = 0; b < 16; b++)
         if ((bits >> b) & 1)
             emit_add16(p, rdst, m->mask_base + b, m); /* rdst += 2^b */
@@ -869,24 +875,24 @@ static void emit_add32(int *p,
                        int b_hi,
                        const struct mlayout *m)
 {
-    emit_i(p, a_lo, m->ol, 32774); /* OL = a_lo */
-    emit_add16(p, m->ol, b_lo, m); /* OL += b_lo */
-    emit_i(p, a_hi, m->oh, 32774); /* OH = a_hi */
-    emit_add16(p, m->oh, b_hi, m); /* OH += b_hi */
+    emit_i(p, a_lo, m->ol, MOVE16); /* OL = a_lo */
+    emit_add16(p, m->ol, b_lo, m);  /* OL += b_lo */
+    emit_i(p, a_hi, m->oh, MOVE16); /* OH = a_hi */
+    emit_add16(p, m->oh, b_hi, m);  /* OH += b_hi */
     /* carry-out = bit15(MUX(a|b, a&b, sum)): the top-bit carry MAJ folds into
      * one MUX, replacing three bit15 votes. Verified exhaustively vs the true
      * carry (RV32I oracle + 'make fuzz-rvopt'). D = a|b, BT = a&b, then BT =
      * (a|b & ~sum) | (a&b & sum) whose bit15 is the carry-out, tested in place.
      */
-    emit_i(p, b_lo, m->d, 32774);           /* D = b_lo */
+    emit_i(p, b_lo, m->d, MOVE16);          /* D = b_lo */
     emit_i(p, a_lo, m->d, 0x8000 | b_lo);   /* D = (a & ~b) | b = a | b */
-    emit_i(p, a_lo, m->bt, 32774);          /* BT = a_lo */
+    emit_i(p, a_lo, m->bt, MOVE16);         /* BT = a_lo */
     emit_i(p, m->z, m->bt, 0x8000 | b_lo);  /* BT = a & b */
     emit_i(p, m->d, m->bt, 0x8000 | m->ol); /* BT bit15 = carry-out */
     emit_bit15c_bt(p, *p + 9 + 3, m);  /* bit15 clear (no carry) -> skip INC */
     emit_i(p, m->neg1, m->oh, *p + 3); /* INC(OH): carry into hi */
-    emit_i(p, m->ol, rlo, 32774);      /* rd.lo = OL */
-    emit_i(p, m->oh, rhi, 32774);      /* rd.hi = OH */
+    emit_i(p, m->ol, rlo, MOVE16);     /* rd.lo = OL */
+    emit_i(p, m->oh, rhi, MOVE16);     /* rd.hi = OH */
 }
 
 /* rd = rs1 - rs2 (32-bit). lo sub, then borrow = MAJ(!bit15 a_lo, bit15 b_lo,
@@ -901,24 +907,24 @@ static void emit_sub32(int *p,
                        int b_hi,
                        const struct mlayout *m)
 {
-    emit_i(p, a_lo, m->ol, 32774);  /* OL = a_lo */
+    emit_i(p, a_lo, m->ol, MOVE16); /* OL = a_lo */
     emit_i(p, b_lo, m->ol, *p + 3); /* OL -= b_lo (falls through) */
-    emit_i(p, a_hi, m->oh, 32774);  /* OH = a_hi */
+    emit_i(p, a_hi, m->oh, MOVE16); /* OH = a_hi */
     emit_i(p, b_hi, m->oh, *p + 3); /* OH -= b_hi */
     /* borrow-out = bit15(MUX(b|d, b&d, a)), d = a-b: same one-MUX top-bit MAJ
      * as add's carry (verified vs the RV32I oracle + fuzz). D = b|d, BT = b&d,
      * then BT = (b|d & ~a) | (b&d & a) whose bit15 is the borrow, tested in
      * place.
      */
-    emit_i(p, b_lo, m->d, 32774);           /* D = b_lo */
+    emit_i(p, b_lo, m->d, MOVE16);          /* D = b_lo */
     emit_i(p, m->ol, m->d, 0x8000 | b_lo);  /* D = (d & ~b) | b = b | d */
-    emit_i(p, b_lo, m->bt, 32774);          /* BT = b_lo */
+    emit_i(p, b_lo, m->bt, MOVE16);         /* BT = b_lo */
     emit_i(p, m->z, m->bt, 0x8000 | m->ol); /* BT = b & d */
     emit_i(p, m->d, m->bt, 0x8000 | a_lo);  /* BT bit15 = borrow-out */
     emit_bit15c_bt(p, *p + 9 + 3, m); /* bit15 clear (no borrow) -> skip DEC */
     emit_i(p, m->one, m->oh, *p + 3); /* DEC(OH): borrow from hi */
-    emit_i(p, m->ol, rlo, 32774);     /* rd.lo = OL */
-    emit_i(p, m->oh, rhi, 32774);     /* rd.hi = OH */
+    emit_i(p, m->ol, rlo, MOVE16);    /* rd.lo = OL */
+    emit_i(p, m->oh, rhi, MOVE16);    /* rd.hi = OH */
 }
 
 /* Shared tail of SLT/SLTU: given three LTU16 compares already sized, branch the
@@ -940,11 +946,11 @@ static void emit_setless(int *p,
     emit_ltu16(p, hi_a, hi_b, less, m); /* hi<hi -> less */
     emit_ltu16(p, hi_b, hi_a, ge, m);   /* hi>hi -> not less */
     emit_ltu16(p, lo_a, lo_b, less, m); /* hi==hi, lo<lo -> less */
-    emit_i(p, m->z, rlo, 32774);        /* GE: rd = 0 */
-    emit_i(p, m->z, rhi, 32774);
-    emit_i(p, m->z, m->z, done);   /* JMP done */
-    emit_i(p, m->one, rlo, 32774); /* LESS: rd = 1 */
-    emit_i(p, m->z, rhi, 32774);
+    emit_i(p, m->z, rlo, MOVE16);       /* GE: rd = 0 */
+    emit_i(p, m->z, rhi, MOVE16);
+    emit_i(p, m->z, m->z, done);    /* JMP done */
+    emit_i(p, m->one, rlo, MOVE16); /* LESS: rd = 1 */
+    emit_i(p, m->z, rhi, MOVE16);
 }
 
 /* SLTU rd = (rs1 <u rs2) ? 1 : 0. rd is written only after all compares read
@@ -974,9 +980,9 @@ static void emit_slt(int *p,
                      int b_hi,
                      const struct mlayout *m)
 {
-    emit_i(p, a_hi, m->sh1, 32774); /* SH1 = rs1.hi ^ 0x8000 */
+    emit_i(p, a_hi, m->sh1, MOVE16); /* SH1 = rs1.hi ^ 0x8000 */
     emit_i(p, m->sgn, m->sh1, *p + 3);
-    emit_i(p, b_hi, m->sh2, 32774); /* SH2 = rs2.hi ^ 0x8000 */
+    emit_i(p, b_hi, m->sh2, MOVE16); /* SH2 = rs2.hi ^ 0x8000 */
     emit_i(p, m->sgn, m->sh2, *p + 3);
     emit_setless(p, rlo, rhi, m->sh1, m->sh2, a_lo, b_lo, m);
 }
@@ -987,7 +993,7 @@ static void emit_slt(int *p,
  */
 static void emit_shl1(int *p, int ol, int oh, const struct mlayout *m)
 {
-    emit_i(p, m->z, m->t0, 32774);     /* CF = 0 */
+    emit_i(p, m->z, m->t0, MOVE16);    /* CF = 0 */
     emit_bit15c(p, ol, *p + 15, m);    /* bit15(lo) clear -> skip the INC */
     emit_i(p, m->neg1, m->t0, *p + 3); /* set: CF = 1 (carry out of lo) */
     emit_add16(p, ol, ol, m);          /* lo <<= 1 */
@@ -1019,12 +1025,12 @@ static void emit_slli(int *p,
                       int k,
                       const struct mlayout *m)
 {
-    emit_i(p, a_lo, m->ol, 32774); /* OL = rs1.lo */
-    emit_i(p, a_hi, m->oh, 32774); /* OH = rs1.hi */
+    emit_i(p, a_lo, m->ol, MOVE16); /* OL = rs1.lo */
+    emit_i(p, a_hi, m->oh, MOVE16); /* OH = rs1.hi */
     for (int i = 0; i < k; i++)
         emit_shl1(p, m->ol, m->oh, m);
-    emit_i(p, m->ol, rlo, 32774); /* rd.lo = OL */
-    emit_i(p, m->oh, rhi, 32774); /* rd.hi = OH */
+    emit_i(p, m->ol, rlo, MOVE16); /* rd.lo = OL */
+    emit_i(p, m->oh, rhi, MOVE16); /* rd.hi = OH */
 }
 
 /* Test bit 'sb' of cell 'src' and, if set, OR power-of-two 2^db into cell 'dst'
@@ -1044,7 +1050,7 @@ static void emit_copybit(int *p,
         emit_add16(p, dst, m->mask_base + db, m);
         return;
     }
-    emit_i(p, src, m->bt, 32774);                         /* BT = src */
+    emit_i(p, src, m->bt, MOVE16);                        /* BT = src */
     emit_i(p, m->z, m->bt, 0x8000 | (m->mask_base + sb)); /* BT &= 2^sb */
     emit_i(p, m->z, m->bt, *p + 12);          /* BT<=0 (clear) -> skip add */
     emit_add16(p, dst, m->mask_base + db, m); /* set: dst |= 2^db */
@@ -1057,7 +1063,7 @@ static void emit_copybit(int *p,
  */
 static void emit_high_byte(int *p, int dst, int src, const struct mlayout *m)
 {
-    emit_i(p, m->z, dst, 32774); /* dst = 0 */
+    emit_i(p, m->z, dst, MOVE16); /* dst = 0 */
     for (int b = 0; b < 8; b++)
         emit_copybit(p, src, 8 + b, dst, b, m); /* dst bit b = src bit 8+b */
 }
@@ -1077,12 +1083,12 @@ static void emit_shift_right(int *p,
                              const struct mlayout *m)
 {
     if (k == 0) {
-        emit_i(p, a_lo, rlo, 32774);
-        emit_i(p, a_hi, rhi, 32774);
+        emit_i(p, a_lo, rlo, MOVE16);
+        emit_i(p, a_hi, rhi, MOVE16);
         return;
     }
-    emit_i(p, m->z, m->ol, 32774); /* dest = 0 */
-    emit_i(p, m->z, m->oh, 32774);
+    emit_i(p, m->z, m->ol, MOVE16); /* dest = 0 */
+    emit_i(p, m->z, m->oh, MOVE16);
     const int dmax = arith ? 31 : 31 - k;
     for (int d = 0; d <= dmax; d++) {
         int sbit = d + k;
@@ -1092,8 +1098,8 @@ static void emit_shift_right(int *p,
         const int dst = d < 16 ? m->ol : m->oh;
         emit_copybit(p, src, sbit & 15, dst, d & 15, m);
     }
-    emit_i(p, m->ol, rlo, 32774); /* rd.lo = OL */
-    emit_i(p, m->oh, rhi, 32774); /* rd.hi = OH */
+    emit_i(p, m->ol, rlo, MOVE16); /* rd.lo = OL */
+    emit_i(p, m->oh, rhi, MOVE16); /* rd.hi = OH */
 }
 
 /* One 32-bit right shift by 1 of the (lo,hi) pair OL/OH. No native shift, so
@@ -1109,8 +1115,8 @@ static void emit_shr1(int *p,
                       bool arith,
                       const struct mlayout *m)
 {
-    emit_i(p, m->z, m->sh1, 32774); /* new lo = 0 */
-    emit_i(p, m->z, m->sh2, 32774); /* new hi = 0 */
+    emit_i(p, m->z, m->sh1, MOVE16); /* new lo = 0 */
+    emit_i(p, m->z, m->sh2, MOVE16); /* new hi = 0 */
     for (int b = 0; b < 15; b++)
         emit_copybit(p, ol, b + 1, m->sh1, b,
                      m);                   /* lo bit b = old lo bit b+1 */
@@ -1120,9 +1126,9 @@ static void emit_shr1(int *p,
                      m); /* hi bit b = old hi bit b+1 */
     if (arith)
         emit_copybit(p, oh, 15, m->sh2, 15,
-                     m);          /* arith: hi bit 15 = old sign */
-    emit_i(p, m->sh1, ol, 32774); /* lo = new lo */
-    emit_i(p, m->sh2, oh, 32774); /* hi = new hi */
+                     m);           /* arith: hi bit 15 = old sign */
+    emit_i(p, m->sh1, ol, MOVE16); /* lo = new lo */
+    emit_i(p, m->sh2, oh, MOVE16); /* hi = new hi */
 }
 
 /* Cell count of one emit_shr1 (the arith flag adds a copybit, so it is a
@@ -1150,18 +1156,18 @@ static void emit_sll(int *p,
                      int rs2_lo,
                      const struct mlayout *m)
 {
-    emit_i(p, rs2_lo, m->v, 32774);         /* CNT = rs2.lo */
+    emit_i(p, rs2_lo, m->v, MOVE16);        /* CNT = rs2.lo */
     emit_i(p, m->z, m->v, 0x8000 | m->m1f); /* CNT &= 0x1F */
-    emit_i(p, a_lo, m->ol, 32774);          /* acc = rs1 */
-    emit_i(p, a_hi, m->oh, 32774);
+    emit_i(p, a_lo, m->ol, MOVE16);         /* acc = rs1 */
+    emit_i(p, a_hi, m->oh, MOVE16);
     const int loop = *p;
     const int done = loop + 3 + shl1_cells(m) + 3 + 3; /* test+body+DEC+JMP */
     emit_i(p, m->z, m->v, done);                       /* CNT==0 -> done */
     emit_shl1(p, m->ol, m->oh, m);                     /* acc <<= 1 */
     emit_i(p, m->one, m->v, *p + 3); /* CNT -= 1 (non-branching) */
     emit_i(p, m->z, m->z, loop);     /* back to the test */
-    emit_i(p, m->ol, rlo, 32774);    /* rd.lo = acc.lo */
-    emit_i(p, m->oh, rhi, 32774);    /* rd.hi = acc.hi */
+    emit_i(p, m->ol, rlo, MOVE16);   /* rd.lo = acc.lo */
+    emit_i(p, m->oh, rhi, MOVE16);   /* rd.hi = acc.hi */
 }
 
 /* SRL/SRA rd = rs1 >> (rs2 & 31), logical or arithmetic: the right-shift analog
@@ -1177,10 +1183,10 @@ static void emit_srl(int *p,
                      bool arith,
                      const struct mlayout *m)
 {
-    emit_i(p, rs2_lo, m->v, 32774);         /* CNT = rs2.lo */
+    emit_i(p, rs2_lo, m->v, MOVE16);        /* CNT = rs2.lo */
     emit_i(p, m->z, m->v, 0x8000 | m->m1f); /* CNT &= 0x1F */
-    emit_i(p, a_lo, m->ol, 32774);          /* acc = rs1 */
-    emit_i(p, a_hi, m->oh, 32774);
+    emit_i(p, a_lo, m->ol, MOVE16);         /* acc = rs1 */
+    emit_i(p, a_hi, m->oh, MOVE16);
     const int loop = *p;
     const int done =
         loop + 3 + shr1_cells(arith, m) + 3 + 3; /* test+body+DEC+JMP */
@@ -1188,8 +1194,8 @@ static void emit_srl(int *p,
     emit_shr1(p, m->ol, m->oh, arith, m);        /* acc >>= 1 */
     emit_i(p, m->one, m->v, *p + 3);             /* CNT -= 1 (non-branching) */
     emit_i(p, m->z, m->z, loop);                 /* back to the test */
-    emit_i(p, m->ol, rlo, 32774);                /* rd.lo = acc.lo */
-    emit_i(p, m->oh, rhi, 32774);                /* rd.hi = acc.hi */
+    emit_i(p, m->ol, rlo, MOVE16);               /* rd.lo = acc.lo */
+    emit_i(p, m->oh, rhi, MOVE16);               /* rd.hi = acc.hi */
 }
 
 /* Guest RAM is a power-of-two window of one cell per guest byte at ram_base; a
@@ -1208,7 +1214,7 @@ static void emit_addr(int *p,
                       int k,
                       const struct mlayout *m)
 {
-    emit_i(p, rs1_lo, m->ol, 32774);   /* OL = rs1.lo */
+    emit_i(p, rs1_lo, m->ol, MOVE16);  /* OL = rs1.lo */
     emit_add16(p, m->ol, imm_cell, m); /* OL += imm (guest address) */
     for (int j = 0; j < k; j++)
         emit_add16(p, m->ol, m->one, m); /* OL += k (the k-th byte) */
@@ -1227,9 +1233,9 @@ static void emit_load_cell(int *p,
                            const struct mlayout *m)
 {
     emit_addr(p, rs1_lo, imm_cell, k, m);
-    const int mi = *p + 3;       /* the load MOVE lands here */
-    emit_i(p, m->ol, mi, 32774); /* patch its source operand := OL */
-    emit_i(p, 0, dst, 32774);    /* MOVE [addr] -> dst (source patched) */
+    const int mi = *p + 3;        /* the load MOVE lands here */
+    emit_i(p, m->ol, mi, MOVE16); /* patch its source operand := OL */
+    emit_i(p, 0, dst, MOVE16);    /* MOVE [addr] -> dst (source patched) */
 }
 
 /* Load the guest cell whose native address is already in OL into dst: patch the
@@ -1237,9 +1243,9 @@ static void emit_load_cell(int *p,
  */
 static void emit_load_at(int *p, int dst, const struct mlayout *m)
 {
-    const int mi = *p + 3;       /* the load MOVE lands here */
-    emit_i(p, m->ol, mi, 32774); /* patch its source operand := OL */
-    emit_i(p, 0, dst, 32774);    /* MOVE [OL] -> dst (source patched) */
+    const int mi = *p + 3;        /* the load MOVE lands here */
+    emit_i(p, m->ol, mi, MOVE16); /* patch its source operand := OL */
+    emit_i(p, 0, dst, MOVE16);    /* MOVE [OL] -> dst (source patched) */
 }
 
 /* Store val to the guest cell whose native address is already in OL: patch the
@@ -1247,9 +1253,9 @@ static void emit_load_at(int *p, int dst, const struct mlayout *m)
  */
 static void emit_store_at(int *p, int val, const struct mlayout *m)
 {
-    const int mi = *p + 3;           /* the store MOVE lands here */
-    emit_i(p, m->ol, mi + 1, 32774); /* patch its dest operand := OL */
-    emit_i(p, val, 0, 32774);        /* MOVE val -> [OL] (dest patched) */
+    const int mi = *p + 3;            /* the store MOVE lands here */
+    emit_i(p, m->ol, mi + 1, MOVE16); /* patch its dest operand := OL */
+    emit_i(p, val, 0, MOVE16);        /* MOVE val -> [OL] (dest patched) */
 }
 
 /* MOVE val -> guest RAM[rs1 + imm + k] (patch the store MOVE's dest, run it).
@@ -1268,7 +1274,7 @@ static void emit_store_cell(int *p,
 /* BT = src & 0xFF (mask a 16-bit half down to its low byte via a MUX). */
 static void emit_mask_byte(int *p, int src, const struct mlayout *m)
 {
-    emit_i(p, src, m->bt, 32774);            /* BT = src */
+    emit_i(p, src, m->bt, MOVE16);           /* BT = src */
     emit_i(p, m->z, m->bt, 0x8000 | m->mff); /* BT &= 0xFF */
 }
 
@@ -1292,8 +1298,8 @@ static void emit_load_byte_u(int *p,
                              const struct mlayout *m)
 {
     emit_load_cell(p, 0, m->bt, rs1_lo, imm_cell, m); /* BT = byte */
-    emit_i(p, m->bt, rlo, 32774);                     /* rd.lo = byte */
-    emit_i(p, m->z, rhi, 32774);                      /* rd.hi = 0 */
+    emit_i(p, m->bt, rlo, MOVE16);                    /* rd.lo = byte */
+    emit_i(p, m->z, rhi, MOVE16);                     /* rd.hi = 0 */
 }
 
 /* LB: rd = sign-extended guest RAM[rs1 + imm] (a byte; bit 7 fills bits 8..31).
@@ -1308,13 +1314,13 @@ static void emit_load_byte(int *p,
                            const struct mlayout *m)
 {
     emit_load_cell(p, 0, m->t0, rs1_lo, imm_cell, m); /* T0 = byte */
-    emit_i(p, m->t0, rlo, 32774);                     /* rd.lo = byte */
-    emit_i(p, m->z, rhi, 32774);                      /* rd.hi = 0 (positive) */
-    emit_i(p, m->t0, m->bt, 32774);                   /* BT = byte */
+    emit_i(p, m->t0, rlo, MOVE16);                    /* rd.lo = byte */
+    emit_i(p, m->z, rhi, MOVE16);                     /* rd.hi = 0 (positive) */
+    emit_i(p, m->t0, m->bt, MOVE16);                  /* BT = byte */
     emit_i(p, m->z, m->bt, 0x8000 | (m->mask_base + 7)); /* BT &= 0x80 */
     emit_i(p, m->z, m->bt, *p + 3 + 6);       /* bit 7 clear -> skip fill */
     emit_i(p, m->neg1, rlo, 0x8000 | m->mff); /* rd.lo bits 8..15 = 1 */
-    emit_i(p, m->neg1, rhi, 32774);           /* rd.hi = 0xFFFF */
+    emit_i(p, m->neg1, rhi, MOVE16);          /* rd.hi = 0xFFFF */
 }
 
 /* Combine two consecutive guest cells into 'dst' as a little-endian 16-bit
@@ -1343,15 +1349,15 @@ static void emit_load_half(int *p,
                            bool sign,
                            const struct mlayout *m)
 {
-    emit_i(p, rs1_lo, m->sh2, 32774);     /* snapshot base (rd may alias rs1) */
+    emit_i(p, rs1_lo, m->sh2, MOVE16);    /* snapshot base (rd may alias rs1) */
     emit_addr(p, m->sh2, imm_cell, 0, m); /* OL = &RAM[addr] */
     emit_load_half_le(p, m->t0, m);       /* T0 = half */
-    emit_i(p, m->t0, rlo, 32774);         /* rd.lo = half */
-    emit_i(p, m->z, rhi, 32774);          /* rd.hi = 0 (LHU / positive LH) */
+    emit_i(p, m->t0, rlo, MOVE16);        /* rd.lo = half */
+    emit_i(p, m->z, rhi, MOVE16);         /* rd.hi = 0 (LHU / positive LH) */
     if (sign) {
         emit_bit15c(p, m->t0, *p + 12 + 3,
-                    m);                 /* bit 15 clear -> skip the fill */
-        emit_i(p, m->neg1, rhi, 32774); /* rd.hi = 0xFFFF */
+                    m);                  /* bit 15 clear -> skip the fill */
+        emit_i(p, m->neg1, rhi, MOVE16); /* rd.hi = 0xFFFF */
     }
 }
 
@@ -1411,13 +1417,13 @@ static void emit_load_word(int *p,
                            int imm_cell,
                            const struct mlayout *m)
 {
-    emit_i(p, rs1_lo, m->sh2, 32774);     /* snapshot base (rd may alias rs1) */
+    emit_i(p, rs1_lo, m->sh2, MOVE16);    /* snapshot base (rd may alias rs1) */
     emit_addr(p, m->sh2, imm_cell, 0, m); /* OL = &RAM[addr] */
     emit_load_half_le(p, m->t0, m);       /* T0 = cell[a] | cell[a+1]<<8 */
     emit_add16(p, m->ol, m->one, m);      /* OL = &RAM[addr+2] */
     emit_load_half_le(p, m->oh, m);       /* OH = cell[a+2] | cell[a+3]<<8 */
-    emit_i(p, m->t0, rlo, 32774);
-    emit_i(p, m->oh, rhi, 32774);
+    emit_i(p, m->t0, rlo, MOVE16);
+    emit_i(p, m->oh, rhi, MOVE16);
 }
 
 /* Cell count of emit_addr with k=0 (measured), for the write loop's exit label.
@@ -1440,8 +1446,8 @@ static int addr_cells(const struct mlayout *m)
 static void emit_write_dyn(int *p, const struct mlayout *m)
 {
     const int a1 = m->reg_base + 2 * 11, a2 = m->reg_base + 2 * 12;
-    emit_i(p, a1, m->sh1, 32774); /* PTR = a1 (guest buffer address) */
-    emit_i(p, a2, m->sh2, 32774); /* CNT = a2 (length) */
+    emit_i(p, a1, m->sh1, MOVE16); /* PTR = a1 (guest buffer address) */
+    emit_i(p, a2, m->sh2, MOVE16); /* CNT = a2 (length) */
     const int loop = *p;
     /* EQ16 test (not a signed<=0 SUBLEQ) so any length 0..0xFFFF terminates. */
     const int done =
@@ -1449,8 +1455,8 @@ static void emit_write_dyn(int *p, const struct mlayout *m)
     emit_eq16(p, m->sh2, m->z, done, m->t0, m->z, m->neg1); /* CNT==0 -> done */
     emit_addr(p, m->sh1, m->z, 0, m);  /* OL = ram_base + (PTR & winmask) */
     const int mi = *p + 3;             /* the PUT lands here */
-    emit_i(p, m->ol, mi, 32774);       /* patch its source operand := OL */
-    emit_i(p, 0, 65535, 0);            /* PUT [addr] -> stdout (b=IO_MARKER) */
+    emit_i(p, m->ol, mi, MOVE16);      /* patch its source operand := OL */
+    emit_i(p, 0, IOMARK16, 0);         /* PUT [addr] -> stdout (b=IO_MARKER) */
     emit_add16(p, m->sh1, m->one, m);  /* PTR += 1 */
     emit_i(p, m->one, m->sh2, *p + 3); /* CNT -= 1 (non-branching) */
     emit_i(p, m->z, m->z, loop);       /* back to the test */
@@ -1471,7 +1477,7 @@ static void emit_ret(int *p,
     emit_ne16(p, ra_lo, m->rsite, nomatch, m->t0, m->z, m->neg1);
     emit_ne16(p, ra_hi, m->z, nomatch, m->t0, m->z, m->neg1);
     emit_i(p, m->z, m->z, na[ret_node]); /* ra matches -> return */
-    emit_i(p, m->z, m->z, 65535);        /* no match -> halt (defensive) */
+    emit_i(p, m->z, m->z, IOMARK16);     /* no match -> halt (defensive) */
 }
 
 /* Resolve a JAL/branch target (pc+imm) to its native cell, aborting when it
@@ -2148,6 +2154,50 @@ struct promo_emit {
     const struct promo_loop *loops;
 };
 
+/* Assign each accepted promotable loop a contiguous slot index g and map its
+ * in-loop word LOAD/STOREs to that slot. Rejects a loop (nslot = 0, so the
+ * data-region walk emits no offset cells for it, keeping num_imm in sync) when
+ * a single node would carry two colliding edge actions: another loop already
+ * claims its entry or exit node, or its own entry IS its exit. emit_one runs a
+ * node's pre before its post, so any such sharing would order the transfers
+ * wrong. Shared by -mux and -mux32 -- the slot index is width-independent; each
+ * backend scales it to a cell address when it places promo_base. The three
+ * pro_* arrays must be NONE-filled by the caller.
+ *
+ * Returns npromo (total slots).
+ */
+static int assign_promo_slots(const struct graph *g,
+                              struct promo_loop *loops,
+                              int nloops,
+                              int *pro_pre,
+                              int *pro_post,
+                              int *pro_cell)
+{
+    int npromo = 0;
+    for (int l = 0; l < nloops; l++) {
+        struct promo_loop *lp = &loops[l];
+        if (lp->entry == lp->exit || pro_pre[lp->entry] != NONE ||
+            pro_post[lp->entry] != NONE || pro_pre[lp->exit] != NONE ||
+            pro_post[lp->exit] != NONE) {
+            lp->nslot = 0;
+            continue;
+        }
+        pro_pre[lp->entry] = l;
+        pro_post[lp->exit] = l;
+        for (int s = 0; s < lp->nslot; s++) {
+            lp->slot[s].g = npromo++;
+            for (int k = lp->header; k <= lp->latch; k++) {
+                const struct node *nd = &g->n[k];
+                if ((nd->kind == K_LOAD || nd->kind == K_STORE) &&
+                    nd->funct3 == 2 && nd->rs1 == lp->slot[s].base &&
+                    nd->imm == lp->slot[s].imm)
+                    pro_cell[k] = lp->slot[s].g; /* this access -> the cell */
+            }
+        }
+    }
+    return npromo;
+}
+
 /* Emit the pre-header loads (dir=load: slot memory -> dedicated cell) or the
  * post-loop stores (dir=store: cell -> slot memory) for one promoted loop.
  */
@@ -2202,8 +2252,8 @@ static void emit_one(const struct graph *g,
          * imm slot (see is_mv / mux_has_imm).
          */
         const int s = m->reg_base + 2 * nd->rs1, d = m->reg_base + 2 * rd;
-        emit_i(p, s, d, 32774);         /* rd.lo = rs.lo */
-        emit_i(p, s + 1, d + 1, 32774); /* rd.hi = rs.hi */
+        emit_i(p, s, d, MOVE16);         /* rd.lo = rs.lo */
+        emit_i(p, s + 1, d + 1, MOVE16); /* rd.hi = rs.hi */
         return;
     }
     if (fk == FOLD_LI12 || folded[i]) {
@@ -2249,9 +2299,9 @@ static void emit_one(const struct graph *g,
             /* x^0x8000 == x-0x8000 (mod 65536), so SUBLEQ of the SGN cell flips
              * bit15: maps signed order onto unsigned order for the hi compare.
              */
-            emit_i(p, s1 + 1, m->sh1, 32774);  /* SH1 = rs1.hi */
+            emit_i(p, s1 + 1, m->sh1, MOVE16); /* SH1 = rs1.hi */
             emit_i(p, m->sgn, m->sh1, *p + 3); /* SH1 ^= 0x8000 */
-            emit_i(p, s2 + 1, m->sh2, 32774);  /* SH2 = rs2.hi */
+            emit_i(p, s2 + 1, m->sh2, MOVE16); /* SH2 = rs2.hi */
             emit_i(p, m->sgn, m->sh2, *p + 3); /* SH2 ^= 0x8000 */
             if (nd->funct3 == 4) {             /* BLT: like BLTU on sh1/sh2 */
                 emit_ltu16(p, m->sh1, m->sh2, L, m);
@@ -2335,8 +2385,8 @@ static void emit_one(const struct graph *g,
              * (word-only per compute_promotions, so a two-MOVE lo/hi copy).
              */
             const int c = m->promo_base + 2 * pe->cell[i];
-            emit_i(p, rs2, c, 32774);
-            emit_i(p, rs2 + 1, c + 1, 32774);
+            emit_i(p, rs2, c, MOVE16);
+            emit_i(p, rs2 + 1, c + 1, MOVE16);
             return;
         }
         if (nd->funct3 == 0) /* SB */
@@ -2361,8 +2411,8 @@ static void emit_one(const struct graph *g,
             if (rd) {
                 const int c = m->promo_base + 2 * pe->cell[i],
                           d = m->reg_base + 2 * rd;
-                emit_i(p, c, d, 32774);
-                emit_i(p, c + 1, d + 1, 32774);
+                emit_i(p, c, d, MOVE16);
+                emit_i(p, c + 1, d + 1, MOVE16);
             }
             return;
         }
@@ -2373,8 +2423,8 @@ static void emit_one(const struct graph *g,
             if (fwd[i] != rd) {
                 const int s = m->reg_base + 2 * fwd[i],
                           d = m->reg_base + 2 * rd;
-                emit_i(p, s, d, 32774);
-                emit_i(p, s + 1, d + 1, 32774);
+                emit_i(p, s, d, MOVE16);
+                emit_i(p, s + 1, d + 1, MOVE16);
             }
             return;
         }
@@ -2423,7 +2473,7 @@ static void emit_one(const struct graph *g,
     }
     if (nd->kind == K_SYSTEM) {
         if (sys[i].kind == SYS_EXIT) {
-            emit_i(p, m->z, m->z, 65535); /* halt (branch to 0xFFFF) */
+            emit_i(p, m->z, m->z, IOMARK16); /* halt (branch to 0xFFFF) */
             return;
         }
         if (sys[i].kind == SYS_WRITE) {
@@ -2431,7 +2481,7 @@ static void emit_one(const struct graph *g,
              * byte pool). The runner ignores the fd, so all go to stdout.
              */
             for (uint32_t k = 0; k < sys[i].len; k++) {
-                emit_i(p, m->spool_base + *spool, 65535, 0);
+                emit_i(p, m->spool_base + *spool, IOMARK16, 0);
                 (*spool)++;
             }
             return;
@@ -2488,9 +2538,9 @@ static bool mux_has_imm(const struct node *nd)
  * Blocks are emitted in program order, so fall-through is automatic and a taken
  * branch just sets the SUBLEQ target cell to the callee block's native address
  * (na[] maps each guest instruction to its native cell). A li / a JAL link is
- * two native MOVEs (c = 0x8006 = 32774, whose hardwired mask-address-6 makes it
- * a copy regardless of m[6]) of the immediate halves into the register pair; a
- * JAL branch is 'SUBLEQ Z,Z,target' (Z-Z <= 0 always branches).
+ * two native MOVEs (c = 0x8006 = MOVE16, whose hardwired mask-address-6 makes
+ * it a copy regardless of m[6]) of the immediate halves into the register pair;
+ * a JAL branch is 'SUBLEQ Z,Z,target' (Z-Z <= 0 always branches).
  *
  * Layout (one allocator, reserved non-overlapping ranges): code from cell 0,
  * then the immediate constant cells (program order), then the write-ecall byte
@@ -2548,36 +2598,8 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     int *pro_cell = xcalloc((size_t) g->count, sizeof *pro_cell);
     for (int i = 0; i < g->count; i++)
         pro_pre[i] = pro_post[i] = pro_cell[i] = NONE;
-    int npromo = 0;
-    for (int l = 0; l < nloops; l++) {
-        struct promo_loop *lp = &loops[l];
-
-        /* Skip this loop (zeroing its slots so the data-region walk below emits
-         * no offset cells for it, keeping num_imm in sync) if a single node
-         * would carry two colliding edge actions: another loop already claims
-         * its entry or exit node, or its own entry IS its exit. emit_one runs a
-         * node's pre before its post, so any such sharing would order the
-         * transfers wrong.
-         */
-        if (lp->entry == lp->exit || pro_pre[lp->entry] != NONE ||
-            pro_post[lp->entry] != NONE || pro_pre[lp->exit] != NONE ||
-            pro_post[lp->exit] != NONE) {
-            lp->nslot = 0;
-            continue;
-        }
-        pro_pre[lp->entry] = l;
-        pro_post[lp->exit] = l;
-        for (int s = 0; s < lp->nslot; s++) {
-            lp->slot[s].g = npromo++;
-            for (int k = lp->header; k <= lp->latch; k++) {
-                const struct node *nd = &g->n[k];
-                if ((nd->kind == K_LOAD || nd->kind == K_STORE) &&
-                    nd->funct3 == 2 && nd->rs1 == lp->slot[s].base &&
-                    nd->imm == lp->slot[s].imm)
-                    pro_cell[k] = lp->slot[s].g; /* this access -> the cell */
-            }
-        }
-    }
+    const int npromo =
+        assign_promo_slots(g, loops, nloops, pro_pre, pro_post, pro_cell);
     const struct promo_emit pe = {pro_pre, pro_post, pro_cell, loops};
 
     /* A reachable STORE mutates guest RAM, so a const-folded write (which reads
@@ -2715,9 +2737,9 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
                      &spool);
     for (int r = 0; r < 32; r++)
         if (def[r])
-            emit_i(&p, m.reg_base + 2 * r, 65535,
-                   0);           /* PUT reg[r].lo low byte */
-    emit_i(&p, m.z, m.z, 65535); /* halt */
+            emit_i(&p, m.reg_base + 2 * r, IOMARK16,
+                   0);              /* PUT reg[r].lo low byte */
+    emit_i(&p, m.z, m.z, IOMARK16); /* halt */
 
     /* Data: immediate halves (program order), the write-ecall bytes, 64 zeroed
      * register cells, the eight zero-init temps (T0/BT/D/V/SH1/SH2/OL/OH), then
@@ -2773,19 +2795,21 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
 
 /* Data-cell layout of a wide (-mux32) image. */
 struct m32 {
-    int imm_base;   /* one cell per li / immediate-ALU / JAL-link value */
-    int ret_base;   /* one cell per known JAL-return address */
-    int spool_base; /* static write() source bytes */
-    int reg_base;   /* 32-cell register file */
-    int z, neg1;    /* the constants 0 and -1 (the equality add-1 test) */
-    int sgn, one;   /* 0x80000000 (bit31 / sign flip) and 1 (the DEC) */
-    int t0, t1, t2; /* three scratch cells (also OL=t0, BT=t1 for memory) */
-    int sh1, sh2;   /* the two sign-flipped halves for a signed compare */
-    int m1f, mff;   /* 0x1F (shift-amount mask) and 0xFF (byte mask) */
-    int winmask;    /* guest RAM window size - 1 (in-window address mask) */
-    int rambc;      /* the ram_base value (added after the window mask) */
-    int mask_base;  /* 32 power-of-two cells 2^0..2^31 (shift bit extraction) */
-    int ram_base;   /* guest RAM window (one cell per byte), init from img */
+    int imm_base;       /* one cell per li / immediate-ALU / JAL-link value */
+    int promo_imm_base; /* imm-pool index where promoted-slot offsets start */
+    int ret_base;       /* one cell per known JAL-return address */
+    int spool_base;     /* static write() source bytes */
+    int reg_base;       /* 32-cell register file */
+    int promo_base;     /* register-promotion dedicated word cells */
+    int z, neg1;        /* the constants 0 and -1 (the equality add-1 test) */
+    int sgn, one;       /* 0x80000000 (bit31 / sign flip) and 1 (the DEC) */
+    int t0, t1, t2;     /* three scratch cells (also OL=t0, BT=t1 for memory) */
+    int sh1, sh2;       /* the two sign-flipped halves for a signed compare */
+    int m1f, mff;       /* 0x1F (shift-amount mask) and 0xFF (byte mask) */
+    int winmask;        /* guest RAM window size - 1 (in-window address mask) */
+    int rambc;          /* the ram_base value (added after the window mask) */
+    int mask_base; /* 32 power-of-two cells 2^0..2^31 (shift bit extraction) */
+    int ram_base;  /* guest RAM window (one cell per byte), init from img */
 };
 
 struct ret_sites {
@@ -3335,6 +3359,23 @@ static void emit_write_dyn32(int *p, const struct m32 *m)
     emit_i32(p, m->z, m->z, loop);   /* back to the test */
 }
 
+static void emit_promo_transfer32(int *p,
+                                  const struct promo_loop *lp,
+                                  const struct m32 *m,
+                                  bool load)
+{
+    for (int s = 0; s < lp->nslot; s++) {
+        const int g = lp->slot[s].g;
+        const long long cell = m->promo_base + g;
+        const long long base = m->reg_base + lp->slot[s].base;
+        const long long immc = m->imm_base + m->promo_imm_base + g;
+        if (load)
+            emit_load_bytes32(p, cell, base, immc, 4, false, m);
+        else
+            emit_store_bytes32(p, cell, base, immc, 4, m);
+    }
+}
+
 static bool ret_site_matches32(const struct graph *g,
                                const struct sysinfo *sys,
                                const struct ret_sites *rets,
@@ -3389,6 +3430,9 @@ static void emit_one32(const struct graph *g,
                        const struct ret_sites *rets,
                        const struct m32 *m,
                        const int *na,
+                       const bool *folded,
+                       const int *fwd,
+                       const struct promo_emit *pe,
                        int *p,
                        int *imm,
                        int *spool)
@@ -3396,9 +3440,18 @@ static void emit_one32(const struct graph *g,
     const struct node *nd = &g->n[i];
     const int rd = (nd->word >> 7) & 31;
     const int fk = fold_kind(nd->word);
+
+    /* Promotion brackets a loop (see emit_one): the pre-header loads and
+     * post-loop stores prefix the sole entry/exit node so the cells are live
+     * across the loop and memory is current on exit.
+     */
+    if (pe->pre[i] != NONE)
+        emit_promo_transfer32(p, &pe->loops[pe->pre[i]], m, true);
+    if (pe->post[i] != NONE)
+        emit_promo_transfer32(p, &pe->loops[pe->post[i]], m, false);
     if (fk == FOLD_DEADI)
         return; /* nop */
-    if (fk == FOLD_LI12) {
+    if (fk == FOLD_LI12 || folded[i]) {
         mov32(p, m->imm_base + *imm, m->reg_base + rd); /* rd = imm */
         (*imm)++;
         return;
@@ -3457,6 +3510,11 @@ static void emit_one32(const struct graph *g,
         K_STORE) { /* SB/SH/SW (no rd; an imm cell for the offset) */
         const long long rs2c = m->reg_base + nd->rs2,
                         rs1c = m->reg_base + nd->rs1, ic = m->imm_base + *imm;
+        if (pe->cell[i] != NONE) {
+            mov32(p, rs2c, m->promo_base + pe->cell[i]);
+            (*imm)++;
+            return;
+        }
         if (nd->funct3 == 0)
             emit_store_byte32(p, rs2c, rs1c, ic, m); /* SB: masked low byte */
         else /* SH (funct3 1) = 2 bytes, SW (funct3 2) = 4 bytes */
@@ -3465,10 +3523,25 @@ static void emit_one32(const struct graph *g,
         return;
     }
     if (nd->kind == K_LOAD) { /* LB/LH/LW/LBU/LHU */
+        /* rd == x0: a dead load, so skip the cell/forward routing and the load
+         * itself, but still consume the imm cell at the bottom (as with rd !=
+         * 0) to keep the sizing and emit passes' imm counters in step.
+         */
         if (rd) {
             const long long rdc = m->reg_base + rd,
                             rs1c = m->reg_base + nd->rs1,
                             ic = m->imm_base + *imm;
+            if (pe->cell[i] != NONE) {
+                mov32(p, m->promo_base + pe->cell[i], rdc);
+                (*imm)++;
+                return;
+            }
+            if (fwd[i] != NONE) {
+                if (fwd[i] != rd)
+                    mov32(p, m->reg_base + fwd[i], rdc);
+                (*imm)++;
+                return;
+            }
             switch (nd->funct3) {
             case 0: /* LB: signed byte */
                 emit_load_byte_s32(p, rdc, rs1c, ic, m);
@@ -3631,6 +3704,23 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
                                   it (same guard as -mux); run it under -r
                                   */
 
+    bool *folded = xcalloc((size_t) g->count, sizeof *folded);
+    int32_t *foldval = xcalloc((size_t) g->count, sizeof *foldval);
+    compute_folds(g, reach, folded, foldval);
+    int *fwd = xcalloc((size_t) g->count, sizeof *fwd);
+    compute_forwards(g, reach, fwd);
+
+    struct promo_loop *loops = xcalloc((size_t) PROMO_MAX_LOOPS, sizeof *loops);
+    const int nloops = compute_promotions(g, reach, loops);
+    int *pro_pre = xcalloc((size_t) g->count, sizeof *pro_pre);
+    int *pro_post = xcalloc((size_t) g->count, sizeof *pro_post);
+    int *pro_cell = xcalloc((size_t) g->count, sizeof *pro_cell);
+    for (int i = 0; i < g->count; i++)
+        pro_pre[i] = pro_post[i] = pro_cell[i] = NONE;
+    const int npromo =
+        assign_promo_slots(g, loops, nloops, pro_pre, pro_post, pro_cell);
+    const struct promo_emit pe = {pro_pre, pro_post, pro_cell, loops};
+
     bool has_store = false;
     for (int i = 1; i < g->count; i++)
         if (reach[i] && g->n[i].kind == K_STORE)
@@ -3734,6 +3824,13 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
         free(rets.target);
         free(rets.node);
         free(rets.addr);
+        free(pro_cell);
+        free(pro_post);
+        free(pro_pre);
+        free(loops);
+        free(fwd);
+        free(folded);
+        free(foldval);
         free(sys);
         free(reach);
         exit(1);
@@ -3742,6 +3839,8 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
     for (int r = 0; r < 32; r++)
         ndef += def[r];
     const int nret_pool = rets.n;
+    const int nimm_prog = nimm;
+    nimm += npromo;
 
     /* Sizing pass: variable-size ops mean the code length is not a formula --
      * run the emitter with output suppressed to fill na[] (branch/jump targets)
@@ -3756,7 +3855,8 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
     for (int i = 1; i < g->count; i++) {
         na[i] = p;
         if (reach[i])
-            emit_one32(g, i, sys, &rets, &m, na, &p, &imm, &spool);
+            emit_one32(g, i, sys, &rets, &m, na, folded, fwd, &pe, &p, &imm,
+                       &spool);
     }
     g_sizing = false;
     na[g->count] = p;                    /* a jump past the end lands here */
@@ -3768,10 +3868,12 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
      * 0x1F, 0xFF | winmask, rambc | 2^0..2^31 mask pool | guest RAM.
      */
     m.imm_base = code;
+    m.promo_imm_base = nimm_prog;
     m.ret_base = m.imm_base + nimm;
     m.spool_base = m.ret_base + nret_pool;
     m.reg_base = m.spool_base + nspool;
-    m.z = m.reg_base + 32;
+    m.promo_base = m.reg_base + 32;
+    m.z = m.promo_base + npromo;
     m.neg1 = m.z + 1;
     m.sgn = m.neg1 + 1;
     m.one = m.sgn + 1;
@@ -3798,6 +3900,13 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
         free(rets.target);
         free(rets.node);
         free(rets.addr);
+        free(pro_cell);
+        free(pro_post);
+        free(pro_pre);
+        free(loops);
+        free(fwd);
+        free(folded);
+        free(foldval);
         free(sys);
         free(reach);
         exit(1);
@@ -3806,7 +3915,8 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
     p = imm = spool = 0;
     for (int i = 1; i < g->count; i++)
         if (reach[i])
-            emit_one32(g, i, sys, &rets, &m, na, &p, &imm, &spool);
+            emit_one32(g, i, sys, &rets, &m, na, folded, fwd, &pe, &p, &imm,
+                       &spool);
     for (int r = 0; r < 32; r++)
         if (def[r])
             emit_i32(&p, m.reg_base + r, IOMARK32, 0); /* PUT rd's low byte */
@@ -3819,7 +3929,11 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
      */
     for (int i = 1; i < g->count; i++)
         if (reach[i] && imm_op32(&g->n[i]))
-            printf("%lld\n", imm_value32(&g->n[i]));
+            printf("%lld\n",
+                   folded[i] ? (long long) foldval[i] : imm_value32(&g->n[i]));
+    for (int l = 0; l < nloops; l++)
+        for (int s = 0; s < loops[l].nslot; s++)
+            printf("%d\n", loops[l].slot[s].imm);
     for (int i = 0; i < nret_pool; i++)
         printf("%u\n", rets.addr[i]);
     for (int i = 1; i < g->count; i++)
@@ -3828,6 +3942,8 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
                 printf("%u\n", img[sys[i].buf + k]);
     for (int r = 0; r < 32; r++)
         printf("0\n"); /* regfile (x0 stays 0) */
+    for (int pcell = 0; pcell < npromo; pcell++)
+        printf("0\n"); /* promoted word cells */
     printf("0\n-1\n2147483648\n1\n0\n0\n0\n0\n0\n31\n255\n");
     /* Z, -1, SGN(0x80000000), 1, t0, t1, t2, sh1, sh2, 0x1F, 0xFF */
     printf("%d\n%d\n", winsize - 1, m.ram_base); /* winmask, rambc */
@@ -3837,6 +3953,13 @@ static void emit_mux32(struct graph *g, const unsigned char *img, size_t used)
         printf("%u\n",
                k < (int) used ? img[k] : 0); /* guest RAM, init from img */
     free(na);
+    free(pro_cell);
+    free(pro_post);
+    free(pro_pre);
+    free(loops);
+    free(fwd);
+    free(folded);
+    free(foldval);
     free(rets.target);
     free(rets.node);
     free(rets.addr);
