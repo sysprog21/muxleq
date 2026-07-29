@@ -164,6 +164,9 @@ verify-rvopt-gate: $(BIN) $(RVOPT) $(if $(HAVE_RVCC),rvelf $(RVELF_DIR)/unopt.el
 	        && cmp -s $(TMPDIR)/gate-unopt.x $(TMPDIR)/gate-unopt.r \
 	        && cmp -s $(TMPDIR)/gate-unopt.x32 $(TMPDIR)/gate-unopt.r \
 	        || { echo "verify-rvopt-gate: unopt (-x/-x32, register promotion) differs from -r"; exit 1; }; \
+	    cells=$$(wc -l < $(TMPDIR)/gate-unopt.d32); \
+	    : 'baseline 13828 cells; the 14000 ceiling is a regression guard, not a hard limit'; \
+	    [ $$cells -le 14000 ] || { echo "verify-rvopt-gate: unopt -mux32 optimizer regressed to $$cells cells"; exit 1; }; \
 	else $(PRINTF) "verify-rvopt-gate: RVELF/unopt differential [SKIP: no $(RVCROSS)gcc]\n"; fi
 	$(Q)printf '\223\002\000\001\023\003\000\000\263\202\142\000\147\200\002\000\223\010\320\005\023\005\000\000\163\000\000\000' > $(TMPDIR)/rvopt-jalr-runtime.bin
 	$(Q)printf '\357\000\100\001\357\000\000\001\223\010\320\005\023\005\000\000\163\000\000\000\147\200\000\000' > $(TMPDIR)/rvopt-jalr-multiret.bin
