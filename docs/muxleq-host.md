@@ -14,6 +14,12 @@ the interpreter rereads them when each instruction executes.
 - I/O and halt marker: `0xffffffff`.
 - MUX mask-address cell `6` is hardwired to zero, so
   `A B 0x80000006` is a MOVE.
+- MUX mask-address `0x7ffffffe` is reserved as a native shift, so
+  `A B 0xfffffffe` computes `[B] = [A] >> 1`. The eForth `shift` primitive
+  emits it to avoid a cell-width bit loop. This is a new ISA reservation,
+  like the `0xffffffff` I/O marker: it is matched on the raw operand before
+  any arena masking, and a genuine mask address is a small cell index, so no
+  MUXLEQ emitter uses `0x7ffffffe`.
 
 ## eForth-32 Target Encoding
 

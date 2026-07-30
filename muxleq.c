@@ -102,6 +102,14 @@ static int write_host_output(uint32_t out)
 #define NEG_FLAG32 0x80000000u
 #define ADDR_MASK32 0x7FFFFFFFu
 
+/* A MUX whose mask address is this reserved (never-a-real-cell) value is a
+ * native shift-right-by-one: [b] = [a] >> 1. Kept in sync with the SHR1 word in
+ * forth/20-target-vm.fth, whose emitted mask cell (0xFFFFFFFE) masks to this
+ * address; the eForth shift primitive uses it so a right shift costs one op per
+ * bit instead of a full-cell-width bit loop.
+ */
+#define SHR1_MARK_ADDR 0x7FFFFFFEu
+
 struct muxleq_image {
     uint32_t *m;
     uint32_t mask;
@@ -234,8 +242,16 @@ static int run(const struct muxleq_image *img)
             pc += INSN_SIZE;
         } else if ((c & NEG_FLAG32) && c != IO_MARKER32) {
             const uint32_t maddr = c & ADDR_MASK32;
-            const uint32_t mask =
-                (maddr == ZERO_MASK_ADDR) ? 0 : m32[maddr & mask32];
+            uint32_t mask;
+            if (maddr == ZERO_MASK_ADDR) { /* the common case: a MOVE */
+                mask = 0;
+            } else if (maddr == SHR1_MARK_ADDR) {
+                m32[b & mask32] = m32[a & mask32] >> 1;
+                pc += INSN_SIZE;
+                continue;
+            } else {
+                mask = m32[maddr & mask32];
+            }
             m32[b & mask32] =
                 (m32[a & mask32] & ~mask) | (m32[b & mask32] & mask);
             pc += INSN_SIZE;

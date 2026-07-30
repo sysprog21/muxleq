@@ -55,6 +55,7 @@ $40 tvar mwidth                    ( maximum machine width )
 :m MUXR >r half t, half t, r> half muxflag or t, ;m ( MUX with register )
 :m MMOV swap zreg MUXR ;m          ( a a -- : move operation )
 :m -MMOV swap neg1 MUXR ;m         ( a a -- : negative move operation )
+:m SHR1 swap half t, half t, cellmask 1 - t, ;m ( src dst -- : dst = src >> 1, native )
 :m iJMP there half 5 + cell>byte MMOV Z Z NADDR ;m ( a -- : indirect jump )
 :m ONE! one swap MMOV ;m           ( a -- : set address to '1' )
 :m NG1! neg1 swap MMOV ;m          ( a -- : set address to '-1' )
@@ -185,18 +186,21 @@ assembler.1 -order
 :a + tos {sp} iADD t' opDrop JMP (a);
 
 :a shift
-  bwidth r0 MMOV
-  tos r0 SUB
-  tos {sp} iLOAD --sp
-  r1 ZERO
+  \ One iteration per shifted bit, so callers pass an in-range |n| (0..bwidth).
+  \ Out-of-range |n| still terminates (|n| iterations) but is unspecified: a
+  \ count of exactly 0x80000000 hits the -if sign blind spot and is a no-op.
+  tos r0 MMOV                       \ r0 = shift count n (signed)
+  tos {sp} iLOAD --sp               \ tos = value to shift
   label: shift.loop
-    r1 r1 ADD
-    tos +if else
-      tos r2 MMOV r2 INC r2 +if else r1 INC then then
-    tos tos ADD
-    r0 DEC
-  r0 +if shift.loop JMP then
-  r1 tos MMOV ;a
+    r0 +if                          \ n > 0: right shift, one native op per bit
+      tos tos SHR1
+      r0 DEC
+    shift.loop JMP then
+    r0 -if                          \ n < 0: left shift, double per bit
+      tos tos ADD
+      r0 INC
+    shift.loop JMP then
+  ;a
 
 :a opGet
    ++sp tos {sp} iSTORE
