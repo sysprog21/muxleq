@@ -21,13 +21,13 @@ opt.decompiler [if]
       >r 1- ndrop r> rdrop exit then
   1- repeat rdrop ;s
 :s instruction                     ( u -- )
-  [ primitive ] literal @ over u> if ."  VM    " 2* else
+  [ primitive ] literal @ over u> if ."  VM    " 2* 2* else
     dup name ?dup if space count [ $1F ] literal
     and type drop exit then
   then
   u. ;s
 \ Operand tails shared by the repeated decompile arms below.
-:s .opd cell+ dup @ 2* u. ;s        ( a -- a+1 : operand is a byte address )
+:s .opd cell+ dup @ 2* 2* u. ;s    ( a -- a+1 : operand is a byte address )
 :s .val cell+ dup @ u. ;s           ( a -- a+1 : inline operand value )
 :s .fin cell+ @ u. [ $7FFF ] literal ;s ( a -- 7FFF : last cell, stop see )
 :s .str [char] " emit space         ( a -- a' : quoted string operand )
@@ -94,9 +94,9 @@ opt.decompiler [if]
 \ Block Storage System
 $400 constant b/buf                ( -- u : size of the block buffer )
 system[
-$200 constant c/buf                ( -- cu : cells in the block buffer )
+$100 constant c/buf ( -- cu : cells in the block buffer )
 variable <block>                   ( -- a : xt for "block" word )
-$F400 constant buf0                ( -- ca : location of block buffer )
+$3F400 constant buf0 ( -- ca : location of block buffer )
 variable dirty0                    ( -- a : is block buffer dirty? )
 variable blk0                      ( -- a : what block is stored in buffer? )
 -1 t' blk0 >tbody t!               ( set initial loaded block to be invalid )
@@ -115,9 +115,9 @@ t' (block) t' <block> >tbody t!
 :s >blk 1- c/buf * ;s              ( k -- ca )
 :s clean #0 dirty0 ! ;s            ( -- : opposite of 'update' )
 :s invalidate #-1 blk0 ! ;s        ( -- : store invalid block # )
-:s bput valid? if >blk buf0 2/ c/buf transfer exit then drop ;s
+:s bput valid? if >blk buf0 2/ 2/ c/buf transfer exit then drop ;s
 :s bget
-  valid? if >blk buf0 2/ swap c/buf transfer exit then drop ;s
+  valid? if >blk buf0 2/ 2/ swap c/buf transfer exit then drop ;s
 :s loaded? dup blk0 @ = ;s         ( k -- k f )
 
 : update #-1 dirty0 ! ;            ( -- )
@@ -193,11 +193,11 @@ root[
 \ Task Initialization and Management
 :s task-init                       ( task-addr -- : initialize USER task )
   [ {up} ] literal @ swap [ {up} ] literal !
-  this 2/ [ {next-task} ] up !
+  this 2/ 2/ [ {next-task} ] up !
   \ Default execution token
-  [ to' bye ] literal 2/ [ {ip-save} ] up !
-  this [ =stksz        ] literal + 2/ [ {rp-save} ] up !
-  this [ =stksz double ] literal + 2/ [ {sp-save} ] up !
+  [ to' bye ] literal 2/ 2/ [ {ip-save} ] up !
+  this [ =stksz        ] literal + 2/ 2/ [ {rp-save} ] up !
+  this [ =stksz double ] literal + 2/ 2/ [ {sp-save} ] up !
   #0 [ {tos-save} ] up !
   decimal
   io!
@@ -225,7 +225,7 @@ root[
   forth definitions                ( set up dictionary / set it )
   ini                              ( initialize the current thread correctly )
   [ {options} ] literal @ #2 and if ( checksum on? )
-  [ primitive ] literal @ 2* dup here swap - cksum
+  [ primitive ] literal @ 2* 2* dup here swap - cksum
   [ check ] literal @ <> if ." bad cksum" bye then ( oops... )
   [ {options} ] literal @ #2 xor [ {options} ] literal !
   then

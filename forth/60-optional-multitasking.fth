@@ -1,12 +1,12 @@
 \ Extended Multitasking Optional
 opt.multi [if]
 :s task:                           ( "name" -- : create a named task )
-  create here b/buf allot 2/ task-init ;s
+  create here b/buf allot 2/ 2/ task-init ;s
 :s activate                        ( xt task-address -- : start task )
   dup task-init
   ( set execution word )
-  dup >r swap 2/ swap [ {ip-save} ] literal + !
-  r> this @ >r dup 2/ this ! r> swap ! ;s ( link in task )
+  dup >r swap 2/ 2/ swap [ {ip-save} ] literal + !
+  r> this @ >r dup 2/ 2/ this ! r> swap ! ;s ( link in task )
 [then]
 
 opt.multi [if]

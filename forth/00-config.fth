@@ -23,14 +23,6 @@ only forth definitions hex
 1 constant opt.allocate   ( Dynamic memory allocation allocate/free )
 1 constant opt.glossary   ( Word glossary and analysis tools )
 1 constant opt.divmod     ( Hardware division/modulo primitive )
-1 constant opt.rv32i      ( RV32I microcode interpreter; make ENABLE_RV32I=0 stamps this to 0 )
-opt.rv32i [if]
-\ RV32I guest RAM lives in a fixed high-memory window ($7000 byte = cell $3800), NOT baked into the
-\ image (same trick as buf0/=thread): only touched while running an RV program, never during
-\ self-host bootstrap, so it costs zero image cells. Base is a plain forth constant so the tvar
-\ block (rvrambase) and the runner (rv-ram) both read it.
-7000 constant rvram       ( RV32I: guest-RAM base byte address; guest cell 0 lives here )
-[then]
 
 \ System options bit flags
 : sys.echo-off 1 or ;     ( bit #1 = turn character echoing off )
