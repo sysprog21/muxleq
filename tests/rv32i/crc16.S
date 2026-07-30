@@ -1,8 +1,9 @@
-# Freestanding RV32I CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection) over the standard
-# check string "123456789"; prints the checksum in decimal (10673 = 0x29B1). Base ISA only -- the
-# bitwise CRC is XOR + shift + AND, no M extension -- so it exercises the logical/shift microcode that
-# the other demos don't. Entry 0, write(64)/exit(93) ecalls, fits the 32 KiB guest RAM.
-# Runs under `../../muxleq -r crc16.elf`.
+# CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection) over the standard
+# check string "123456789"; prints the checksum in decimal (10673 = 0x29B1).
+# Base ISA only: the bitwise CRC is XOR + shift + AND, no M extension, so it
+# exercises the logical/shift microcode that the other demos don't. Entry 0,
+# write(64)/exit(93) ecalls, fits the 32 KiB guest RAM.
+# Lowered by 'rvopt mux' and run on '../../build/muxleq'.
 .equ SYS_WRITE, 64
 .equ SYS_EXIT,  93
 

@@ -1,10 +1,10 @@
-# Freestanding RV32I binary GCD (Stein's algorithm) for the muxleq runner.
+# Binary GCD (Stein's algorithm) for the muxleq runner.
 # The binary GCD needs no division: it strips common factors of two with right
 # shifts, orders the pair with an UNSIGNED compare, and subtracts. So this is the
 # first demo to exercise an unsigned compare (bgeu, via the bleu pseudo) and a
 # variable left shift (sll) alongside srli/andi. Prints gcd of a few pairs read
 # from a .rodata table, one decimal result per line, then exits.
-# Runs under `../../muxleq -r bgcd.elf`.
+# Lowered by 'rvopt mux' and run on '../../build/muxleq'.
 .equ SYS_WRITE, 64
 .equ SYS_EXIT,  93
 

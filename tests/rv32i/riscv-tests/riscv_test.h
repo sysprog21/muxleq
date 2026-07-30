@@ -1,7 +1,7 @@
 // Minimal muxleq test environment for the vendored riscv-tests rv32ui suite.
 //
 // Replaces the upstream env (tohost/fromhost MMIO, link @ 0x8000_0000, trap
-// vectors) with the muxleq -r ABI: entry _start at guest address 0, and
+// vectors) with the muxleq RV32I ABI: entry _start at guest address 0, and
 // pass/fail reported on STDOUT via the write(64)/exit(93) ecalls. The guest
 // exit code is NOT propagated by the runner (it halts silently,
 // muxleq.fth:2346), so stdout is the only pass/fail channel -- the verify

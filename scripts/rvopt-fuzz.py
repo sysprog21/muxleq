@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential fuzzer for `rvopt -mux` native MUXLEQ emission.
+"""Differential fuzzer for `rvopt mux` native MUXLEQ emission.
 
 Generates random RV32I programs over the emitter's SUPPORTED subset
 (ADD/SUB/SLT[U]/AND/OR/XOR + immediates, SLL and SLLI/SRLI/SRAI, loads/stores,
@@ -7,13 +7,10 @@ forward branches/JALRs, and bounded loops), seeds the registers with random
 32-bit values, folds the result into a checksum, and writes it out. Each program
 is run two ways and the stdout is compared:
 
-    oracle   = ./muxleq -r prog.bin           (the RV32I interpreter)
-    emitted  = rvopt -mux prog.bin | muxleq -x prog.dec   (native two-op image)
+    oracle   = the script's independent Python RV32I model
+    emitted  = rvopt mux prog.bin | muxleq prog.dec
 
-With --wide the emitter under test is the 32-bit-cell backend instead:
-    emitted  = rvopt -mux32 prog.bin | muxleq -x32 prog.dec
-
-A mismatch is an emitter bug -- the interpreter is the reference. Random
+A mismatch is an emitter bug. Random
 hi-halves are deliberate: they exercise the 32-bit macro paths (carry/borrow
 votes, hi bitwise, bit-extract) that a later known-hi-zero pass will touch, so a
 pass that ever drops the high 16 bits shows up here even though the 7 demos
@@ -414,47 +411,34 @@ def run(cmd, stdin=None):
         return _Hang(cmd)
 
 
-def check_one(idx, blob, seeds, ops, muxleq, rvopt, tmp, keep, wide=False):
-    emit_flag, run_flag = ("-mux32", "-x32") if wide else ("-mux", "-x")
+def check_one(idx, blob, seeds, ops, muxleq, rvopt, tmp, keep):
     binp = os.path.join(tmp, "fuzz-%d.bin" % idx)
     with open(binp, "wb") as f:
         f.write(blob)
-    ora = run([muxleq, "-r", binp])
-    emit = run([rvopt, emit_flag, binp])
+    emit = run([rvopt, "mux", binp])
     if emit.returncode != 0 or not emit.stdout:
         msg = emit.stderr.decode(errors="replace").strip()
-        # A program too big for the MUXLEQ image (32768 cells for -mux, the 2M
-        # -x32 window for -mux32) is an expected abort, not a miscompile -- skip
-        # it (counted) rather than fail. Any OTHER nonzero exit (unsupported op,
-        # real crash) is a genuine failure.
+        # A program too big for the host cell cap is an expected abort, not a
+        # miscompile -- skip it (counted) rather than fail. Any OTHER nonzero
+        # exit (unsupported op, real crash) is a genuine failure.
         if "image needs" in msg:
             return SKIP
-        return "rvopt %s failed (rc=%d): %s" % (emit_flag, emit.returncode, msg)
+        return "rvopt mux failed (rc=%d): %s" % (emit.returncode, msg)
     decp = os.path.join(tmp, "fuzz-%d.dec" % idx)
     with open(decp, "wb") as f:
         f.write(emit.stdout)
-    nat = run([muxleq, run_flag, decp])
+    nat = run([muxleq, decp])
     want = model(seeds, ops)
     # A tool that prints the right bytes but exits nonzero is still a defect.
-    if ora.returncode != 0:
-        return "-r exited %d: %s" % (
-            ora.returncode,
-            ora.stderr.decode(errors="replace").strip(),
-        )
     if nat.returncode != 0:
-        return "%s exited %d: %s" % (
-            run_flag,
+        return "muxleq exited %d: %s" % (
             nat.returncode,
             nat.stderr.decode(errors="replace").strip(),
         )
-    if ora.stdout != want:
-        return (
-            "ORACLE (-r) disagrees with the Python model -- bug in the fuzzer/generator"
-        )
-    if nat.stdout != ora.stdout:
+    if nat.stdout != want:
         if keep:
             os.rename(binp, os.path.join(ROOT, "rvopt-fuzz-fail.bin"))
-        return "native %s %r != -r %r" % (run_flag, nat.stdout, ora.stdout)
+        return "native %r != model %r" % (nat.stdout, want)
     return None
 
 
@@ -475,7 +459,7 @@ def main(argv):
     ap.add_argument(
         "--wide",
         action="store_true",
-        help="test the 32-bit-cell backend (rvopt -mux32 | muxleq -x32) instead of -mux/-x",
+        help="accepted for compatibility; rvopt-fuzz is wide-only",
     )
     ap.add_argument(
         "--rvopt",
@@ -499,7 +483,7 @@ def main(argv):
             # memory across a back-edge); the rest are straight-line.
             builder = build_loop_program if i % 3 == 0 else build_program
             blob, seeds, ops, desc = builder(rng, a.body)
-            err = check_one(i, blob, seeds, ops, muxleq, rvopt, tmp, a.keep, a.wide)
+            err = check_one(i, blob, seeds, ops, muxleq, rvopt, tmp, a.keep)
             if err is SKIP:
                 skipped += 1
                 continue
@@ -509,7 +493,7 @@ def main(argv):
                 )
                 print(
                     "reproduce: scripts/rvopt-fuzz.py --seed %d --only %d --body %d --keep%s"
-                    % (a.seed, i, a.body, " --wide" if a.wide else ""),
+                    % (a.seed, i, a.body, " --wide"),
                     file=sys.stderr,
                 )
                 for d in desc:
@@ -524,8 +508,8 @@ def main(argv):
         )
         return 1
     print(
-        "rvopt-fuzz%s: %d programs x %d ops OK (seed %d) native == -r (%d skipped, too big)"
-        % (" -mux32" if a.wide else "", tested, a.body, a.seed, skipped)
+        "rvopt-fuzz mux: %d programs x %d ops OK (seed %d) native == model (%d skipped, too big)"
+        % (tested, a.body, a.seed, skipped)
     )
     return 0
 
