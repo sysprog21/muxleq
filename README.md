@@ -21,16 +21,16 @@ MUXLEQ is a two-instruction esoteric programming language,
 extending the classic `SUBLEQ` with a multiplexing operation for enhanced performance and reduced program size.
 This project provides a complete, self-hosting development environment for it.
 
-On top of that foundation it also hosts an RV32I ISA simulator: a RISC-V base-integer interpreter,
-assembled by the eForth image itself, that runs real RV32I programs on the two-instruction machine
-(`./build/muxleq -r`) -- a full RISC-V base ISA riding on a two-instruction OISC.
+MUXLEQ is a 32-bit-cell, cell-addressed VM. With no argument it runs the
+self-hosting eForth image; given a FILE it loads and runs that standalone
+MUXLEQ image instead: `./build/muxleq image.dec`.
 
 ## Introduction
 This repository contains a full toolchain for the MUXLEQ architecture, including:
 1. An assembler for the MUXLEQ instruction set.
 2. A virtual machine built upon the assembler.
 3. A cross-compiler that targets the VM with a version of the eForth programming language.
-4. An RV32I ISA simulator on top of MUXLEQ -- a RISC-V base-integer interpreter assembled into the eForth image, running RV32I programs via `./build/muxleq -r`.
+4. `rvopt`, a standalone RV32I-to-MUXLEQ compiler for wide native MUXLEQ images.
 
 The system is self-hosted, meaning the eForth environment can compile new versions of itself from source,
 allowing for seamless modification and extension.
@@ -68,28 +68,17 @@ Once defined, the word `hello` can be executed by typing its name.
 
 ### Testing, benchmarking, and internals
 
-- `make check` -- the pre-commit gate: byte-exact golden-output tests (`tests/*.fth` vs
-  `tests/expected/*.out`, each run time-bounded), the `rvopt` AOT differential (its native
-  `-x`/`-x32` images must reproduce `-r` on every demo), plus the self-hosting bootstrap, which
-  checks the VM reproduces its own image byte-for-byte.
-- `make bench` -- times the VM on a quiet remote host (`node1` by default, override with
-  `BENCH_HOST`); localhost load makes wall-clock timing unreliable. Reports per-workload user
-  time and a deterministic instruction count.
-- `./build/muxleq -s` and `./build/muxleq -p` -- the built-in profiler: instruction mix and a per-PC heat
-  map. Default runs (no flags) are byte-identical, so the gates are unaffected.
-- `./build/muxleq -r prog` -- run an RV32I program (an ELF32 executable or a flat `objcopy` binary) on
-  the RV32I microcode interpreter that the image itself assembles -- a RISC-V ISA hosted on the
-  16-bit OISC. `make verify-rv32i` checks it against an independent reference model. See the
-  manual's RV32I section.
+- `make check` -- the pre-commit gate: byte-exact 32-bit golden-output tests,
+  the PTY editor golden, 32-bit eForth smokes, and the self-hosting bootstrap.
+- `make check-all` -- `make check` plus wide native-image fuzz, loader rejection,
+  and ASan/UBSan validation.
 - `rvopt` -- a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat binary to a native
-  MUXLEQ image running on the two ops directly, with no interpreter layer: `rvopt -mux prog >
-  prog.dec` then `./build/muxleq -x prog.dec` for the 16-bit path (which beats `-r` on measured compute
-  targets), or `rvopt -mux32` then `./build/muxleq -x32` for the wide 32-bit-cell backend. The wide path
-  passes all 40 rv32ui compliance tests, including large programs the 16-bit image cannot hold; both
-  are differential-tested against `-r`. See [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
+  MUXLEQ image running on the two ops directly, with no interpreter layer:
+  `rvopt mux prog > prog.dec` then `./build/muxleq prog.dec`.
+  See [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
 - [`docs/manual.md`](docs/manual.md) -- reference manual: the instruction set, memory image and
-  self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, the eForth
-  environment, and the RV32I microcode runner.
+  self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, and the eForth
+  environment.
 
 ## MUXLEQ Architecture
 The MUXLEQ architecture extends the classic SUBLEQ OISC with a second instruction to improve performance without significantly increasing implementation complexity.
@@ -188,7 +177,7 @@ This command performs the following steps, all under `build/`:
 1. Concatenate the `forth/*.fth` modules into `build/muxleq.fth` and run it
    through Gforth to produce the first image, `build/stage0.dec`.
 2. Compile the VM (`cc -Ibuild -o build/muxleq muxleq.c`), which `#include`s the
-   generated `build/stage0.c` and `build/rv32i-traces.inc`.
+   generated `build/stage0.c`.
 3. Run `build/muxleq` on `build/muxleq.fth` to produce a second image,
    `build/stage1.dec`.
 4. Compare the two images.
