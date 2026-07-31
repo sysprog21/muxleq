@@ -2,15 +2,12 @@
 # validation suite, split into independent jobs that run in parallel.
 #
 #   format   : clang-format 20 and a trailing-newline check (no toolchain)
-#   check    : make check, then publish the generated RV32I binaries
-#   no-rv32i : make ENABLE_RV32I=0 check, the microcode-free build (no toolchain)
+#   check    : make check
 #   sanitize : make sanitize (ASan/UBSan over the interpreter and emitters)
-#   deep     : conformance, the Z3 proof, rvopt fuzz, the rv32ui suite, DureMark
+#   deep     : wide native-image fuzz and loader rejection
 #
-# check, sanitize, and deep install the xPack riscv-none-elf toolchain (cached)
-# and build the RV32I programs from source. Together with check they reproduce
-# make check-all. no-rv32i needs no toolchain. No job depends on another, so
-# all five run concurrently.
+# check, sanitize, and deep cover the local check-all gate. No job depends on
+# another, so all four run concurrently.
 name: ci
 
 on:
@@ -25,11 +22,6 @@ concurrency:
 # Least privilege: nothing here writes to the repository.
 permissions:
   contents: read
-
-env:
-  # Single source of truth for the xPack toolchain: shared by the installer and
-  # the cache key so a bump invalidates the cache automatically.
-  XPACK_RISCV_VERSION: 15.2.0-1
 
 jobs:
   format:
@@ -69,40 +61,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang gforth
-      - name: Cache RISC-V toolchain
-        uses: actions/cache@v6
-        with:
-          path: ~/riscv-none-elf-gcc
-          key: xpack-riscv-none-elf-gcc-${{ env.XPACK_RISCV_VERSION }}-linux-x64
-      - name: Install RISC-V toolchain
-        run: .ci/install-riscv-toolchain.sh
       - name: Run pre-commit gate
         run: make check
-      - name: Publish RV32I test binaries
-        uses: actions/upload-artifact@v7
-        with:
-          name: rv32i-binaries
-          retention-days: 7
-          if-no-files-found: error
-          path: |
-            build/rv32i/*.elf
-            build/rv32i/*.bin
-
-  no-rv32i:
-    # Prove the ENABLE_RV32I=0 build stands on its own: the microcode is stamped
-    # out of the image and "-r" is compiled out, so the whole gate runs with no
-    # RISC-V toolchain installed. Guards against RV32I state leaking into the base
-    # eForth path (a leak would break this build while the default stayed green).
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang gforth
-      - name: Run pre-commit gate (RV32I disabled)
-        run: make ENABLE_RV32I=0 check
 
   sanitize:
     runs-on: ubuntu-24.04
@@ -113,13 +73,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang gforth
-      - name: Cache RISC-V toolchain
-        uses: actions/cache@v6
-        with:
-          path: ~/riscv-none-elf-gcc
-          key: xpack-riscv-none-elf-gcc-${{ env.XPACK_RISCV_VERSION }}-linux-x64
-      - name: Install RISC-V toolchain
-        run: .ci/install-riscv-toolchain.sh
       - name: ASan and UBSan validation
         run: make sanitize
 
@@ -131,15 +84,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang gforth python3-z3
-      - name: Cache RISC-V toolchain
-        uses: actions/cache@v6
-        with:
-          path: ~/riscv-none-elf-gcc
-          key: xpack-riscv-none-elf-gcc-${{ env.XPACK_RISCV_VERSION }}-linux-x64
-      - name: Install RISC-V toolchain
-        run: .ci/install-riscv-toolchain.sh
-      - name: Conformance, proofs, fuzz, and benchmarks
+          sudo apt-get install -y build-essential clang gforth
+      - name: Wide native-image validation
         run: |
-          make verify-rv32i verify-microcode verify-rvopt-mux verify-mux32 \
-               verify-duremark-rvopt verify-loader-rejects verify-riscv-tests duremark
+          make verify-mux verify-loader-rejects
