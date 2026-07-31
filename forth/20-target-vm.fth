@@ -151,6 +151,10 @@ assembler.1 -order
 :a opDrop tos {sp} iLOAD --sp ;a
 :a [@] tos tos iLOAD ;a
 :a [!] r0 {sp} iLOAD r0 tos iSTORE --sp t' opDrop JMP (a);
+\ Native cell fetch/store: fold the nested 2/ 2/ [@] chain behind @ and ! into
+\ one primitive each -- a single dispatch on the hot dictionary-search path.
+:a op@ tos tos SHR1 tos tos SHR1 tos tos iLOAD ;a
+:a op! tos tos SHR1 tos tos SHR1 t' [!] JMP (a);
 :a opEmit tos PUT t' opDrop JMP (a);
 :a opExit ip {rp} iLOAD (fall-through);
 :a rdrop --rp ;a

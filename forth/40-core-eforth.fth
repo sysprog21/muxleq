@@ -54,6 +54,8 @@
 :m mux opMux ;m                    ( -- : compile opMux into dictionary )
 :m exit opExit ;m                  ( -- : compile opExit into dictionary )
 :m rshift shift ;m                 ( -- : compile shift into dictionary )
+:m @ op@ ;m                        ( -- : compile op@ inline, no call frame )
+:m ! op! ;m                        ( -- : compile op! inline, no call frame )
 
 \ Core Target Forth Words
 :to + + ; ( n n -- n : addition )
@@ -116,8 +118,8 @@ system[
 : or over mux ;                    ( u u -- u : bitwise or )
 : and #0 swap mux ;                ( u u -- u : bitwise and )
 : 2/ #1 rshift ;                   ( u -- u : divide by two )
-: @ 2/ 2/ [@] ;                   ( a -- u : fetch a cell )
-: ! 2/ 2/ [!] ;                   ( u a -- : write a cell )
+:to @ op@ ;                       ( a -- u : fetch a cell )
+:to ! op! ;                       ( u a -- : write a cell )
 :s @+ dup @ ;s                     ( a -- a u : non-destructive load )
 
 \ User variables for I/O vectoring
