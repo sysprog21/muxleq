@@ -16,42 +16,46 @@ the interpreter rereads them when each instruction executes.
   `A B 0x80000006` is a MOVE.
 - MUX mask-address `0x7ffffffe` is reserved as a native shift, so
   `A B 0xfffffffe` computes `[B] = [A] >> 1`. The eForth `shift` primitive
-  emits it to avoid a cell-width bit loop. This is a new ISA reservation,
-  like the `0xffffffff` I/O marker: it is matched on the raw operand before
-  any arena masking, and a genuine mask address is a small cell index, so no
-  MUXLEQ emitter uses `0x7ffffffe`.
+  emits it to avoid a cell-width bit loop. This is an ISA reservation like the
+  `0xffffffff` I/O marker: it is matched on the raw operand before any arena
+  masking, and a genuine mask address is a small cell index, so no MUXLEQ
+  emitter uses `0x7ffffffe`. It is the only such reservation. Downward bit
+  movement is the one thing same-lane MUX and upward-carrying SUBLEQ have no
+  direct primitive for -- only a bit-serial loop -- so a right shift fills that
+  gap; a variable shift, multiply, and divide are compositions of it, and byte
+  access is a storage convention, so all of those stay in the eForth software
+  layer rather than the ISA.
 
-## eForth-32 Target Encoding
+## eForth Target Encoding
 
-The 32-bit eForth port targets this same host encoding directly. P0c changes
-the metacompiler constants, not the VM instruction shape:
+The eForth image targets this host encoding directly. It is expressed in the
+metacompiler constants, not in the VM instruction shape:
 
-- `forth/10-meta-assembler.fth`: `=cell` becomes `4`.
+- `forth/10-meta-assembler.fth`: `=cell` is `4`.
 - Target image stores and loads pack/unpack four little-endian bytes per target
   cell.
-- Target dictionary alignment becomes 4-byte alignment.
+- Target dictionary alignment is 4-byte.
 - Target decimal output and checksums mask target cells with `0xffffffff`.
 - Target signed-decimal output splits negative values at `0x80000000`.
-- `forth/20-target-vm.fth`: `bwidth` becomes `$20`.
-- `rvsign` and `MUXR` use `$80000000`.
-- Halt and I/O keep muxleq's `0xffffffff` marker.
+- `forth/20-target-vm.fth`: `bwidth` is `$20`.
+- `MUXR` masks with `$80000000` (`muxflag`, i.e. `signbit`).
+- Halt and I/O use the `0xffffffff` marker.
 
-The existing 16-bit metacompiler divides byte addresses by two before emitting
-operand cells. The 32-bit port keeps the same byte-addressed dictionary pointer
-inside the metacompiler, but divides by four when emitting a VM cell address and
-multiplies by four when reconstructing a target byte address. That keeps packed
-strings byte-dense while the generated MUXLEQ image remains cell-addressed.
+The metacompiler keeps a byte-addressed dictionary pointer internally: it divides
+by four when emitting a VM cell address and multiplies by four when reconstructing
+a target byte address. That keeps packed name strings byte-dense while the
+generated MUXLEQ image stays cell-addressed.
 
-`mwidth` stays `$40`: the boot-time width probe only needs to reject machines
-wider than the supported maximum, and 32 still fits under that guard. The
-hard boot check must compare the measured width with the new `$20` `bwidth`;
-otherwise the ported image will take the existing "Not a 16-bit SUBLEQ VM"
-failure path.
+`mwidth` is `$40`: the boot-time width probe only needs to reject machines wider
+than the supported maximum, and 32 fits under that guard. The hard boot check
+compares the measured width against `bwidth` (`$20`); a mismatch takes the boot
+failure path (message `err-str` in `forth/20-target-vm.fth`, "Error: Not a 32-bit
+MUXLEQ VM").
 
-Cell addressing is a P0 decision. The P1 Linux/toolchain work must retarget
-eternal's byte-addressed backend and kernel assumptions to this cell-addressed
-host, or add a separate compatibility mode later. P0b does not add indirect
-addressing or interrupts.
+Cell addressing is fundamental to this host, not a mode. A byte-addressed
+LLVM/C backend or kernel targeting MUXLEQ must map its byte-addressed model onto
+this cell-addressed one, or add a compatibility layer; the host itself provides
+no indirect addressing or interrupts.
 
 ## Host Arena
 

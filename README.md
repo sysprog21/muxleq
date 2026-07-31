@@ -17,9 +17,13 @@
                             |__|/ \|__|                              \|__|
 ```
 
-MUXLEQ is a two-instruction esoteric programming language,
-extending the classic `SUBLEQ` with a multiplexing operation for enhanced performance and reduced program size.
-This project provides a complete, self-hosting development environment for it.
+MUXLEQ is a minimalist esoteric machine. Its core is two instructions: the
+classic `SUBLEQ` plus a multiplexing (MUX) operation that adds single-instruction
+data movement and boolean logic. A small, disciplined set of native primitives is
+layered on top by encoding them in otherwise-unused operand values; today that is
+a single right-shift op. The result runs faster and in fewer cells than pure
+SUBLEQ, and this project ships a complete, self-hosting development environment
+for it.
 
 MUXLEQ is a 32-bit-cell, cell-addressed VM. With no argument it runs the
 self-hosting eForth image; given a FILE it loads and runs that standalone
@@ -102,15 +106,17 @@ if Mem[b] <= 0:
 Special operand values trigger I/O or halt the machine:
 * Input: If `a` is -1, a byte is read from input and stored at the address `b`.
 * Output: If `b` is -1, the byte at address `a` is sent to the output.
-* Halt: If `c` is a negative address, the program halts.
+* Halt: a taken branch to a negative address halts the machine -- the program
+  counter itself goes negative. By convention the halt target is -1 (`Z, Z, -1`).
 
 ### The MUX Enhancement
 MUXLEQ adds a multiplexing (MUX) instruction by encoding it into the `c` operand.
-If `c` is negative (but not -1, which is reserved for I/O),
-the MUX operation is performed instead of a branch.
+If `c` has its high bit set but is not -1 (`0xffffffff`, which stays the
+halt/branch target), the MUX operation is performed instead of a branch.
 This avoids needing a separate opcode, preserving the simple `a b c` instruction format.
 
-The complete MUXLEQ logic is as follows:
+The core MUXLEQ logic is as follows (one reserved mask value is additionally
+dispatched as a native shift; see "Native primitives and their limits" below):
 ```python
 # Pseudo-code for the MUXLEQ virtual machine
 while pc >= 0:
@@ -140,14 +146,35 @@ MUX with constants `0` and `-1` can implement any boolean function:
 
 The above are expensive in pure SUBLEQ (requiring dozens of instructions).
 
-Setting the selector to 0 creates single-instruction MOV, can replace SUBLEQ's 4-instruction copy sequence.
-In addition, direct bit manipulation accelerates pointer arithmetic, array indexing, and indirect memory operations.
+Setting the mask to 0 makes a single-instruction MOVE, replacing SUBLEQ's
+multi-instruction copy sequence. Boolean masking through MUX likewise collapses
+bit-twiddling that pure SUBLEQ would build from many subtract-and-branch steps.
+Because MUX is a *same-lane* selector, though, it cannot move a bit between
+positions -- it cannot shift. That gap is what the native-primitive mechanism
+below fills.
 
-### Future Directions and Variants
-The MUXLEQ design can be extended with other instructions by encoding them in the operands. Some potential enhancements include:
-* Bit Reversal: As proposed in "[Subleq: An Area-Efficient Two-Instruction-Set Computer](https://janders.eecg.utoronto.ca/pdfs/esl.pdf)," a bit-reversal instruction can efficiently implement arithmetic shifts.
-* Right Shift: A dedicated right-shift would significantly accelerate arithmetic operations.
-* Comparison: A comparison instruction could store the result of `Mem[a]` vs. `Mem[b]` (e.g., is-zero, less-than) into `Mem[a]`.
+### Native primitives and their limits
+Further instructions are encoded in otherwise-unused operand values: a MUX whose
+mask address is a reserved, out-of-range value is dispatched as a native op
+instead. The machine reserves exactly one such value today, a right shift
+(`Mem[b] = Mem[a] >> 1`), which the eForth `shift` word uses in place of a
+bit-serial loop.
+
+That one op is not arbitrary; it marks the boundary of what belongs in the ISA.
+The core is cheap at same-lane logic (MUX), arithmetic and branching (SUBLEQ), and
+*upward* bit movement (a left shift is just `x + x`, since a carry propagates low
+to high). Moving a bit the other way, *downward*, it can do only through a
+bit-serial loop -- so a right shift is the single primitive that turns that loop
+into one step. Everything else is a composition of it: a variable shift is a loop
+of right shifts (a barrel shift does the same in one step but adds no new
+capability), multiply is shift-and-add, divide is shift-and-subtract -- all
+software. Native byte load/store are deliberately excluded too: on a cell-addressed
+machine they would bake a byte-packing convention into the VM. (A comparison op would not
+qualify either: SUBLEQ already subtracts and branches, so it is no gap.) The one
+further candidate that does fit the rule is a bit-reversal -- genuinely
+cross-lane, which the core cannot do, and per "[Subleq: An Area-Efficient
+Two-Instruction-Set Computer](https://janders.eecg.utoronto.ca/pdfs/esl.pdf)" an
+efficient route to arithmetic shifts -- were a workload ever to justify it.
 
 ## eForth and Meta-Compilation
 The Forth environment provided is a variant of **eForth**, designed by Bill Muench and C.H. Ting for portability and efficiency.

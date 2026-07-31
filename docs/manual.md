@@ -1,7 +1,8 @@
 # MUXLEQ Reference Manual
 
-MUXLEQ is a two-instruction esoteric machine -- SUBLEQ plus a multiplexing (MUX)
-operation -- hosting a complete, self-hosting 32-bit eForth. This manual documents
+MUXLEQ is a minimalist esoteric machine -- SUBLEQ plus a multiplexing (MUX)
+operation, and one native shift primitive reached through a reserved operand
+encoding -- hosting a complete, self-hosting 32-bit eForth. This manual documents
 the instruction set, the memory image, the build/bootstrap pipeline, the C
 interpreter, and how to test and extend the system. It describes the actual
 implementation in `muxleq.c` and the `forth/*.fth` modules; when in doubt, the
@@ -25,7 +26,7 @@ The interpreter classifies each instruction from its operands, in this order:
 |---------------------------------------------|-----------|
 | `a == 0xffffffff`                           | input: read one byte into `m[b]` |
 | `b == 0xffffffff`                           | output: write `m[a]` as one byte |
-| `c` has bit 31 set and `c != 0xffffffff`    | MUX (see below) |
+| `c` has bit 31 set and `c != 0xffffffff`    | MUX, or a reserved-mask native op (see below) |
 | otherwise                                   | SUBLEQ |
 
 Execution halts when the program counter goes negative (bit 31 set), or on EOF
@@ -65,6 +66,34 @@ whose mask is address 6 (or any cell holding 0) selects every bit from `m[a]`,
 i.e. a pure **MOVE** `m[b] = m[a]`; the interpreter fast-paths mask address 6 for
 this reason. Single-instruction data movement is the feature that separates
 MUXLEQ from pure SUBLEQ.
+
+### Native shift escape
+
+The core has no direct shift. MUX is same-lane, and SUBLEQ's carry propagates only
+*upward* (so a left shift is just `m[b] += m[b]`); moving a bit the other way,
+*down* a lane, is possible only through a bit-serial loop. One more mask value is
+reserved to supply that directly. A MUX whose mask address is `0x7ffffffe` -- an
+out-of-range value no real mask cell ever takes -- is dispatched as a native right
+shift:
+
+```
+m[b] = m[a] >> 1
+pc = pc + 3
+```
+
+The eForth `shift` word emits it instead of a bit-serial loop. The match is on the
+raw `c` operand before any arena masking, exactly like the `0xffffffff` I/O
+marker, so a genuine mask address (a small cell index) never collides with it, and
+programs that use neither escape run as plain SUBLEQ+MUX.
+
+This is the only such reservation, by design. A variable shift is a loop of these
+right shifts (a barrel shift computes the same in one step, but adds no capability
+the shift lacks), multiply is shift-and-add, divide is shift-and-subtract, and
+byte access would bake a packing convention into a cell-addressed machine -- all
+compositions or conventions that belong in the eForth software layer, not the ISA.
+The rule for what may be added: a convention-free, value-only primitive the core
+can otherwise reach only through a loop, filling a real directional gap. (A
+comparison would not qualify -- SUBLEQ already subtracts and branches.)
 
 ## 2. Memory image
 
