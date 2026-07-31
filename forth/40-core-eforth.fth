@@ -512,15 +512,20 @@ opt.divmod [if]
 : cfa                              ( pwd -- cfa : move to Code Field Address )
   nfa c@+ [ 1F ] literal and + cell+ -cell and ;
 
+system[ variable stoklen ]system   ( length of the word being searched for )
+
 :s (search)                        ( a wid -- PWD PWD 1 | PWD PWD -1 | 0 a 0 )
   ( Search for word "a" in "wid" )
-  swap >r dup
+  swap >r r@ count nip stoklen ! dup
   begin
     dup
   while
-    \ $9F = $1F:word-length + $80:hidden
-    dup nfa count [ $9F ] literal
-    and r@ count compare 0=
+    \ $9F = $1F:word-length + $80:hidden. nfa is cell-aligned, so the node length
+    \ byte is the low byte of the name cell (inlined @, not a c@ call). The length
+    \ is checked inline against the hoisted token length (stoklen); compare runs
+    \ only on a length match, so a mismatched node skips the compare call entirely.
+    dup nfa dup 1+ swap @ [ $9F ] literal and
+    dup stoklen @ - if 2drop #0 else r@ 1+ stoklen @ compare 0= then
     if ( found! )
       rdrop
       dup nfa [ $40 ] literal swap @ and 0<>

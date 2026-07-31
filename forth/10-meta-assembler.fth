@@ -9,7 +9,7 @@ meta.1 +order definitions
 \ Target System Constants
    4 constant =cell   ( Target cell size in bytes; 32-bit target )
 \ tflash working area. Self-host needs the running image + this buffer + the metacompiler's own
-\ dictionary growth to fit in the VM's 32768 cells.
+\ dictionary growth to fit in the VM arena (MUX_MIN_CELLS, 65536 cells on the 32-bit host).
 4000 constant size    ( Size of image working area )
  100 constant =buf    ( Size of text input buffers in target )
 180 constant =stksz ( Size of return and variable stacks )
