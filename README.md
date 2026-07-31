@@ -118,24 +118,29 @@ This avoids needing a separate opcode, preserving the simple `a b c` instruction
 The core MUXLEQ logic is as follows (one reserved mask value is additionally
 dispatched as a native shift; see "Native primitives and their limits" below):
 ```python
-# Pseudo-code for the MUXLEQ virtual machine
-while pc >= 0:
+# Pseudo-code for the MUXLEQ virtual machine; cells are unsigned 32-bit
+while not (pc & 0x80000000):        # run until the PC's high bit is set (halt)
+    # every Mem[] index below is masked into the bounded host arena
     a = Mem[pc + 0]
     b = Mem[pc + 1]
     c = Mem[pc + 2]
     pc += 3
 
-    if a == -1:
-        Mem[b] = get_byte()  # Input
-    elif b == -1:
-        put_byte(Mem[a])     # Output
-    elif c < -1: # Negative 'c' triggers MUX
-        # Multiplex: Mem[b] = (Mem[a] AND (NOT Mem[c])) OR (Mem[b] AND Mem[c])
-        Mem[b] = (Mem[a] & ~Mem[c]) | (Mem[b] & Mem[c])
-    else:
+    if a == 0xFFFFFFFF:             # -1: input
+        Mem[b] = get_byte()
+    elif b == 0xFFFFFFFF:           # -1: output
+        put_byte(Mem[a])
+    elif (c & 0x80000000) and c != 0xFFFFFFFF:   # high bit set: MUX or a native escape
+        mask_addr = c & 0x7FFFFFFF               # low 31 bits address the mask cell
+        if mask_addr == 0x7FFFFFFE:              # reserved: native shift-right-by-1
+            Mem[b] = Mem[a] >> 1
+        else:
+            mask = Mem[mask_addr]                # cell 6 is the zero register: a zero mask is a MOVE
+            Mem[b] = (Mem[a] & ~mask) | (Mem[b] & mask)   # Multiplex
+    else:                           # SUBLEQ
         Mem[b] = Mem[b] - Mem[a]
-        if Mem[b] <= 0:
-            pc = c # Branch
+        if Mem[b] == 0 or (Mem[b] & 0x80000000):          # result <= 0 (signed)
+            pc = c                  # Branch
 ```
 
 MUX with constants `0` and `-1` can implement any boolean function:

@@ -24,9 +24,12 @@ value/def-use edges + a memory-order chain) and emits:
 - `rvopt dump` / `rvopt check` -- textual IR round-trip for the folder and decode
   passes.
 
-Op coverage is COMPLETE for the rv32ui base set (ADD/SUB/SLT[U]/AND/OR/XOR +
-immediates, all shifts, LUI/AUIPC, all branches, JAL, computed/linking JALR,
-LB/LH/LHU/LW/SB/SH/SW, ecall write/exit).
+Op coverage spans the rv32ui base set (ADD/SUB/SLT[U]/AND/OR/XOR + immediates,
+all shifts, LUI/AUIPC, all branches, JAL, LB/LH/LHU/LW/SB/SH/SW, ecall
+write/exit). JALR is lowered for statically resolvable targets (rs1 a
+compile-time constant in the same block, e.g. an auipc/lui/li/addi result) and
+the standard return form; other runtime-computed JALRs are rejected with an
+unsupported-JALR error.
 
 Optimizations: SW high-byte/address-share, const-OPIMM + mv-copy folding,
 same-block store-to-load forwarding, and simple-loop register promotion. def-use

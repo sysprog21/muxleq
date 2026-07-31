@@ -2,13 +2,17 @@ defined eforth [if] ' ) <ok> ! [then] ( Turn off ok prompt )
 
 \ MUXLEQ eForth Cross-Compiler and Virtual Machine
 \
-\ This file contains a cross compiler and eForth interpreter for the
-\ two-instruction MUXLEQ CPU architecture. This version of Forth is
-\ derived from an eForth implementation designed for a 16-bit MUXLEQ CPU.
+\ This file contains a cross compiler and eForth interpreter for the MUXLEQ
+\ CPU: a two-instruction core (SUBLEQ plus MUX) with one native shift escape.
+\ This version of Forth is derived from an eForth implementation originally
+\ designed for a 16-bit MUXLEQ CPU.
 \
-\ The MUXLEQ architecture extends SUBLEQ with a multiplexing operation:
+\ The MUXLEQ architecture extends SUBLEQ with a multiplexing operation
+\ (cells are 32-bit):
 \ - SUBLEQ: Mem[b] = Mem[b] - Mem[a]; if Mem[b] <= 0 then pc = c
-\ - MUX: If c < -1, then Mem[b] = (Mem[a] & ~Mem[c]) | (Mem[b] & Mem[c])
+\ - MUX: if c has bit 31 set and c != -1, then Mem[b] = (Mem[a] & ~m) |
+\        (Mem[b] & m) with mask m = Mem[c & 0x7fffffff]; mask address
+\        0x7ffffffe is a native shift-right-by-one
 \ - I/O: a=-1 for input, b=-1 for output, c=-1 to halt
 \
 \ The cross compiler is compatible with Gforth and has been tested.

@@ -174,7 +174,8 @@ about the image ahead of time.
 
 `muxleq.c` is a wide VM loop. With no arguments it runs the baked 32-bit eForth
 image. Given a `FILE` it loads a whitespace-delimited image and runs that
-instead. Any option argument is rejected.
+instead. A leading `--` is accepted as an end-of-options marker, so the interface
+is `muxleq [--] [FILE]`; any other option argument is rejected.
 
 ## 5. eForth environment
 
