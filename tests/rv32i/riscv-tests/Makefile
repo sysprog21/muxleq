@@ -1,4 +1,4 @@
-# RV32I compliance for `../../../build/muxleq` via the official riscv-tests rv32ui suite.
+# RV32I compliance for '../../../build/muxleq' via the official riscv-tests rv32ui suite.
 #
 # The upstream test bodies are NOT vendored: this Makefile shallow-clones them
 # (pinned to UPSTREAM_REV) into ./upstream (gitignored) and builds each with a
@@ -22,7 +22,7 @@ RVOPT  ?= ../../../build/rvopt
 TIMEOUT ?= $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)
 RUN_TIMEOUT ?= 60
 
-# Base RV32I only. Excluded: fence_i (FENCE traps by design, docs/rv32i-muxleq-abi.md)
+# Base RV32I only. Excluded: fence_i (FENCE traps by design)
 # and ma_data (misaligned access unsupported, muxleq.fth:752).
 TESTS = simple add addi and andi auipc beq bge bgeu blt bltu bne jal jalr \
         lb lbu lh lhu lui lw or ori sb sh sll slli slt slti sltiu sltu \
@@ -30,28 +30,9 @@ TESTS = simple add addi and andi auipc beq bge bgeu blt bltu bne jal jalr \
 
 ELFS = $(addsuffix .elf,$(TESTS))
 
-# The subset the native emitter `rvopt -mux` can lower today. The one remaining
-# skip is IMAGE-SIZE ONLY -- correct code that overflows the 32768-cell native
-# image: ld_st (large .data, needs ~76k cells). sra USED to overflow (33619 cells) but
-# the cumulative optimizer work (const-OPIMM + mv folds, store-to-load forwarding,
-# the MUX-MAJ dispatch collapse) shrank it to 31981 -- under the ceiling with ~787
-# cells to spare -- so it now emits and PASSes native (39/40). That headroom is
-# TIGHT: a codegen change that regrows sra past 32768 fails this gate loudly --
-# `rvopt -mux` aborts before emit ("image needs N cells (> 32768)", rvopt.c), and
-# an oversized .dec is rejected by `muxleq -x` (n >= MEM_SIZE); neither silently
-# wraps. Re-skip sra consciously if that day comes. Every rv32ui emitter OP is
-# supported (LB/LH/LHU/SH,
-# SRL/SRA, computed JALR all landed). A test that fails to emit here is a regression.
-MUX_SKIP  = ld_st
-MUX_TESTS = $(filter-out $(MUX_SKIP),$(TESTS))
-
-# The WIDE emitter `rvopt -mux32`, run on the 2M-cell `-x32` runner, lowers the
-# ENTIRE rv32ui suite: 40/40. The wide address space is the whole point -- it
-# emits + PASSes ld_st (~188k cells), which the 16-bit -mux CANNOT (over its
-# 32768-cell ceiling). X32_SKIP is empty; any test that fails to emit here is a
-# regression.
-X32_SKIP  =
-X32_TESTS = $(filter-out $(X32_SKIP),$(TESTS))
+# 'rvopt mux' lowers the ENTIRE rv32ui suite to a standalone MUXLEQ image
+# and the wide VM runs it: 40/40, INCLUDING ld_st (~188k cells). A test that
+# fails to emit or PASS here is a regression.
 
 all: $(ELFS)
 
@@ -78,64 +59,31 @@ $(STAMP): FORCE
 %.elf: riscv_test.h link.ld $(STAMP)
 	$(CC) $(CFLAGS) -T link.ld -o $@ upstream/isa/rv64ui/$*.S
 
-# Run each test through the VM and assert its stdout is EXACTLY "PASS\n" and it
-# exited cleanly. Byte-exact via cmp (command substitution would hide a trailing
-# newline); the exit-status check catches a timeout-killed hang or a host crash
-# that printed PASS before dying. A trap/illegal-instruction prints a diagnostic,
-# not PASS, so cmp rejects it.
+# Lower each test to a native MUXLEQ image with 'rvopt mux', run it on the two
+# ops (no interpreter), and assert stdout is EXACTLY "PASS\n" with a clean exit.
+# Byte-exact via cmp; the exit-status check catches a timeout-killed hang or a
+# host crash that printed PASS before dying. A test that fails to emit or PASS
+# is a regression.
 check: $(ELFS)
 	@fail=0; for t in $(TESTS); do \
-	  $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) $(MUXLEQ) -r $$t.elf > .check.out 2>/dev/null; \
-	  st=$$?; \
-	  if [ $$st -ne 0 ] || ! printf 'PASS\n' | cmp -s - .check.out; then \
-	    echo "  FAIL: rv32ui-$$t (status $$st, got '`tr -d '\n' < .check.out`')"; fail=1; fi; \
-	done; \
-	$(RM) .check.out; \
-	if [ $$fail -eq 0 ]; then echo "riscv-tests: all $(words $(TESTS)) rv32ui tests PASS"; \
-	else exit 1; fi
-
-# Same byte-exact PASS gate, but each test is lowered to a native MUXLEQ image by
-# `rvopt -mux` and run on the two ops via `-x` (no interpreter). Covers only the
-# emittable subset; a test that fails to emit is a regression (the deferred ops
-# are excluded via MUX_SKIP, not silently skipped here).
-check-mux: $(addsuffix .elf,$(MUX_TESTS))
-	@fail=0; for t in $(MUX_TESTS); do \
-	  if $(RVOPT) -mux $$t.elf > .mux.dec 2>/dev/null; then \
-	    $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) $(MUXLEQ) -x .mux.dec > .check.out 2>/dev/null; \
+	  if $(RVOPT) mux $$t.elf > .mux.dec 2>/dev/null; then \
+	    $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) $(MUXLEQ) .mux.dec > .check.out 2>/dev/null; \
 	    st=$$?; \
 	    if [ $$st -ne 0 ] || ! printf 'PASS\n' | cmp -s - .check.out; then \
 	      echo "  FAIL(mux): rv32ui-$$t (status $$st, got '`tr -d '\n' < .check.out`')"; fail=1; fi; \
-	  else echo "  FAIL(mux): rv32ui-$$t did not emit (rvopt -mux abort)"; fail=1; fi; \
+	  else echo "  FAIL(mux): rv32ui-$$t did not emit (rvopt mux abort)"; fail=1; fi; \
 	done; \
 	$(RM) .mux.dec .check.out; \
 	if [ $$fail -eq 0 ]; then \
-	  echo "riscv-tests(-mux): $(words $(MUX_TESTS))/$(words $(TESTS)) rv32ui emit native + PASS (skip: $(MUX_SKIP))"; \
-	else exit 1; fi
-
-# Same byte-exact PASS gate as check-mux, but lowered by the WIDE emitter
-# `rvopt -mux32` and run on the 2M-cell `-x32` runner. Covers ld_st (the
-# wide-address payoff the 16-bit path cannot reach); a non-X32_SKIP test that
-# fails to emit is a regression.
-check-x32: $(addsuffix .elf,$(X32_TESTS))
-	@fail=0; for t in $(X32_TESTS); do \
-	  if $(RVOPT) -mux32 $$t.elf > .x32.dec 2>/dev/null; then \
-	    $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) $(MUXLEQ) -x32 .x32.dec > .check.out 2>/dev/null; \
-	    st=$$?; \
-	    if [ $$st -ne 0 ] || ! printf 'PASS\n' | cmp -s - .check.out; then \
-	      echo "  FAIL(x32): rv32ui-$$t (status $$st, got '`tr -d '\n' < .check.out`')"; fail=1; fi; \
-	  else echo "  FAIL(x32): rv32ui-$$t did not emit (rvopt -mux32 abort)"; fail=1; fi; \
-	done; \
-	$(RM) .x32.dec .check.out; \
-	if [ $$fail -eq 0 ]; then \
-	  echo "riscv-tests(-mux32): $(words $(X32_TESTS))/$(words $(TESTS)) rv32ui emit wide + PASS incl. ld_st$(if $(X32_SKIP), (skip: $(X32_SKIP)),)"; \
+	  echo "riscv-tests: all $(words $(TESTS)) rv32ui emit native + PASS"; \
 	else exit 1; fi
 
 clean:
-	$(RM) *.elf .check.out .mux.dec .x32.dec
+	$(RM) *.elf .check.out .mux.dec
 
-# `distclean` also drops the upstream clone (re-fetched on next build).
+# 'distclean' also drops the upstream clone (re-fetched on next build).
 distclean: clean
 	$(RM) -r upstream upstream.tmp
 
 FORCE:
-.PHONY: all check check-mux check-x32 clean distclean FORCE
+.PHONY: all check clean distclean FORCE

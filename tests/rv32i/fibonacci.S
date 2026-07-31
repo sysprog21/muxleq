@@ -1,7 +1,8 @@
-# Freestanding RV32I Fibonacci for the muxleq runner.
+# Fibonacci for the muxleq runner.
 # Prints fib(0)..fib(11), one decimal value per line, then exits. Uses only the
 # base ISA -- no M extension -- so the decimal conversion divides by 10 with a
-# subtract loop (values are small). Runs under `../../muxleq -r fibonacci.elf`.
+# subtract loop (values are small). Lowered by 'rvopt mux' and run on
+# '../../build/muxleq'.
 .equ SYS_WRITE, 64
 .equ SYS_EXIT,  93
 .equ COUNT,     12

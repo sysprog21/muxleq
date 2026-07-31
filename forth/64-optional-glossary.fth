@@ -16,7 +16,7 @@ opt.glossary [if]
 :s =exit [ to' pause ] literal cell+ @ ;s ( exit follows BLT )
 :s rvm? dup @ =vm u<= swap cell+ @ =exit = and ;s ( cfa -- f )
 :s cvm?                            ( cfa -- f )
-   dup @ [ t' compile ] literal 2/ = swap cell+ rvm? and ;s
+   dup @ [ t' compile ] literal 2/ 2/ = swap cell+ rvm? and ;s
 :s vm? dup rvm? swap cvm? or ;s    ( cfa -- f )
 :s .built-in dup cfa vm? if ." BLT " exit then .blank ;s
 :s display                         ( pwd -- pwd : display info about word )

@@ -1,9 +1,11 @@
 # print_dec: write the unsigned value in a0 as decimal digits followed by '\n'.
-# Shared by the freestanding RV32I demos (fibonacci, primes) via `.include "print_dec.S"`.
-# The includer must define SYS_WRITE (= 64) before the include. Base ISA only: the digits are
-# built backward into buf by a divide-by-10 subtract loop (no M extension), then written as one
-# substring. Touches only a0..a2/t0..t6 and no stack, so the caller keeps its state in s-registers.
-# Internal labels are `.L`-local so an includer can reuse the names digit/mod/emit without clashing.
+# Shared by the freestanding RV32I demos (fibonacci, primes) via
+# '.include "print_dec.S"'.
+# The includer must define SYS_WRITE (= 64) before the include. Base ISA only:
+# the digits are built backward into buf by a divide-by-10 subtract loop (no M
+# extension), then written as one substring. Touches only a0..a2/t0..t6 and no
+# stack, so the caller keeps its state in s-registers. Internal labels are
+# '.L'-local so an includer can reuse the names digit/mod/emit without clashing.
 print_dec:
     la   t0, buf
     addi t1, t0, 15            # t1 -> last byte of buf

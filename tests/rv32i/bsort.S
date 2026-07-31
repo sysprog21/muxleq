@@ -1,10 +1,10 @@
-# Freestanding RV32I bubble sort for the muxleq runner.
+# Bubble sort for the muxleq runner.
 # Sorts a small word array in place, then prints it ascending. This is the first
 # demo to exercise computed-address word access (slli index + add base, then
 # lw/sw a 32-bit element) and a signed compare (ble/bge) driving in-place swaps
 # across nested loops -- ground the sieve (byte flags) and the arithmetic demos
 # do not cover. Prints the sorted array 0..9, one per line, then exits.
-# Runs under `../../muxleq -r bsort.elf`.
+# Lowered by 'rvopt mux' and run on '../../build/muxleq'.
 .equ SYS_WRITE, 64
 .equ SYS_EXIT,  93
 .equ N,         10

@@ -1,10 +1,11 @@
 /*
  * Freestanding base-RV32I (no mul/div) fold-headroom benchmark. An xorshift
  * PRNG folded into a sum, plus constant setup; du_main writes the 4-byte
- * checksum via the write ecall (inlined, so there is one function / one ret --
- * rvopt -mux supports a single ret call site). Under -O0 gcc leaves constants
- * un-folded and spills every var (redundant loads, mv's) -- real optimizer
- * headroom rvopt's folder captures; under -O2 it is tight. Same output either.
+ * checksum via the write ecall (inlined, so there is one function / one ret,
+ * which rvopt mux needs: it supports a single ret call site). Under -O0 gcc
+ * leaves constants un-folded and spills every var (redundant loads, mv's), the
+ * real optimizer headroom rvopt's folder captures; under -O2 it is tight. Same
+ * output either.
  */
 void du_main(void)
 {

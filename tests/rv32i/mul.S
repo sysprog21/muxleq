@@ -1,10 +1,10 @@
-# Freestanding RV32I shift-add software multiply for the muxleq runner.
+# shift-add software multiply for the muxleq runner.
 # RV32I base has NO M extension, so a product is built in software: for each set
 # bit of the multiplier, add the shifted multiplicand (the standard shift-add
 # algorithm milliForth does with a hardware M* -- here in base ISA). This is the
 # first demo to exercise a logical right shift (srli) + low-bit testing (andi).
 # Prints the 7 times table 7*0..7*9, one decimal product per line, then exits.
-# Runs under `../../muxleq -r mul.elf`.
+# Lowered by 'rvopt mux' and run on '../../build/muxleq'.
 .equ SYS_WRITE, 64
 .equ SYS_EXIT,  93
 .equ COUNT,     10

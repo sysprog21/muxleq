@@ -8,7 +8,7 @@
 # memory-lowering, dead-store, DCE, and coalescing passes that eliminate exactly
 # those spills (the folder alone only moves it -0.4%). Base ISA (no mul/div),
 # entry-0, write/exit, fits 32768 cells (emits about 13477). crt0 uses
-# "jal ra, du_main" (a single ret call site) so rvopt -mux can resolve the ret.
+# "jal ra, du_main" (a single ret call site) so rvopt mux can resolve the ret.
 # The .elf is generated, never committed: the top-level build places it under
 # build/rv32i by invoking this Makefile with OUT set.
 CROSS  ?= riscv-none-elf-
@@ -29,9 +29,10 @@ $(OUT)/crt0.o: crt0.S | $(OUT)
 	$(CROSS)gcc $(CFLAGS) -c -o $@ $<
 
 run: $(OUT)/unopt.elf
-	../../../build/muxleq -r $(OUT)/unopt.elf | xxd
+	../../../build/rvopt mux $(OUT)/unopt.elf > $(OUT)/unopt.dec \
+	    && ../../../build/muxleq $(OUT)/unopt.dec | xxd
 
 clean:
-	$(RM) $(OBJS)
+	$(RM) $(OBJS) $(OUT)/unopt.elf $(OUT)/unopt.dec
 
 .PHONY: run clean

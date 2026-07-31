@@ -38,8 +38,8 @@ def is_raw(fd):
 
 
 def main():
-    if len(sys.argv) != 2:
-        sys.stderr.write("usage: pty-run.py BINARY  (keystrokes on stdin)\n")
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: pty-run.py COMMAND [ARG ...]  (keystrokes on stdin)\n")
         return 2
     keys = sys.stdin.buffer.read()
     try:
@@ -52,7 +52,7 @@ def main():
     # reports to reach the caller).
     child_stderr = None if os.environ.get("PTY_RUN_STDERR") else subprocess.DEVNULL
     proc = subprocess.Popen(
-        [sys.argv[1]],
+        sys.argv[1:],
         stdin=slave,
         stdout=slave,
         stderr=child_stderr,

@@ -1,6 +1,7 @@
-# Freestanding RV32I "Hello World!" for the muxleq runner.
-# Links at guest address 0 and uses only the write(64) and exit(93) ecalls, so it
-# runs directly under `../../muxleq -r hello.elf`. Prints the greeting five times.
+# "Hello World!" for the muxleq runner.
+# Links at guest address 0 and uses only the write(64) and exit(93) ecalls.
+# Lowered by 'rvopt mux' and run on '../../build/muxleq'. Prints the greeting
+# five times.
 .equ SYS_WRITE, 64
 .equ SYS_EXIT,  93
 

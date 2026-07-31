@@ -1,7 +1,8 @@
 # MUXLEQ Reference Manual
 
-MUXLEQ is a two-instruction esoteric machine -- SUBLEQ plus a multiplexing (MUX)
-operation -- hosting a complete, self-hosting 16-bit eForth. This manual documents
+MUXLEQ is a minimalist esoteric machine -- SUBLEQ plus a multiplexing (MUX)
+operation, and one native shift primitive reached through a reserved operand
+encoding -- hosting a complete, self-hosting 32-bit eForth. This manual documents
 the instruction set, the memory image, the build/bootstrap pipeline, the C
 interpreter, and how to test and extend the system. It describes the actual
 implementation in `muxleq.c` and the `forth/*.fth` modules; when in doubt, the
@@ -14,21 +15,21 @@ consume. Line numbers like `muxleq.fth:369` index that generated file; edit the
 
 ## 1. Instruction set
 
-Every instruction is three consecutive cells `a b c`. Cells are 16-bit
-(`uint16_t`). The address space is 15-bit: `MEM_SIZE = 1<<15 = 32768` cells,
-`MEM_MASK = 0x7FFF`. `NEGATIVE_FLAG = 0x8000` is the sign/branch marker, and
-`IO_MARKER = 0xFFFF` (unsigned `-1`) tags memory-mapped I/O.
+Every instruction is three consecutive cells `a b c`. Cells are 32-bit
+(`uint32_t`). The architectural sign/branch bit is `0x80000000`, address bits
+are `0x7fffffff`, and `IO_MARKER = 0xffffffff` (unsigned `-1`) tags
+memory-mapped I/O.
 
 The interpreter classifies each instruction from its operands, in this order:
 
 | Condition                                   | Operation |
 |---------------------------------------------|-----------|
-| `a == 0xFFFF`                               | input: read one byte into `m[b]` |
-| `b == 0xFFFF`                               | output: write `m[a]` as one byte |
-| `c` has bit 15 set and `c != 0xFFFF`        | MUX (see below) |
+| `a == 0xffffffff`                           | input: read one byte into `m[b]` |
+| `b == 0xffffffff`                           | output: write `m[a]` as one byte |
+| `c` has bit 31 set and `c != 0xffffffff`    | MUX, or a reserved-mask native op (see below) |
 | otherwise                                   | SUBLEQ |
 
-Execution halts when the program counter goes negative (bit 15 set), or on EOF
+Execution halts when the program counter goes negative (bit 31 set), or on EOF
 during input.
 
 ### SUBLEQ
@@ -45,11 +46,11 @@ the standard unconditional-jump idiom (with `x` a known-zero cell, `Z, Z, dest`)
 
 ### MUX
 
-When `c` has bit 15 set but is not the I/O marker, the instruction multiplexes
+When `c` has bit 31 set but is not the I/O marker, the instruction multiplexes
 instead of branching:
 
 ```
-m[b] = (m[a] & ~m[mask]) | (m[b] & m[mask])   where mask = c & 0x7FFF
+m[b] = (m[a] & ~m[mask]) | (m[b] & m[mask])   where mask = c & 0x7fffffff
 pc = pc + 3
 ```
 
@@ -66,11 +67,39 @@ i.e. a pure **MOVE** `m[b] = m[a]`; the interpreter fast-paths mask address 6 fo
 this reason. Single-instruction data movement is the feature that separates
 MUXLEQ from pure SUBLEQ.
 
+### Native shift escape
+
+The core has no direct shift. MUX is same-lane, and SUBLEQ's carry propagates only
+*upward* (so a left shift is just `m[b] += m[b]`); moving a bit the other way,
+*down* a lane, is possible only through a bit-serial loop. One more mask value is
+reserved to supply that directly. A MUX whose mask address is `0x7ffffffe` -- an
+out-of-range value no real mask cell ever takes -- is dispatched as a native right
+shift:
+
+```
+m[b] = m[a] >> 1
+pc = pc + 3
+```
+
+The eForth `shift` word emits it instead of a bit-serial loop. The match is on the
+raw `c` operand before any arena masking, exactly like the `0xffffffff` I/O
+marker, so a genuine mask address (a small cell index) never collides with it, and
+programs that use neither escape run as plain SUBLEQ+MUX.
+
+This is the only such reservation, by design. A variable shift is a loop of these
+right shifts (a barrel shift computes the same in one step, but adds no capability
+the shift lacks), multiply is shift-and-add, divide is shift-and-subtract, and
+byte access would bake a packing convention into a cell-addressed machine -- all
+compositions or conventions that belong in the eForth software layer, not the ISA.
+The rule for what may be added: a convention-free, value-only primitive the core
+can otherwise reach only through a loop, filling a real directional gap. (A
+comparison would not qualify -- SUBLEQ already subtracts and branches.)
+
 ## 2. Memory image
 
-The whole 32768-cell image is baked into the C binary at compile time (see the
-build pipeline). The current image occupies 10632 cells; the rest is working RAM
-(stacks, buffers, dictionary growth). Key fixed locations near the base include
+The image is baked into the C binary at compile time (see the build pipeline).
+At startup the host allocates a power-of-two cell arena large enough for that
+image, with room for stacks, buffers, and dictionary growth. Key fixed locations near the base include
 the zero register (`zreg`, address 6, the MUX zero-mask), the `-1`/`1` constants,
 and the working registers `r0..r4`, followed by the dictionary and task blocks.
 The authoritative layout lives in `muxleq.fth` (the `meta.1` variable
@@ -78,11 +107,11 @@ definitions); do not hardcode addresses against this manual.
 
 Encoding conventions shared by `muxleq.c` and `muxleq.fth`:
 
-- Addresses are 15-bit; `NEGATIVE_FLAG` on a `uint16_t` marks a branch/PC-halt.
+- Addresses use the low 31 bits; the high bit marks a branch/PC-halt.
 - `IO_MARKER = -1`: `a==-1` reads input, `b==-1` writes output. A negative `c` is
   a branch target, so `SUBLEQ Z,Z,-1` (branch always taken) halts by moving the PC
   negative -- that is the `HALT` idiom, not a distinct opcode.
-- MUX is encoded by setting `NEGATIVE_FLAG` in `c` (while `c != -1`).
+- MUX is encoded by setting the high bit in `c` (while `c != -1`).
 
 ### Self-modifying operands
 
@@ -112,12 +141,11 @@ forth/*.fth  --cat-->  build/muxleq.fth  --gforth-->  build/stage0.dec
   build) and the target VM (to self-host). Feature toggles are the `opt.*`
   constants in `forth/00-config.fth`. Edit the modules; never the concatenation.
 - Every generated artifact lives under `build/` (`build/muxleq.fth`,
-  `build/stage0.dec` / `build/stage0.c`, `build/rv32i-traces.inc`, the binaries)
+  `build/stage0.dec` / `build/stage0.c`, the binaries)
   -- never edit them. Change the language via the `forth/` modules; change the
   interpreter via `muxleq.c`.
 - `muxleq.c` `#include <stage0.c>` (resolved from `build/` by `-Ibuild`) to
-  initialize `m[]`. The RV32I loader and its hot traces live in `rv32i.inc`,
-  `#include`d only when `ENABLE_RV32I` (the default).
+  initialize the default image.
 
 ### Self-hosting invariant
 
@@ -128,9 +156,7 @@ reproduces `build/stage0.dec` byte-for-byte:
 sh scripts/update-muxleq-fth.sh build/muxleq.fth forth/*.fth  # concatenate modules
 gforth build/muxleq.fth > build/stage0.dec        # Gforth builds the image
 sed 's/$/,/' build/stage0.dec > build/stage0.c    # cells become a C init list
-python3 scripts/gen-rv32i-traces.py \
-    build/stage0.dec rv32i-traces.inc.in build/rv32i-traces.inc  # trace addrs
-cc -Ibuild -o build/muxleq muxleq.c               # stage0.c + traces #included
+cc -Ibuild -o build/muxleq muxleq.c               # stage0.c #included
 ./build/muxleq < build/muxleq.fth > build/stage1.dec  # the VM re-builds the image
 diff build/stage0.dec build/stage1.dec            # must be identical
 ```
@@ -146,35 +172,12 @@ about the image ahead of time.
 
 ## 4. The interpreter (`muxleq.c`)
 
-`muxleq.c` is a `musttail`-threaded interpreter, not a switch loop. `dispatch()`
-classifies each `a b c` instruction and tail-calls `get` / `put` / `mux` /
-`subleq`; each handler tail-calls the next via `FETCH_AND_DISPATCH`. It uses
-`__attribute__((musttail))` when the compiler exposes that attribute (recent
-Clang/GCC); without it the macro is empty and tail-call elimination is not
-guaranteed.
+`muxleq.c` is a wide VM loop. With no arguments it runs the baked 32-bit eForth
+image. Given a `FILE` it loads a whitespace-delimited image and runs that
+instead. A leading `--` is accepted as an end-of-options marker, so the interface
+is `muxleq [--] [FILE]`; any other option argument is rejected.
 
-### Fusion
-
-On the no-branch path, `mux()` and `subleq()` peek at the next one or two
-instructions and execute fused MOVE/SUBLEQ sequences inline, tuned to the
-patterns the image emits. Fusion must be semantically identical to executing the
-operations one at a time. If codegen in `muxleq.fth` changes, the fusion
-assumptions in `muxleq.c` may need to move with it -- verify with `make check`.
-
-## 5. Profiling
-
-The VM takes optional flags (default runs are byte-identical, so the gates are
-unaffected):
-
-- `-s` -- instruction mix (GET/PUT/MUX/SUBLEQ) at dispatch entry.
-- `-p` -- per-PC heat map with the top-16 hottest program counters.
-
-For example, `./build/muxleq -s < tests/sqrt.fth` reports MUX dispatches at ~46%, and
-`-p` shows the hottest PCs are the inner-interpreter NEXT loop (`iLOAD` then
-`iJMP`, `muxleq.fth:369-373`) -- the target for macro-op fusion. The profiler's
-dispatch counts are deterministic, unlike wall-clock timing.
-
-## 6. eForth environment
+## 5. eForth environment
 
 `muxleq.fth` builds a full eForth (~170 words). Feature toggles (the `opt.*`
 constants) select the multitasker (`pause`, `task:`, `activate` in the `system`
@@ -193,15 +196,16 @@ Each item below is a one-liner you can paste into `make run`.
   `3 for r@ . next` → `-14`, but `: cd 3 for r@ . next ; cd` → `3 2 1 0`.
 - `for`/`next` is inclusive: `N for … next` runs the body N+1 times (`3 for` makes 4 passes,
   as the `3 2 1 0` above shows).
-- Numbers are 16-bit two's complement: `32767 1 +` wraps to `-32768`.
+- Numbers are 32-bit two's complement: `2147483647 1 +` wraps to `-2147483648`.
 - Division is floored -- the sign of `mod` follows the divisor: `-7 2 /` = `-4`, `-7 2 mod` = `1`,
   `7 -2 /` = `-4`. Division by zero throws `-10`; catch it with `: d 1 0 / ;  ' d catch .` → `-10`.
 - `um*` leaves the double result low-then-high; `.` prints top first, so
   `5 dup um* . .` prints `0 25` (high, low).
 - Shifts are LOGICAL, not arithmetic: `rshift` zero-fills the vacated high bits, and `2/` is
-  defined as `1 rshift`, so `2/` does NOT sign-extend. `-2 2/` is `32767`, not `-1`; `$8000 1 rshift`
-  is `16384` (0x4000), not 0xC000. For a signed (arithmetic) shift-right-by-1, sign-fill explicitly:
-  `: asr1 dup 0< if 2/ $8000 or else 2/ then ;` gives `-8 asr1` → `-4`. Pinned by `tests/arith.fth`.
+  defined as `1 rshift`, so `2/` does NOT sign-extend. `-2 2/` is `2147483647`, not `-1`;
+  `$80000000 1 rshift` is `1073741824` (0x40000000), not 0xC0000000. For a signed
+  (arithmetic) shift-right-by-1, sign-fill explicitly:
+  `: asr1 dup 0< if 2/ $80000000 or else 2/ then ;` gives `-8 asr1` → `-4`.
 - `case`/`of` parks the selector on the RETURN stack, not the data stack (`(case)` is
   `r> swap >r >r`). Each `of` compares against it via `r@`, and `endcase` drops it. Consequence: the
   DEFAULT arm (after the last `of`, before `endcase`) cannot `dup` the selector off the data stack --
@@ -270,66 +274,22 @@ up, row 15 blank-fills) and `o`/`O` open a blank row (the row pushed off the
 16-row grid is lost); `w`/`b` treat each row as one line, stepping over
 whitespace-delimited words and crossing to the adjacent row at the 64-column edge.
 
-## 7. RV32I microcode runner
-
-MUXLEQ stays a 16-bit OISC; on top of it the image assembles a fetch-decode-execute
-interpreter for the RISC-V RV32I base ISA, written in the meta-assembler as `:a`
-microcode: a per-step fetch reads the 32-bit instruction word from guest RAM into two
-cells, then a single `rvstep` entry decodes those halves and runs the matching routine.
-The OISC VM executing that microcode image *is* the RV32I
-simulator -- the Goldcrest-VP model, where an OISC substrate plus microcode presents a
-standard RISC-V interface. It builds through the same self-hosting pipeline as eForth
-(`opt.rv32i` toggles the section in), so `make bootstrap` re-assembles and byte-checks it.
-
-Run a program directly:
-
-```
-./build/muxleq -r prog          # prog is an ELF32-LE executable or a flat objcopy binary
-```
-
-For an ELF the loader flattens the PT_LOAD segments to their virtual addresses (bss
-zero-filled); a flat `objcopy -O binary` image is used as-is. Scope is a demonstrator,
-not a full emulator: RV32I base only (no M/A/F/D, CSRs, or interrupts), the `write`
-(a7=64) and `exit` (a7=93) ecalls only, entry must be 0, and the whole program
-(code+data+stack) must fit the 32 KiB guest RAM window. It runs well-formed programs
-and is a runner, not a strict encoding validator -- a few illegal encodings (some R-type
-`funct7`, out-of-range shift immediates) alias a legal instruction instead of trapping,
-though M-extension and unknown opcodes do trap. The VM halts when the guest exits or
-traps, rather than dropping into the REPL. `tests/rv32i/` holds freestanding example
-programs with source and a Makefile; `make golden` runs them through `-r`. `make
-verify-rv32i` drives the computational ISA (ALU, branches, jumps, upper-immediates)
-against an independent reference model; loads/stores and ecalls are covered by the
-golden runner tests. The full register/memory ABI and encoding hazards are in
-`docs/rv32i-muxleq-abi.md`.
-
-The freestanding RV32I examples and vendored rv32ui compliance suite build with a
-bare-metal RISC-V toolchain. The tested default prefix is `riscv-none-elf-`;
-override it as `make RVCROSS=riscv64-unknown-elf-` if your toolchain uses that
-prefix. The `.elf` and `.bin` are generated from source into `build/rv32i` and
-never committed; CI publishes them as build artifacts. When `$(RVCROSS)gcc` is
-absent, `make check` skips its RV32I golden and rvopt-differential slices (and
-`make verify-riscv-tests` skips the rv32ui suite) with a clear notice, while the
-toolchain-free slices and the self-host bootstrap still run.
-
-## 8. Testing
+## 6. Testing
 
 `make check` is the pre-commit gate: `make golden` byte-compares a suite of
 deterministic programs against `tests/expected/*.out` (the VM must exit 0 and
 match, each run `timeout`-bounded so a mis-fused infinite loop fails rather than
-hangs), then `make verify-rvopt-gate` (the standalone `rvopt` AOT optimizer's
-native `-x`/`-x32` images must reproduce the `-r` interpreter on every demo plus
-the unopt loop, and still reject the runtime-JALR programs the backends cannot
-lower), followed by
-`make bootstrap`. Regenerate an expected file manually after an intentional,
-reviewed behavior change (the RV32I demo slices need the toolchain and skip
-without it). `tests/define.fth` is the runtime define-and-execute
+hangs), then the PTY editor golden, 32-bit eForth smokes, and `make bootstrap`.
+`make check-all` adds wide native-image fuzz, loader rejection, and ASan/UBSan.
+Regenerate an expected file manually after an intentional, reviewed behavior
+change. `tests/define.fth` is the runtime define-and-execute
 guard (colon defs, `execute`, `does>`, `create`). `mandel` does not self-halt, so
 its bounded prefix check is separate: `make golden-mandel`.
 
-## 9. References
+## 7. References
 
 - README.md -- project overview and the MUX encoding.
 - CLAUDE.md -- operational notes and build-pipeline warnings.
-- docs/rv32i-muxleq-abi.md -- the RV32I microcode register/memory ABI and encoding hazards.
+- docs/rvopt-native-muxleq.md -- the standalone RV32I-to-MUXLEQ compiler.
 - The interpreter's runtime peek-ahead fusion is inspired by macro-op decoding of the
   SUBLEQ ancestor from which MUXLEQ descends.

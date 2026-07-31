@@ -25,16 +25,16 @@
 :m : :t ;m                         ( -- ???, "name" : start cross-compilation )
 :m ; ;t ;m                         ( ??? -- : end cross-compilation )
 :m begin talign there ;m           ( -- a : meta 'begin' )
-:m until talign opJumpZ 2/ t, ;m   ( a -- : meta 'until' )
-:m again talign opJump  2/ t, ;m   ( a -- : meta 'again' )
+:m until talign opJumpZ half t, ;m ( a -- : meta 'until' )
+:m again talign opJump  half t, ;m ( a -- : meta 'again' )
 :m if opJumpZ there 0 t, ;m        ( -- a : meta 'if' )
 :m tmark opJump there 0 t, ;m      ( -- a : meta mark location )
-:m then there 2/ swap t! ;m        ( a -- : meta 'then' )
+:m then there half swap t! ;m      ( a -- : meta 'then' )
 :m else tmark swap then ;m         ( a -- a : meta 'else' )
 :m while if ;m                     ( -- a : meta 'while' )
 :m repeat swap again then ;m       ( a a -- : meta 'repeat' )
 :m aft drop tmark begin swap ;m    ( a -- a a : meta 'aft' )
-:m next talign opNext 2/ t, ;m     ( a -- : meta 'next' )
+:m next talign opNext half t, ;m   ( a -- : meta 'next' )
 :m for opToR begin ;m              ( -- a : meta 'for' )
 
 \ Execution token constants
@@ -54,6 +54,8 @@
 :m mux opMux ;m                    ( -- : compile opMux into dictionary )
 :m exit opExit ;m                  ( -- : compile opExit into dictionary )
 :m rshift shift ;m                 ( -- : compile shift into dictionary )
+:m @ op@ ;m                        ( -- : compile op@ inline, no call frame )
+:m ! op! ;m                        ( -- : compile op! inline, no call frame )
 
 \ Core Target Forth Words
 :to + + ; ( n n -- n : addition )
@@ -82,7 +84,7 @@ system[
  1 constant #1                     ( --  1 : push one )
 -1 constant #-1                    ( -- -1 : push negative one )
  2 constant #2                     ( --  2 : push two )
--2 constant -cell                  ( -- -2 : push negative two )
+-4 constant -cell ( -- -cell : negative cell size )
 ]system
 
 : 1+ #1 + ;                        ( n -- n : increment value )
@@ -96,10 +98,10 @@ system[
 :m [ ;m                            ( -- : meta-compiler version of "[" )
 
 \ User variables and other runtime constructs
-:s (up) r> dup [@] [ {up} half ] literal [@] 2* + swap 1+ >r ;s
+:s (up) r> dup [@] [ {up} half ] literal [@] 2* 2* + swap 1+ >r ;s
   compile-only                     ( -- n : user variable implementation )
-:s (var) r> 2* ;s compile-only     ( R: a --, -- a )
-:s (user) r> [@] [ {up} half ] literal [@] 2* + ;s compile-only
+:s (var) r> 2* 2* ;s compile-only ( R: a --, -- a )
+:s (user) r> [@] [ {up} half ] literal [@] 2* 2* + ;s compile-only
   ( R: a --, -- u )
 :m up (up) t, ;m                   ( n -- : compile user variable )
 :m [char] char (push) t, ;m        ( --, "name" : compile char )
@@ -116,8 +118,8 @@ system[
 : or over mux ;                    ( u u -- u : bitwise or )
 : and #0 swap mux ;                ( u u -- u : bitwise and )
 : 2/ #1 rshift ;                   ( u -- u : divide by two )
-: @ 2/ [@] ;                       ( a -- u : fetch a cell )
-: ! 2/ [!] ;                       ( u a -- : write a cell )
+:to @ op@ ;                       ( a -- u : fetch a cell )
+:to ! op! ;                       ( u a -- : write a cell )
 :s @+ dup @ ;s                     ( a -- a u : non-destructive load )
 
 \ User variables for I/O vectoring
@@ -225,30 +227,12 @@ system[
 : abs s>d if negate then ;         ( n -- u : absolute value )
 
 \ Cell and address arithmetic
-2 constant cell                    ( -- u : bytes in cells )
+4 constant cell ( -- u : bytes in cells )
 : cell+ cell + ;                   ( a -- a : increment address by cell width )
-: cells 2* ;                       ( u -- u : multiply # of cells to get bytes )
+: cells 2* 2* ;                   ( u -- u : multiply # of cells to get bytes )
 : th cells + ;                     ( a n -- a' : address of the n-th cell of array a )
-opt.rv32i [if]
-:to rvrd rvrd ;                    ( -- : SRC1 = reg[rvidx] )
-:to rvwr rvwr ;                    ( -- : reg[rvidx] = RSLT, x0 discarded )
-:to rvstep rvstep ;                ( -- : decode+execute one R-type word from rv-il/rv-ih )
-rvil constant rv-il                ( -- a : instruction word low half )
-rvih constant rv-ih                ( -- a : instruction word high half )
-rvpclo constant rv-pclo  rvpchi constant rv-pchi   ( -- a : RVPC byte-address low/high halves )
-rvo-ctrl constant rv-ctrl          ( -- a : 1 if the last-decoded op set RVPC itself, else 0 )
-rvstate constant rv-state          ( -- a : 1 if the last op was an ecall the host must service, else 0 )
-rvram constant rv-ram              ( -- a : guest-RAM base; cell i is at rv-ram 2* i * + )
-rvo-rd  constant rv-rd             ( -- a : decoded rd, for the harness to read the result )
-rvsh constant rv-sh                ( -- a : SLL shift amount cell )
-rvidx constant rv-idx              ( -- a : register index cell )
-rvmask constant rv-mask            ( -- a : field-extract mask cell )
-rvs1lo constant rv-s1lo  rvs1hi constant rv-s1hi   ( -- a : SRC1 low/high halves )
-rvs2lo constant rv-s2lo  rvs2hi constant rv-s2hi   ( -- a : SRC2 low/high halves )
-rvrlo  constant rv-rlo   rvrhi  constant rv-rhi    ( -- a : RSLT low/high halves )
-[then]
 : cell- cell - ;                   ( a -- a : decrement address by cell width )
-: execute 2/ >r ;                  ( xt -- : execute an execution token )
+: execute 2/ 2/ >r ;              ( xt -- : execute an execution token )
 :s @execute ( ?dup 0= ?exit ) @ execute ;s ( xt -- )
 : ?exit if rdrop then ; compile-only ( u --, R: -- |??? )
 
@@ -269,17 +253,28 @@ rvrlo  constant rv-rlo   rvrhi  constant rv-rhi    ( -- a : RSLT low/high halves
 : pick sp@ + [@] ;                 ( nu...n0 u -- nu : pick item on stack )
 : 2swap rot >r rot r> ;            ( a b c d -- c d a b )
 : 2over [ 3 ] literal pick [ 3 ] literal pick ; ( a b c d -- a b c d a b )
-: +! 2/ tuck [@] + swap [!] ;      ( u a -- : add value to cell )
+: +! 2/ 2/ tuck [@] + swap [!] ;  ( u a -- : add value to cell )
 : lshift negate shift ;            ( u n -- u : left shift 'u' by 'n' )
 
 \ Character operations
 : c@                               ( a -- c : character load )
-  @+ swap #1 and if
-    [ 8 ] literal rshift exit
-  then [ FF ] literal and ;
-: c! swap [ FF ] literal and dup [ 8 ] literal lshift or swap
-   tuck @+ swap #1 and 0= [ FF ] literal xor
-   >r over xor r> and xor swap ! ; ( c a -- : character store )
+  @+ swap [ 3 ] literal and dup if
+    dup [ 1 ] literal = if drop [ 8 ] literal rshift [ FF ] literal and exit then
+    [ 2 ] literal = if [ 10 ] literal rshift [ FF ] literal and exit then
+    [ 18 ] literal rshift [ FF ] literal and exit
+  then drop [ FF ] literal and ;
+: c!                               ( c a -- : character store )
+  swap [ FF ] literal and >r
+  dup [ 3 ] literal and dup 0= if
+    drop dup @ [ FF ] literal invert and r> or swap ! exit
+  then
+  dup [ 1 ] literal = if
+    drop dup @ [ FF00 ] literal invert and r> [ 8 ] literal lshift or swap ! exit
+  then
+  [ 2 ] literal = if
+    dup @ [ FF0000 ] literal invert and r> [ 10 ] literal lshift or swap ! exit
+  then
+  dup @ [ FF000000 ] literal invert and r> [ 18 ] literal lshift or swap ! ;
 :s c@+ dup c@ ;s                   ( b -- b u : non-destructive 'c@' )
 
 \ Utility words
@@ -293,7 +288,7 @@ rvrlo  constant rv-rlo   rvrhi  constant rv-rhi    ( -- a : RSLT low/high halves
 
 system[ user tup =cell tallot ]system
 : source tup 2@ ;                  ( -- a u : get terminal input source )
-: aligned dup #1 and 0<> #1 and + ; ( u -- u : align up pointer )
+: aligned [ 3 ] literal + [ -4 ] literal and ; ( u -- u : align up pointer )
 : align here aligned h? ! ;        ( -- : align up dictionary pointer )
 : allot h? +! ;                    ( n -- : allocate space in dictionary )
 : , align here ! cell allot ;      ( u -- : write value into dictionary )
@@ -312,7 +307,7 @@ system[ user tup =cell tallot ]system
 : erase #0 fill ;                  ( b u -- : write zeros to array )
 
 \ String literals
-:s do$ 2r> 2* dup count + aligned 2/ >r swap >r ;s ( -- a )
+:s do$ 2r> 2* 2* dup count + aligned 2/ 2/ >r swap >r ;s ( -- a )
 :s ($) do$ ;s                      ( -- a : string address )
 :s .$ do$ count type ;s            ( -- : print string in next cells )
 :m ." .$ $literal ;m               \ --, ccc" : compile string
@@ -352,7 +347,8 @@ system[ user tup =cell tallot ]system
 : d+ >r swap >r um+ r> + r> + ;    ( d d -- d )
 : um*                              ( u u -- ud : double cell width multiply )
   #0 swap
-  [ $F ] literal for               \ 16 times
+[ $1F ] literal
+  for                              \ one pass per target cell bit
     dup um+ 2>r dup um+ r> + r>
     if >r over um+ r> + then
   next shed ;
@@ -362,7 +358,8 @@ system[ user tup =cell tallot ]system
   2dup u<
   if
     negate
-    [ $F ] literal for             \ 16 times
+[ $1F ] literal
+    for                            \ one pass per target cell bit
       >r dup um+ 2>r dup um+ r> + dup
       r> r@ swap >r um+ r> 0<> swap 0<> +
       if >r drop 1+ r> else drop then r>
@@ -515,15 +512,20 @@ opt.divmod [if]
 : cfa                              ( pwd -- cfa : move to Code Field Address )
   nfa c@+ [ 1F ] literal and + cell+ -cell and ;
 
+system[ variable stoklen ]system   ( length of the word being searched for )
+
 :s (search)                        ( a wid -- PWD PWD 1 | PWD PWD -1 | 0 a 0 )
   ( Search for word "a" in "wid" )
-  swap >r dup
+  swap >r r@ count nip stoklen ! dup
   begin
     dup
   while
-    \ $9F = $1F:word-length + $80:hidden
-    dup nfa count [ $9F ] literal
-    and r@ count compare 0=
+    \ $9F = $1F:word-length + $80:hidden. nfa is cell-aligned, so the node length
+    \ byte is the low byte of the name cell (inlined @, not a c@ call). The length
+    \ is checked inline against the hoisted token length (stoklen); compare runs
+    \ only on a length match, so a mismatched node skips the compare call entirely.
+    dup nfa dup 1+ swap @ [ $9F ] literal and
+    dup stoklen @ - if 2drop #0 else r@ 1+ stoklen @ compare 0= then
     if ( found! )
       rdrop
       dup nfa [ $40 ] literal swap @ and 0<>
@@ -553,7 +555,7 @@ opt.divmod [if]
 : compile r> dup [@] , 1+ >r ; compile-only ( -- )
 :s (literal) state @ if compile (push) , then ;s ( u -- )
 :to literal <literal> @execute ; immediate ( u -- )
-: compile, 2/ , ;                  ( xt -- : compile execution token )
+: compile, 2/ 2/ , ;              ( xt -- : compile execution token )
 :s ?found ?exit                    ( b f -- b | ??? )
    space count type [char] ? emit cr [ -$D ] literal throw ;s
 
@@ -589,7 +591,7 @@ opt.divmod [if]
    ( find first empty cell )
   #0 >r begin @+ r@ xor while cell+ repeat rdrop
   dup cell- swap
-  context - 2/ dup >r 1- s>d [ -$32 ] literal and throw
+  context - 2/ 2/ dup >r 1- s>d [ -$32 ] literal and throw
   for aft @+ swap cell- then next @ r> ;
 
 :r set-order                       ( widn ... wid1 n -- : set search order )
@@ -674,9 +676,9 @@ root[
 \ Control Structures
 :to begin here ; immediate compile-only
 :to if [ =jumpz ] literal , mark ; immediate compile-only
-:to until 2/ postpone if ! ; immediate compile-only
+:to until 2/ 2/ postpone if ! ; immediate compile-only
 :to again [ =jump ] literal , compile, ; immediate compile-only
-:to then here 2/ swap ! ; immediate compile-only
+:to then here 2/ 2/ swap ! ; immediate compile-only
 :to while postpone if ; immediate compile-only
 :to repeat swap postpone again postpone then ;
     immediate compile-only
@@ -688,7 +690,7 @@ root[
 :to next [ =next ] literal , compile, ; immediate compile-only
 
 \ CREATE and DOES>
-:s (marker) r> 2* @+ h? ! cell+ @ get-current ! ;s compile-only
+:s (marker) r> 2* 2* @+ h? ! cell+ @ get-current ! ;s compile-only
 : create state @ >r postpone : drop r> state ! compile (var)
    get-current ! ;
 :to variable create #0 , ;
@@ -698,7 +700,7 @@ root[
    cell user? +! user? @ , ;
 : >body cell+ ;                    ( a -- a : move to a create word's body )
 :to to token find ?found cfa >body ! ; ( n --, "name" : store n into the named value )
-:s (does) 2r> 2* swap >r ;s compile-only
+:s (does) 2r> 2* 2* swap >r ;s compile-only
 :s (comp)
   r> [ {last} ] literal @ cfa
   ! ;s compile-only

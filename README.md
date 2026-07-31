@@ -17,20 +17,24 @@
                             |__|/ \|__|                              \|__|
 ```
 
-MUXLEQ is a two-instruction esoteric programming language,
-extending the classic `SUBLEQ` with a multiplexing operation for enhanced performance and reduced program size.
-This project provides a complete, self-hosting development environment for it.
+MUXLEQ is a minimalist esoteric machine. Its core is two instructions: the
+classic `SUBLEQ` plus a multiplexing (MUX) operation that adds single-instruction
+data movement and boolean logic. A small, disciplined set of native primitives is
+layered on top by encoding them in otherwise-unused operand values; today that is
+a single right-shift op. The result runs faster and in fewer cells than pure
+SUBLEQ, and this project ships a complete, self-hosting development environment
+for it.
 
-On top of that foundation it also hosts an RV32I ISA simulator: a RISC-V base-integer interpreter,
-assembled by the eForth image itself, that runs real RV32I programs on the two-instruction machine
-(`./build/muxleq -r`) -- a full RISC-V base ISA riding on a two-instruction OISC.
+MUXLEQ is a 32-bit-cell, cell-addressed VM. With no argument it runs the
+self-hosting eForth image; given a FILE it loads and runs that standalone
+MUXLEQ image instead: `./build/muxleq image.dec`.
 
 ## Introduction
 This repository contains a full toolchain for the MUXLEQ architecture, including:
 1. An assembler for the MUXLEQ instruction set.
 2. A virtual machine built upon the assembler.
 3. A cross-compiler that targets the VM with a version of the eForth programming language.
-4. An RV32I ISA simulator on top of MUXLEQ -- a RISC-V base-integer interpreter assembled into the eForth image, running RV32I programs via `./build/muxleq -r`.
+4. `rvopt`, a standalone RV32I-to-MUXLEQ compiler for wide native MUXLEQ images.
 
 The system is self-hosted, meaning the eForth environment can compile new versions of itself from source,
 allowing for seamless modification and extension.
@@ -68,28 +72,17 @@ Once defined, the word `hello` can be executed by typing its name.
 
 ### Testing, benchmarking, and internals
 
-- `make check` -- the pre-commit gate: byte-exact golden-output tests (`tests/*.fth` vs
-  `tests/expected/*.out`, each run time-bounded), the `rvopt` AOT differential (its native
-  `-x`/`-x32` images must reproduce `-r` on every demo), plus the self-hosting bootstrap, which
-  checks the VM reproduces its own image byte-for-byte.
-- `make bench` -- times the VM on a quiet remote host (`node1` by default, override with
-  `BENCH_HOST`); localhost load makes wall-clock timing unreliable. Reports per-workload user
-  time and a deterministic instruction count.
-- `./build/muxleq -s` and `./build/muxleq -p` -- the built-in profiler: instruction mix and a per-PC heat
-  map. Default runs (no flags) are byte-identical, so the gates are unaffected.
-- `./build/muxleq -r prog` -- run an RV32I program (an ELF32 executable or a flat `objcopy` binary) on
-  the RV32I microcode interpreter that the image itself assembles -- a RISC-V ISA hosted on the
-  16-bit OISC. `make verify-rv32i` checks it against an independent reference model. See the
-  manual's RV32I section.
+- `make check` -- the pre-commit gate: byte-exact 32-bit golden-output tests,
+  the PTY editor golden, 32-bit eForth smokes, and the self-hosting bootstrap.
+- `make check-all` -- `make check` plus wide native-image fuzz, loader rejection,
+  and ASan/UBSan validation.
 - `rvopt` -- a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat binary to a native
-  MUXLEQ image running on the two ops directly, with no interpreter layer: `rvopt -mux prog >
-  prog.dec` then `./build/muxleq -x prog.dec` for the 16-bit path (which beats `-r` on measured compute
-  targets), or `rvopt -mux32` then `./build/muxleq -x32` for the wide 32-bit-cell backend. The wide path
-  passes all 40 rv32ui compliance tests, including large programs the 16-bit image cannot hold; both
-  are differential-tested against `-r`. See [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
+  MUXLEQ image running on the two ops directly, with no interpreter layer:
+  `rvopt mux prog > prog.dec` then `./build/muxleq prog.dec`.
+  See [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
 - [`docs/manual.md`](docs/manual.md) -- reference manual: the instruction set, memory image and
-  self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, the eForth
-  environment, and the RV32I microcode runner.
+  self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, and the eForth
+  environment.
 
 ## MUXLEQ Architecture
 The MUXLEQ architecture extends the classic SUBLEQ OISC with a second instruction to improve performance without significantly increasing implementation complexity.
@@ -113,34 +106,41 @@ if Mem[b] <= 0:
 Special operand values trigger I/O or halt the machine:
 * Input: If `a` is -1, a byte is read from input and stored at the address `b`.
 * Output: If `b` is -1, the byte at address `a` is sent to the output.
-* Halt: If `c` is a negative address, the program halts.
+* Halt: a taken branch to a negative address halts the machine -- the program
+  counter itself goes negative. By convention the halt target is -1 (`Z, Z, -1`).
 
 ### The MUX Enhancement
 MUXLEQ adds a multiplexing (MUX) instruction by encoding it into the `c` operand.
-If `c` is negative (but not -1, which is reserved for I/O),
-the MUX operation is performed instead of a branch.
+If `c` has its high bit set but is not -1 (`0xffffffff`, which stays the
+halt/branch target), the MUX operation is performed instead of a branch.
 This avoids needing a separate opcode, preserving the simple `a b c` instruction format.
 
-The complete MUXLEQ logic is as follows:
+The core MUXLEQ logic is as follows (one reserved mask value is additionally
+dispatched as a native shift; see "Native primitives and their limits" below):
 ```python
-# Pseudo-code for the MUXLEQ virtual machine
-while pc >= 0:
+# Pseudo-code for the MUXLEQ virtual machine; cells are unsigned 32-bit
+while not (pc & 0x80000000):        # run until the PC's high bit is set (halt)
+    # every Mem[] index below is masked into the bounded host arena
     a = Mem[pc + 0]
     b = Mem[pc + 1]
     c = Mem[pc + 2]
     pc += 3
 
-    if a == -1:
-        Mem[b] = get_byte()  # Input
-    elif b == -1:
-        put_byte(Mem[a])     # Output
-    elif c < -1: # Negative 'c' triggers MUX
-        # Multiplex: Mem[b] = (Mem[a] AND (NOT Mem[c])) OR (Mem[b] AND Mem[c])
-        Mem[b] = (Mem[a] & ~Mem[c]) | (Mem[b] & Mem[c])
-    else:
+    if a == 0xFFFFFFFF:             # -1: input
+        Mem[b] = get_byte()
+    elif b == 0xFFFFFFFF:           # -1: output
+        put_byte(Mem[a])
+    elif (c & 0x80000000) and c != 0xFFFFFFFF:   # high bit set: MUX or a native escape
+        mask_addr = c & 0x7FFFFFFF               # low 31 bits address the mask cell
+        if mask_addr == 0x7FFFFFFE:              # reserved: native shift-right-by-1
+            Mem[b] = Mem[a] >> 1
+        else:
+            mask = Mem[mask_addr]                # cell 6 is the zero register: a zero mask is a MOVE
+            Mem[b] = (Mem[a] & ~mask) | (Mem[b] & mask)   # Multiplex
+    else:                           # SUBLEQ
         Mem[b] = Mem[b] - Mem[a]
-        if Mem[b] <= 0:
-            pc = c # Branch
+        if Mem[b] == 0 or (Mem[b] & 0x80000000):          # result <= 0 (signed)
+            pc = c                  # Branch
 ```
 
 MUX with constants `0` and `-1` can implement any boolean function:
@@ -151,14 +151,35 @@ MUX with constants `0` and `-1` can implement any boolean function:
 
 The above are expensive in pure SUBLEQ (requiring dozens of instructions).
 
-Setting the selector to 0 creates single-instruction MOV, can replace SUBLEQ's 4-instruction copy sequence.
-In addition, direct bit manipulation accelerates pointer arithmetic, array indexing, and indirect memory operations.
+Setting the mask to 0 makes a single-instruction MOVE, replacing SUBLEQ's
+multi-instruction copy sequence. Boolean masking through MUX likewise collapses
+bit-twiddling that pure SUBLEQ would build from many subtract-and-branch steps.
+Because MUX is a *same-lane* selector, though, it cannot move a bit between
+positions -- it cannot shift. That gap is what the native-primitive mechanism
+below fills.
 
-### Future Directions and Variants
-The MUXLEQ design can be extended with other instructions by encoding them in the operands. Some potential enhancements include:
-* Bit Reversal: As proposed in "[Subleq: An Area-Efficient Two-Instruction-Set Computer](https://janders.eecg.utoronto.ca/pdfs/esl.pdf)," a bit-reversal instruction can efficiently implement arithmetic shifts.
-* Right Shift: A dedicated right-shift would significantly accelerate arithmetic operations.
-* Comparison: A comparison instruction could store the result of `Mem[a]` vs. `Mem[b]` (e.g., is-zero, less-than) into `Mem[a]`.
+### Native primitives and their limits
+Further instructions are encoded in otherwise-unused operand values: a MUX whose
+mask address is a reserved, out-of-range value is dispatched as a native op
+instead. The machine reserves exactly one such value today, a right shift
+(`Mem[b] = Mem[a] >> 1`), which the eForth `shift` word uses in place of a
+bit-serial loop.
+
+That one op is not arbitrary; it marks the boundary of what belongs in the ISA.
+The core is cheap at same-lane logic (MUX), arithmetic and branching (SUBLEQ), and
+*upward* bit movement (a left shift is just `x + x`, since a carry propagates low
+to high). Moving a bit the other way, *downward*, it can do only through a
+bit-serial loop -- so a right shift is the single primitive that turns that loop
+into one step. Everything else is a composition of it: a variable shift is a loop
+of right shifts (a barrel shift does the same in one step but adds no new
+capability), multiply is shift-and-add, divide is shift-and-subtract -- all
+software. Native byte load/store are deliberately excluded too: on a cell-addressed
+machine they would bake a byte-packing convention into the VM. (A comparison op would not
+qualify either: SUBLEQ already subtracts and branches, so it is no gap.) The one
+further candidate that does fit the rule is a bit-reversal -- genuinely
+cross-lane, which the core cannot do, and per "[Subleq: An Area-Efficient
+Two-Instruction-Set Computer](https://janders.eecg.utoronto.ca/pdfs/esl.pdf)" an
+efficient route to arithmetic shifts -- were a workload ever to justify it.
 
 ## eForth and Meta-Compilation
 The Forth environment provided is a variant of **eForth**, designed by Bill Muench and C.H. Ting for portability and efficiency.
@@ -188,7 +209,7 @@ This command performs the following steps, all under `build/`:
 1. Concatenate the `forth/*.fth` modules into `build/muxleq.fth` and run it
    through Gforth to produce the first image, `build/stage0.dec`.
 2. Compile the VM (`cc -Ibuild -o build/muxleq muxleq.c`), which `#include`s the
-   generated `build/stage0.c` and `build/rv32i-traces.inc`.
+   generated `build/stage0.c`.
 3. Run `build/muxleq` on `build/muxleq.fth` to produce a second image,
    `build/stage1.dec`.
 4. Compare the two images.

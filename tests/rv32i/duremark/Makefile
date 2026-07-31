@@ -1,4 +1,6 @@
-# DureMark for the muxleq RV32I runner ("build/muxleq -r duremark.elf").
+# DureMark, an RV32I benchmark. It was written for the retired muxleq '-r'
+# interpreter and uses computed jumps that 'rvopt mux' cannot lower, so it is
+# kept as historical source with no current runner (build only).
 #
 # A freestanding, entry-0 RV32I build of the DureMark benchmark (list + matrix +
 # state workloads, vendored from https://github.com/sergev/duremark under MIT,
@@ -28,10 +30,7 @@ $(OUT)/%.o: %.c duremark.h | $(OUT)
 $(OUT)/crt0.o: crt0.S | $(OUT)
 	$(CROSS)gcc $(CFLAGS) -c -o $@ $<
 
-run: $(OUT)/duremark.elf
-	../../../build/muxleq -r $(OUT)/duremark.elf
-
 clean:
 	$(RM) $(OBJS)
 
-.PHONY: run clean
+.PHONY: clean
