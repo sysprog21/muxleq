@@ -86,11 +86,11 @@ $40 tvar mwidth                    ( maximum machine width )
 :m ++rp {rp} INC ;m                ( -- : grow return stack )
 
 \ Error Handling and System Startup
-\ Error message: "Error: Not a 16-bit SUBLEQ VM"
+\ Error message: "Error: Not a 32-bit MUXLEQ VM"
 45 tvar err-str
   72 t, 72 t, 6F t, 72 t, 3A t, 20 t, 4E t,
-  6F t, 74 t, 20 t, 61 t, 20 t, 31 t, 36 t, 2D t,
-  62 t, 69 t, 74 t, 20 t, 53 t, 55 t, 42 t, 4C t,
+  6F t, 74 t, 20 t, 61 t, 20 t, 33 t, 32 t, 2D t,
+  62 t, 69 t, 74 t, 20 t, 4D t, 55 t, 58 t, 4C t,
   45 t, 51 t, 20 t, 56 t, 4D t, 0D t, 0A t, -1 t,
 err-str half tvar err-str-addr
 
@@ -115,13 +115,13 @@ label: start                       \ System Entry Point
   r0 ONE!                          \ r0 = shift bit loop count
   r1 ONE!                          \ r1 = number of bits
 
-\ 16-bit architecture verification
-label: chk16
+\ Machine-width verification: confirm the cell width equals bwidth (32)
+label: chkwidth
   r0 r0 ADD                        \ r0 = r0 * 2
   r1 INC                           \ r1++
   r1 r2 MMOV                       \ r2 = r1
   mwidth r2 SUB r2 +if die JMP then \ check length < max width
-  r0 +if chk16 JMP then            \ check if still positive
+  r0 +if chkwidth JMP then         \ check if still positive
   bwidth r1 SUB r1 if die JMP then \ r1 - bwidth should be 0
 
   {sp0} {sp} MMOV                  \ Setup initial variable stack
@@ -152,7 +152,7 @@ assembler.1 -order
 :a [@] tos tos iLOAD ;a
 :a [!] r0 {sp} iLOAD r0 tos iSTORE --sp t' opDrop JMP (a);
 \ Native cell fetch/store: fold the nested 2/ 2/ [@] chain behind @ and ! into
-\ one primitive each -- a single dispatch on the hot dictionary-search path.
+\ one primitive each, a single dispatch on the hot dictionary-search path.
 :a op@ tos tos SHR1 tos tos SHR1 tos tos iLOAD ;a
 :a op! tos tos SHR1 tos tos SHR1 t' [!] JMP (a);
 :a opEmit tos PUT t' opDrop JMP (a);
@@ -218,12 +218,12 @@ assembler.1 -order
 
 opt.divmod [if]
 \ Repeated-subtraction unsigned divide: r0 (dividend) -= tos (divisor) until it goes negative, then
-\ correct back one step. The 'r0 -if' sign test has the INT16_MIN blind spot ('-if' mis-reads 0x8000
-\ as non-negative), so it is only exact if the running remainder can never equal exactly 0x8000. That
-\ holds for the SOLE caller, '(.)', which always passes a small radix (base, 2..36) as the divisor:
-\ r0 starts <= 0x8000 and only decreases, and each terminating (r0 - radix) is a small negative
-\ (-1..-radix), never -32768. Do NOT call opDivMod with a bit15-set divisor -- it would loop/misstep;
-\ use a negation-safe sign test (mask+DEC+'+if', like RVBIT15) if that case is ever needed.
+\ correct back one step. The 'r0 -if' sign test has the INT32_MIN blind spot ('-if' mis-reads
+\ 0x80000000 as non-negative), so it is only exact if the running remainder can never equal exactly
+\ 0x80000000. That holds for the SOLE caller, '(.)', which always passes a small radix (base, 2..36)
+\ as the divisor: r0 starts <= 0x80000000 and only decreases, and each terminating (r0 - radix) is a
+\ small negative (-1..-radix), never -2147483648. Do NOT call opDivMod with a bit31-set divisor (it
+\ would loop/misstep); use a negation-safe sign test (mask+DEC+'+if') if that case is ever needed.
 :a opDivMod
   r0 {sp} iLOAD
   r1 ZERO

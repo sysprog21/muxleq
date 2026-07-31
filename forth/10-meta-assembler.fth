@@ -64,10 +64,10 @@ variable voc-last 0 voc-last !  ( Last defined in any vocabulary )
 defined eforth [if]
   :m tpack dup tc, for aft count tc, then next drop ;m
   :m parse-word bl word ?nul count ;m ( -- a u )
-  :m limit ;m                       ( u -- u16 : not needed on 16-bit )
+  :m limit ;m                       ( u -- u : no-op; eForth cells are already target width )
 [else]
   :m tpack talign dup tc, 0 ?do count tc, loop drop ;m
-  :m limit cellmask and ;m          ( u -- u16 : limit to target cell )
+  :m limit cellmask and ;m          ( u -- u : clamp to the target cell, 0xFFFFFFFF )
 [then]
 
 :m $literal talign [char] " word count tpack talign ;m
