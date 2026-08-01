@@ -21,7 +21,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order.
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format
+.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -167,6 +167,36 @@ verify-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-ran
 fuzz-rvopt: $(BIN) $(RVOPT) ## Differential-fuzz rvopt mux across many seeds (~2 min).
 	$(Q)python3 scripts/rvopt-fuzz.py --wide --seeds $(if $(SEEDS),$(SEEDS),120) \
 	    --n $(if $(N),$(N),64) --body $(if $(BODY),$(BODY),24) --seed $(if $(SEED),$(SEED),1)
+
+# RV32I cross-build and conformance. Everything under tests/rv32i needs a
+# bare-metal RISC-V toolchain (riscv-none-elf-* by default; CI installs the
+# xPack build), so these targets stay out of the default build and "make check":
+# most machines lack that toolchain. A dedicated CI job runs them and uploads the
+# result. Each group builds into its own build/rv32i subdir so the intermediate
+# crt0.o that unopt and duremark share never collides.
+RV32I_OUT := $(abspath $(OUT)/rv32i)
+# One output dir per group. The build (rv32i) and run (rv32i-check) targets must
+# pass the same dir for a group; naming it once keeps them from drifting, which
+# would make "run" rebuild into a fresh tree instead of running what was built.
+RV32I_DEMOS := $(RV32I_OUT)/demos
+RV32I_UNOPT := $(RV32I_OUT)/unopt
+RV32I_DUREMARK := $(RV32I_OUT)/duremark
+
+rv32i: ## Cross-build the RV32I test programs into build/rv32i (needs riscv-none-elf-gcc).
+	$(Q)$(MAKE) -C tests/rv32i          OUT=$(RV32I_DEMOS)
+	$(Q)$(MAKE) -C tests/rv32i/unopt    OUT=$(RV32I_UNOPT)
+	$(Q)$(MAKE) -C tests/rv32i/duremark OUT=$(RV32I_DUREMARK)
+
+# Point the sub-make run/check recipes at the binaries this build produced, as
+# absolute paths that survive the -C into each subdir. Without this they would
+# fall back to their hardcoded ../../build defaults and run a stale or wrong VM
+# under a non-default OUT.
+RV32I_VM := RVOPT=$(abspath $(RVOPT)) MUXLEQ=$(abspath $(BIN))
+
+rv32i-check: $(BIN) $(RVOPT) rv32i ## Lower the RV32I programs and run the rv32ui conformance suite.
+	$(Q)$(MAKE) -C tests/rv32i       OUT=$(RV32I_DEMOS) $(RV32I_VM) run
+	$(Q)$(MAKE) -C tests/rv32i/unopt OUT=$(RV32I_UNOPT) $(RV32I_VM) run
+	$(Q)$(MAKE) -C tests/rv32i/riscv-tests $(RV32I_VM) check
 
 run: $(BIN) ## Run the interactive VM.
 	$(Q)./$(BIN)
@@ -385,5 +415,9 @@ sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-ou
 clean: ## Remove built binaries.
 	$(RM) $(BIN) $(RVOPT)
 
+# The rm -rf $(OUT) below covers build/rv32i; the extra recursive step drops the
+# only generated tree that lives outside build/: the riscv-tests in-tree .elf
+# files and their upstream clone.
 distclean: clean ## Remove the whole build/ tree (generated image too).
 	$(RM) -r $(OUT)
+	$(Q)$(MAKE) -C tests/rv32i/riscv-tests distclean

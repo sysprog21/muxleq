@@ -6,9 +6,13 @@
 #   sanitize : make sanitize (ASan/UBSan over the interpreter and emitters)
 #   deep     : wide native-image validation, multi-seed rvopt differential
 #              fuzz (make fuzz-rvopt), and loader rejection
+#   rv32i    : cross-build the tests/rv32i programs with the xPack RISC-V
+#              toolchain, run them + the rv32ui conformance suite through
+#              rvopt+muxleq, upload the binaries as an artifact, and (on the
+#              default branch) publish them as a rolling pre-release
 #
 # check, sanitize, and deep cover the local check-all gate. No job depends on
-# another, so all four run concurrently.
+# another, so all five run concurrently.
 name: ci
 
 on:
@@ -90,3 +94,61 @@ jobs:
         run: |
           make verify-mux verify-loader-rejects
           make fuzz-rvopt
+
+  rv32i:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The other jobs keep the workflow-default contents:read. This one alone
+    # publishes a release, so it needs contents:write.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang gforth
+      # The ~150 MB toolchain is cached across runs; the install script skips the
+      # download when the cache already holds the pinned version (which lives in
+      # the script). Keying on the script's hash busts the cache on a version
+      # bump and nowhere else; the version/sha are single-sourced there.
+      # Trust boundary: on a cache hit the restored toolchain runs without
+      # re-checking its sha (the script verifies only a fresh download). Sound
+      # here because Actions caches are branch-scoped, so writing this key needs
+      # repo write access, which could tamper with the workflow anyway.
+      - name: Cache xPack RISC-V toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/riscv-none-elf-gcc
+          key: xpack-riscv-none-elf-gcc-${{ hashFiles('.ci/install-riscv-toolchain.sh') }}
+      - name: Install xPack RISC-V toolchain
+        run: .ci/install-riscv-toolchain.sh
+      - name: Build and run the RV32I programs and rv32ui conformance
+        run: make rv32i-check
+      # Per-run copy for PR/branch runs (expires, needs login to fetch).
+      - name: Upload built RV32I binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv32i-binaries
+          path: build/rv32i
+          if-no-files-found: error
+      # On the default branch, publish the binaries as a single rolling
+      # pre-release anyone can download without logging in. The tag is deleted
+      # and recreated each push, so only the newest build's assets exist; no
+      # stale files accumulate.
+      - name: Package RV32I binaries
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        run: |
+          tar -czf rv32i-binaries.tar.gz -C build rv32i
+          sha256sum rv32i-binaries.tar.gz > rv32i-binaries.tar.gz.sha256
+      - name: Publish rolling pre-release
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=rv32i-latest
+          gh release delete "$tag" --cleanup-tag --yes || true
+          gh release create "$tag" --prerelease \
+            --title "RV32I prebuilt binaries (latest)" \
+            --notes "Prebuilt RV32I test binaries lowered from ${GITHUB_SHA}. Rolling pre-release: replaced on every push to the default branch." \
+            rv32i-binaries.tar.gz rv32i-binaries.tar.gz.sha256

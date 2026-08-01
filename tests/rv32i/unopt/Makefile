@@ -13,6 +13,16 @@
 # build/rv32i by invoking this Makefile with OUT set.
 CROSS  ?= riscv-none-elf-
 OUT    ?= .
+# VM binaries the run target drives; overridable so the top-level build points
+# them at its own $(OUT). Defaults resolve from this directory for a standalone
+# "make run"; absolute paths from the top survive the -C into here.
+RVOPT  ?= ../../../build/rvopt
+MUXLEQ ?= ../../../build/muxleq
+# Bound the VM run so a program lowered into an infinite loop fails the gate
+# fast instead of burning the whole CI job timeout (mirrors the riscv-tests
+# suite). Auto-detected; empty (no timeout tool) leaves the run unbounded.
+TIMEOUT ?= $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)
+RUN_TIMEOUT ?= 60
 CFLAGS  = -march=rv32i -mabi=ilp32 -mno-relax -O0 -ffreestanding -nostdlib
 OBJS    = $(addprefix $(OUT)/,crt0.o unopt.o)
 
@@ -28,11 +38,16 @@ $(OUT)/%.o: %.c | $(OUT)
 $(OUT)/crt0.o: crt0.S | $(OUT)
 	$(CROSS)gcc $(CFLAGS) -c -o $@ $<
 
+# Land muxleq's output in a file before xxd: piping straight into xxd would mask
+# a VM crash behind xxd's exit status. As a CI gate this asserts only that the
+# lowering emits and the VM runs to a clean exit; it does not check output bytes
+# against a golden, so a wrong-but-non-crashing result still passes here.
 run: $(OUT)/unopt.elf
-	../../../build/rvopt mux $(OUT)/unopt.elf > $(OUT)/unopt.dec \
-	    && ../../../build/muxleq $(OUT)/unopt.dec | xxd
+	$(RVOPT) mux $(OUT)/unopt.elf > $(OUT)/unopt.dec \
+	    && $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) $(MUXLEQ) $(OUT)/unopt.dec > $(OUT)/unopt.out \
+	    && xxd $(OUT)/unopt.out
 
 clean:
-	$(RM) $(OBJS) $(OUT)/unopt.elf $(OUT)/unopt.dec
+	$(RM) $(OBJS) $(OUT)/unopt.elf $(OUT)/unopt.dec $(OUT)/unopt.out
 
 .PHONY: run clean
