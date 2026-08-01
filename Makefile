@@ -308,19 +308,20 @@ $(STAGE0_DEC): $(MUXLEQ_FTH) | $(OUT)
 	$(VECHO) "  FORTH\t$@\n"
 	$(Q)gforth $< > $@
 
-# Golden-output regression suite: each width-independent test's stdout must
-# match tests/expected/<name>.out byte-for-byte on the default 32-bit eForth.
-# Width-sensitive tests that assert 16-bit wrap, sign display, cell addresses,
-# or scheduling counts stay out until they get explicit 32-bit fixtures.
+# Golden-output regression suite: each test's stdout must match
+# tests/expected/<name>.out byte-for-byte on the default 32-bit eForth. The
+# fixtures are 32-bit captures; the former 16-bit ones (wrap, sign display,
+# cell strides, scheduler counts) were re-blessed against the wide cell.
 GOLDEN_FILES := \
 	loops radix sqrt \
 	fibonacci bitcount clz log \
 	life rainbow control \
 	tasker sieve collatz base recurse rot13 double sort heap except eof \
-	eforth-hello eforth-f eforth-loops eforth-trig eforth-multiply \
-	eforth-array eforth-does eforth-ascii \
-	eforth-text eforth-money eforth-temp eforth-weather eforth-calendar \
-	eforth-fig eforth-stack eforth-msgpass eforth-value
+	arith crc define prng-bench scheduler chacha20 \
+	hello bigf asterisks trig multiply \
+	array does ascii \
+	text money temp weather calendar \
+	fig stack msgpass value
 
 # Bound each test run so a mis-fused interpreter that loops forever fails the
 # gate instead of hanging it -- an infinite loop is the likeliest fusion bug.
@@ -408,7 +409,7 @@ TMPDIR := $(shell mktemp -d)
 # wide VM, the loader, and the standalone rvopt wide emitter.
 SANFLAGS := -O2 -std=c99 -fsanitize=address,undefined -fno-sanitize-recover=all -g
 SAN_RUN = ASAN_OPTIONS=detect_leaks=0 $(TIMEOUT) $(if $(TIMEOUT),120) $(TMPDIR)/muxleq.san
-SANITIZE_FILES := tasker sieve collatz eforth-does eof recurse
+SANITIZE_FILES := tasker sieve collatz does eof recurse
 sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec ## Run ASan/UBSan validation.
 	$(Q)$(MUXLEQ_CC) $(SANFLAGS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
 	$(Q)$(PRINTF) "sanitize editor (pty) ... "; \

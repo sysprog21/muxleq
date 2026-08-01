@@ -20,5 +20,5 @@ Processing authentication:
 Authentication tag:  16276 19602 14474 5688
 Testing multiple block encryption: 
 Block 2 - Plaintext: 22222  13752
-Block 3 - Plaintext: 33333  -7869
+Block 3 - Plaintext: 33333  57667
 ChaCha20-Poly1305 complete cipher test finished. 

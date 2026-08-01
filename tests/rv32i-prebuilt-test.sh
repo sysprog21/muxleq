@@ -207,7 +207,7 @@ live_repo="${REPO:-sysprog21/muxleq}"
 live_tag="${RV32I_PREBUILT_TAG:-rv32i-latest}"
 live_tgz="$work/live.tgz"
 if [ -x "$live_rvopt" ] && [ -x "$live_muxleq" ] &&
-    curl -fsS --connect-timeout 5 --max-time 30 -o "$live_tgz" \
+    curl -fsSL --connect-timeout 5 --max-time 30 -o "$live_tgz" \
         "https://github.com/$live_repo/releases/download/$live_tag/rv32i-binaries.tar.gz" 2>/dev/null; then
 
     # Mirror the script's own contract: it exits 0 only when the release carries

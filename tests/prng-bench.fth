@@ -6,10 +6,10 @@
 \ dispatch-count profiler (39,231,191 dispatched ops at n=10000 below: ~43% MUX,
 \ ~57% SUBLEQ); the printed checksum is the golden that guards the generator.
 decimal
-: xs16 ( x -- x' )               \ one 16-bit xorshift step (cells wrap at 16 bits)
-    dup 7 lshift xor
-    dup 9 rshift xor
-    dup 8 lshift xor ;
+: xs16 ( x -- x' )               \ one 16-bit xorshift step (Marsaglia 7,9,8)
+    dup 7 lshift xor  $FFFF and  \ mask each lshift: the wide cell no longer
+    dup 9 rshift xor             \ wraps at 16 bits the way this PRNG needs
+    dup 8 lshift xor  $FFFF and ;
 : bench ( seed n -- checksum )   \ fold n+1 generator outputs into an XOR checksum
     >r 0 r> for                  \ ( seed 0 ) with n on the return stack
         swap xs16                \ advance the generator
