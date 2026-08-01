@@ -1,5 +1,5 @@
 /*
- * rvopt -- standalone RV32I-to-MUXLEQ optimizer.
+ * rvopt: standalone RV32I-to-MUXLEQ optimizer.
  *
  * Built OUTSIDE the self-hosted Forth image so it costs zero image cells. It
  * loads an RV32I program (an ELF32-LE or flat binary), decodes its words into
@@ -39,7 +39,7 @@
 #define NONE (-1)
 
 /* Decoded instruction class. One kind per RV32I major opcode; unknown or
- * data-decoded-as-code words become ILL (a linear sweep decodes rodata too --
+ * data-decoded-as-code words become ILL (a linear sweep decodes rodata too;
  * reachability-guided decode is a later milestone).
  */
 enum ins_kind {
@@ -60,14 +60,15 @@ enum ins_kind {
 
 static const char *const kind_name[K_KIND_COUNT] = {
     "ILL",  "LUI",   "AUIPC", "JAL", "JALR",  "BRANCH",
-    "LOAD", "STORE", "OPIMM", "OP",  "FENCE", "SYSTEM"};
+    "LOAD", "STORE", "OPIMM", "OP",  "FENCE", "SYSTEM",
+};
 
 /* One graph node per decoded word. rd/rs1/rs2 are 0..31 (or NONE when the
  * format has no such field). Edges are node indexes or NONE:
- *   next   -- fall-through control successor
- *   target -- direct branch/jump control successor (indirect => NONE)
- *   mem    -- previous memory-ordering node (load/store chain, alias barrier)
- *   vd1/vd2 -- producer node of rs1/rs2 within the basic block (NONE =>
+ *   next   : fall-through control successor
+ *   target : direct branch/jump control successor (indirect => NONE)
+ *   mem    : previous memory-ordering node (load/store chain, alias barrier)
+ *   vd1/vd2: producer node of rs1/rs2 within the basic block (NONE =>
  * live-in)
  */
 struct node {
@@ -89,7 +90,7 @@ struct graph {
     /* Def-use lists (ir idea 3), derived from the vd1/vd2 producer edges: for
      * node i, its in-block users are use_edges[use_off[i] ..
      * use_off[i]+use_cnt[i]). These are INTRA-BLOCK (vd1/vd2 reset at leaders),
-     * so use_cnt == 0 means "no in-block users", NOT globally dead -- a def can
+     * so use_cnt == 0 means "no in-block users", NOT globally dead; a def can
      * still be live-out to a successor block. A future DCE MUST also prove
      * not-live-out (or these lists must be extended to inter-block liveness)
      * before treating a def as dead.
@@ -271,8 +272,18 @@ static void decode_word(uint32_t pc, uint32_t w, struct node *nd)
     case 0x33: /* OP */
         nd->kind = K_OP, nd->rd = rd, nd->rs1 = rs1, nd->rs2 = rs2;
         break;
-    case 0x0f: /* MISC-MEM (FENCE) */
-        nd->kind = K_FENCE;
+
+    /* MISC-MEM: base FENCE (fm=0, any pred/succ) and FENCE.TSO (fm=8 with
+     * pred=succ=RW, i.e. bits 31:20 == 0x833) are nops on this single-hart
+     * in-order VM; FENCE.I and reserved fm/pred/succ forms stay illegal so they
+     * error rather than silently vanish.
+     */
+    case 0x0f:
+        if (nd->funct3 == 0 && rd == 0 && rs1 == 0 &&
+            (((w >> 28) & 0xf) == 0 || ((w >> 20) & 0xfff) == 0x833))
+            nd->kind = K_FENCE;
+        else
+            nd->kind = K_ILL;
         break;
     case 0x73: /* SYSTEM (ECALL/EBREAK) */
         nd->kind = K_SYSTEM;
@@ -305,10 +316,10 @@ static bool is_block_end(int kind)
 }
 
 /* Build the def-use lists from the vd1/vd2 producer edges: a flat pool indexed
- * per producer node, filled by the standard two-pass count-then-fill (ir.c
- * ~1300 shape). Purely derived from vd1/vd2, so emit is unaffected. A
- * prerequisite for DCE/SCCP -- but note it is INTRA-BLOCK (see struct graph): 0
- * in-block users does NOT imply globally dead.
+ * per producer node, filled by the standard two-pass count-then-fill. Purely
+ * derived from vd1/vd2, so emit is unaffected. A prerequisite for DCE/SCCP,
+ * but note it is INTRA-BLOCK (see struct graph): 0 in-block users does NOT
+ * imply globally dead.
  */
 static void build_use_lists(struct graph *g)
 {
@@ -421,7 +432,7 @@ static void free_graph(struct graph *g)
 
 /* Which instructions fold to a direct constant effect instead of a runtime op.
  * Keyed on the RAW word: decode_word normalizes rd==0 to NONE, but folding
- * needs the real rd. Kept deliberately tiny -- only encodings that are
+ * needs the real rd. Kept deliberately tiny; only encodings that are
  * trivially 32-bit-correct without add-with-carry: ADDI rd,x0,imm (load
  * immediate) and ADDI x0,rs,imm (the result is discarded, so a pure nop).
  * Everything else stays FOLD_NONE.
@@ -588,7 +599,7 @@ static int check_ir(const char *path)
 /* mux lowering: emit a standalone native MUXLEQ image */
 
 /* When true, the emit_* helpers only advance the native position and print
- * nothing -- a sizing pass that fills na[] so pass 2 can resolve every branch
+ * nothing: a sizing pass that fills na[] so pass 2 can resolve every branch
  * target. Running the SAME emitter to size and to emit makes na[] correct by
  * construction (no per-macro hand-counted size to drift out of sync).
  */
@@ -736,7 +747,7 @@ static void analyze_syscalls(const struct graph *g,
 /* Resolve computed/linking JALR targets. When rs1 is a compile-time constant
  * (an auipc/lui/li result in the same block), 'jalr rd, rs1, imm' jumps to a
  * STATIC guest address (rs1 + imm, low bit cleared); record its target NODE in
- * nd->target -- exactly like a JAL -- so the reachability walk follows it and
+ * nd->target, exactly like a JAL, so the reachability walk follows it and
  * emit lowers a direct jump (+ a pc+4 link when rd != 0). A jalr whose rs1 is a
  * runtime value (notably 'ret', rs1 = ra, which cprop never knows since JAL
  * clears its rd) keeps target == NONE and falls back to the ra-checked ret
@@ -746,7 +757,7 @@ static void analyze_syscalls(const struct graph *g,
 static void resolve_jalr(struct graph *g)
 {
     /* A resolved JALR is a NEW control-flow entry into its target, so that
-     * target must become a leader -- otherwise this pass (and analyze_syscalls,
+     * target must become a leader; otherwise this pass (and analyze_syscalls,
      * which shares the leader-clears-cprop rule) would leak the linear
      * predecessor's constants into a node reached only by the jump, and could
      * misresolve a later JALR or fold a write with registers not live on the
@@ -835,7 +846,7 @@ static void mark_reachable(const struct graph *g,
 
 /* Can control reach node 'to' starting AFTER node 'from' executes (i.e. from
  * from's successors)? This decides whether a store into a code word could
- * RE-EXECUTE the modified instruction -- the real self-modifying-code hazard. A
+ * RE-EXECUTE the modified instruction: the real self-modifying-code hazard. A
  * store onto a word that is never revisited (code space used as scratch, a
  * store past the instruction it overwrites) is harmless and must not be
  * flagged.
@@ -876,11 +887,11 @@ static bool reaches_after(const struct graph *g,
  * whose target is a COMPILE-TIME CONSTANT (its base register li'd/la'd in the
  * same block, tracked by cprop) landing on a reachable instruction word. An
  * unknown base (sp-relative stack, computed pointer) is assumed disjoint from
- * code -- the standard freestanding convention; flagging those would reject
+ * code, the standard freestanding convention; flagging those would reject
  * every real program (all push to sp). The store must also be able to
- * RE-EXECUTE the word it overwrites (reaches_after) -- overwriting an
+ * RE-EXECUTE the word it overwrites (reaches_after); overwriting an
  * already-passed word, e.g. code space reused as scratch, is harmless. The
- * residual gap -- a store into code through a RUNTIME-computed address -- is
+ * residual gap (a store into code through a RUNTIME-computed address) is
  * not caught here (documented).
  */
 static void detect_smc(const struct graph *g,
@@ -919,12 +930,12 @@ static void detect_smc(const struct graph *g,
  * write-byte index; na[] maps guest instructions to native cells; m holds the
  * layout addresses (all-0 dummies in the sizing pass, which prints nothing). An
  * unsupported instruction or an out-of-range branch target aborts.
- * Constant-folding pass (milestone 2a): a block-local const propagation --
- * independent of analyze_syscalls's cprop -- that marks each reachable
+ * Constant-folding pass (milestone 2a): a block-local const propagation
+ * (independent of analyze_syscalls's cprop) that marks each reachable
  * non-shift OPIMM whose result is a compile-time constant (rs1 is a known
  * constant, so rd = rs1 op imm is known). A folded node is emitted as a plain
  * 'li' of the result from its OWN imm slot (foldval goes into that cell), so
- * num_imm is unchanged and the imm accounting stays in sync -- just cheaper
+ * num_imm is unchanged and the imm accounting stays in sync; just cheaper
  * than the full ALU macro, and byte-identical. Results propagate within the
  * block, so const chains fold (la = lui+addi, then an addi on that, ...). Shift
  * OPIMMs (funct3 1/5) have no imm slot and are left alone (they need a
@@ -933,7 +944,7 @@ static void detect_smc(const struct graph *g,
 
 /* 'mv rd, rs' == 'addi rd, rs, 0' with rs != x0: a pure register copy, not a
  * real ALU op. Emitted as two MOVEs (not the full add32), and it needs NO imm
- * slot -- so it is excluded from the imm pool and from the const folder
+ * slot, so it is excluded from the imm pool and from the const folder
  * (below), and handled directly when it is emitted. (addi rd, x0, 0 is
  * FOLD_LI12, a different case; addi rd, .., 0 with rd == x0 is FOLD_DEADI.)
  */
@@ -1055,7 +1066,7 @@ static void compute_forwards(const struct graph *g, const bool *reach, int *fwd)
  * body [header, latch] whose only control transfer is the latch's back-branch,
  * exactly ONE external entry edge, and the single exit = the latch's
  * fall-through. Within such a loop a stack slot (base, imm) is PROMOTABLE when:
- *   - the base register is loop-invariant (never written in the loop) -- else
+ *   - the base register is loop-invariant (never written in the loop); else
  *     the slot address changes and the offsets are not comparable;
  *   - every memory op in the loop targets a KNOWN slot (an unknown-base load or
  *     store may alias everything and blocks ALL promotion in the loop);
@@ -1071,10 +1082,11 @@ static void compute_forwards(const struct graph *g, const bool *reach, int *fwd)
 
 struct promo_slot {
     int base, imm; /* the promotable stack slot: base register + offset */
-    int g;         /* emit-assigned global slot index: cell pair is
-                    * promo_base + 2*g; offset imm cell is
-                    * imm_base + 2*(promo_imm_base + g)
-                    */
+
+    /* emit-assigned global slot index: cell pair is promo_base + 2*g; offset
+     * imm cell is imm_base + 2*(promo_imm_base + g)
+     */
+    int g;
 };
 
 struct promo_loop {
@@ -1125,7 +1137,7 @@ static int compute_promotions(const struct graph *g,
             /* Block ends carry no 'next', but two fall through to pc+4: a call
              * (JAL with link, rd==x1) via its return, and a non-exit ecall. A
              * such fall-through into the loop is an entry the raw next/target
-             * miss -- count it, else it is an unseen second entry the
+             * miss: count it, else it is an unseen second entry the
              * pre-header on 'entry' would not dominate. (An exit ecall does NOT
              * fall through, but lacking syscall analysis here, counting every
              * K_SYSTEM only over-rejects, which is safe.)
@@ -1143,7 +1155,7 @@ static int compute_promotions(const struct graph *g,
             continue; /* not a single-entry loop -> skip (conservative) */
 
         /* No ecall in the loop: a write would read stale slot memory, and
-         * resolving write-vs-exit needs syscall analysis this pass avoids -- so
+         * resolving write-vs-exit needs syscall analysis this pass avoids, so
          * conservatively block on ANY K_SYSTEM in the body.
          */
         bool has_sys = false;
@@ -1153,7 +1165,7 @@ static int compute_promotions(const struct graph *g,
         if (has_sys)
             continue;
 
-        /* Collect slots. ALL loop memory ops must share ONE base register --
+        /* Collect slots. ALL loop memory ops must share ONE base register;
          * two DIFFERENT registers can hold the SAME address, which per-register
          * slot identity would treat as independent cells (a store to one
          * leaving the other's read stale); requiring a single base makes (base,
@@ -1347,7 +1359,7 @@ static bool alu_f3_ok32(int f3)
 }
 
 /* A node the wide ALU slice can lower. A K_OP must ALSO carry the base-ISA
- * funct7 (0x00, or 0x20 for SUB) -- else an RV32M or reserved encoding sharing
+ * funct7 (0x00, or 0x20 for SUB); else an RV32M or reserved encoding sharing
  * a funct3 (MUL as ADD, DIV as XOR, ...) would silently mislower; a K_OPIMM has
  * no funct7 field (the immediate occupies it) so funct3 alone decides.
  */
@@ -1396,7 +1408,7 @@ static bool imm_op32(const struct node *nd)
 }
 
 /* Wide instruction shorthands. c = MOVE32 is a MOVE; c = *p+3 is a
- * non-branching SUBLEQ (b -= a, then fall through -- the target is the next
+ * non-branching SUBLEQ (b -= a, then fall through; the target is the next
  * cell, so it is taken or not with the same effect); c = (1<<31)|mask is a MUX
  * whose mask value is the cell at 'mask'.
  */
@@ -1454,8 +1466,8 @@ static void ne32(int *p,
 }
 
 /* LTU32(a,b,Lless,Lge): branch to Lless if a <u b (unsigned), else to Lge. The
- * borrow-out of a-b is bit31(MUX(b|d, b&d, a)), d = a-b -- the same one-MUX
- * top-bit identity at bit31 -- then a bit31 test picks the target. A fixed
+ * borrow-out of a-b is bit31(MUX(b|d, b&d, a)), d = a-b; the same one-MUX
+ * top-bit identity at bit31, then a bit31 test picks the target. A fixed
  * 11-instruction (33-cell) block, so two-pass sizing stays exact.
  */
 static void ltu32(int *p,
@@ -1479,7 +1491,7 @@ static void ltu32(int *p,
 }
 
 /* sh = rs ^ 0x80000000 (subtracting SGN flips bit31 and nothing lower), mapping
- * signed order onto the unsigned order LTU32 tests -- for BLT/BGE/SLT.
+ * signed order onto the unsigned order LTU32 tests, for BLT/BGE/SLT.
  */
 static void signflip32(int *p, long long rs, long long sh, const struct m32 *m)
 {
@@ -1628,7 +1640,7 @@ static int shr1_cells32(bool arith, const struct m32 *m)
 
 /* SRL/SRA: rd = rs1 >> (rs2 & 0x1F), a count-down loop doing one right shift by
  * 1 per step (shift_right32 k=1, logical or arithmetic). cnt = rs2 & 0x1F
- * (sh2), acc = rs1 (sh1) -- NOT t0/t2, which shift_right32's copybit clobbers.
+ * (sh2), acc = rs1 (sh1), NOT t0/t2, which shift_right32's copybit clobbers.
  * The body is fixed-size, so the self-relative loop/done addresses hold in both
  * passes.
  */
@@ -1968,6 +1980,8 @@ static void emit_one32(const struct graph *g,
         emit_promo_transfer32(p, &pe->loops[pe->post[i]], m, false);
     if (fk == FOLD_DEADI)
         return; /* nop */
+    if (nd->kind == K_FENCE)
+        return; /* FENCE is a nop on a single-hart in-order VM */
     if (fk == FOLD_LI12 || folded[i]) {
         mov32(p, m->imm_base + *imm, m->reg_base + rd); /* rd = imm */
         (*imm)++;
@@ -2096,8 +2110,8 @@ static void emit_one32(const struct graph *g,
     if (nd->kind == K_JALR) {
         /* Static-target JALR (resolve_jalr set nd->target from a compile-time
          * rs1): write the pc+4 link if rd != 0, then jump to the resolved cell.
-         * The runtime rs1 is irrelevant -- the target is a compile-time address
-         * -- so this is correct even for 'jalr rd, rd, 0'.
+         * The runtime rs1 is irrelevant (the target is a compile-time address),
+         * so this is correct even for 'jalr rd, rd, 0'.
          */
         if (nd->target != NONE) {
             if (rd) { /* link = pc+4 into rd (its imm cell) */
@@ -2205,8 +2219,8 @@ static void emit_one32(const struct graph *g,
  * single-cell SUBLEQ/MUX (no lo/hi halves, no carry/borrow votes) and the
  * address space is not capped at 32768 cells. Covers li + the native ALU +
  * SLT/SLTU + LUI/AUIPC + all six branches + JAL (with an na[] target map),
- * shifts, memory, and ecalls. Arbitrary runtime JALR stays a hard error. The
- * epilogue PUTs each defined register's low byte then halts.
+ * shifts, memory, FENCE (a nop here), and ecalls. Arbitrary runtime JALR stays
+ * a hard error. The epilogue PUTs each defined register's low byte then halts.
  */
 static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
 {
@@ -2282,6 +2296,8 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
         const int fk = fold_kind(nd->word);
         if (fk == FOLD_DEADI)
             continue; /* nop */
+        if (nd->kind == K_FENCE)
+            continue; /* FENCE is a nop on a single-hart in-order VM */
         if (fk == FOLD_LI12) {
             nimm++;
             def[rd] = true;
@@ -2356,7 +2372,7 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     const int nimm_prog = nimm;
     nimm += npromo;
 
-    /* Sizing pass: variable-size ops mean the code length is not a formula --
+    /* Sizing pass: variable-size ops mean the code length is not a formula;
      * run the emitter with output suppressed to fill na[] (branch/jump targets)
      * and measure the op length. A forward branch reads a not-yet-set na entry
      * here, but output is suppressed and every block is fixed-size, so the
@@ -2516,7 +2532,7 @@ int main(int argc, char **argv)
     if (argc == 3 && !strcmp(argv[1], "check"))
         return check_ir(argv[2]);
 
-    /* The emit pipeline -- load guest image, decode to the graph, emit, free.
+    /* The emit pipeline: load guest image, decode to the graph, emit, free.
      */
     if (argc == 3 && !strcmp(argv[1], "mux")) {
         size_t used;

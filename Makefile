@@ -9,8 +9,9 @@ OUT := build
 
 CFLAGS += -O2 -std=c99
 CFLAGS += -Wall -Wextra
-# Prefer clang for muxleq.c (musttail/preserve_none codegen), but honor an
-# explicit CC=... the user sets on the command line or in the environment.
+# Prefer clang for muxleq.c when available -- it is the reference compiler the
+# interpreter's hot loop is benchmarked under -- but honor an explicit CC=... the
+# user sets on the command line or in the environment.
 ifeq ($(origin CC),default)
 MUXLEQ_CC ?= $(if $(shell command -v clang 2>/dev/null),clang,cc)
 else
@@ -72,6 +73,19 @@ verify-mux: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	        && grep -q 'image needs' $(TMPDIR)/rvopt-small.err \
 	        || { echo "verify-mux: rvopt mux ceiling guard failed"; exit 1; }; \
 	else $(PRINTF) "verify-mux: rvopt ceiling guard [SKIP: no python3]\n"; fi
+	$(Q)if command -v python3 >/dev/null 2>&1; then \
+	    python3 -c 'import sys; sys.stdout.buffer.write((0xfff0000f).to_bytes(4, "little"))' > $(TMPDIR)/rvopt-bad-fence.bin \
+	        && ! $(RVOPT) mux $(TMPDIR)/rvopt-bad-fence.bin >/dev/null 2>$(TMPDIR)/rvopt-bad-fence.err \
+	        && grep -q 'unsupported op' $(TMPDIR)/rvopt-bad-fence.err \
+	        || { echo "verify-mux: reserved FENCE was accepted"; exit 1; }; \
+	    python3 -c 'import sys; sys.stdout.buffer.write((0x8000000f).to_bytes(4, "little"))' > $(TMPDIR)/rvopt-resv-tso.bin \
+	        && ! $(RVOPT) mux $(TMPDIR)/rvopt-resv-tso.bin >/dev/null 2>$(TMPDIR)/rvopt-resv-tso.err \
+	        && grep -q 'unsupported op' $(TMPDIR)/rvopt-resv-tso.err \
+	        || { echo "verify-mux: reserved fm=8 (non-RW) FENCE was accepted"; exit 1; }; \
+	    python3 -c 'import sys; sys.stdout.buffer.write((0x8330000f).to_bytes(4, "little"))' > $(TMPDIR)/rvopt-tso.bin \
+	        && $(RVOPT) mux $(TMPDIR)/rvopt-tso.bin >/dev/null 2>&1 \
+	        || { echo "verify-mux: FENCE.TSO (a nop here) was rejected"; exit 1; }; \
+	else $(PRINTF) "verify-mux: FENCE reject/accept [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 scripts/rv32i-conformance.py >/dev/null \
 	        || { echo "verify-mux: RV32I reference-model self-check FAILED"; exit 1; }; \
@@ -147,8 +161,12 @@ verify-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-ran
 	$(Q)$(PRINTF) "verify-loader-rejects: malformed images rejected "; $(call notice, [OK])
 
 # Deep on-demand wide differential fuzz for the standalone 32-bit emitter.
-fuzz-rvopt: $(BIN) $(RVOPT) ## Differential-fuzz rvopt mux emitted programs.
-	$(Q)python3 scripts/rvopt-fuzz.py --wide --n $(if $(N),$(N),64) --body $(if $(BODY),$(BODY),24) --seed $(if $(SEED),$(SEED),1)
+# Sweeps many seeds (not just seed 1) across cycled image sizes; ~2 min. On a
+# failure it prints the exact single-program reproduce command; scale coverage
+# vs time via SEEDS/N/BODY (e.g. SEEDS=300 ~4 min, SEEDS=40 ~30 s).
+fuzz-rvopt: $(BIN) $(RVOPT) ## Differential-fuzz rvopt mux across many seeds (~2 min).
+	$(Q)python3 scripts/rvopt-fuzz.py --wide --seeds $(if $(SEEDS),$(SEEDS),120) \
+	    --n $(if $(N),$(N),64) --body $(if $(BODY),$(BODY),24) --seed $(if $(SEED),$(SEED),1)
 
 run: $(BIN) ## Run the interactive VM.
 	$(Q)./$(BIN)
