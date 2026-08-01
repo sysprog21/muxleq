@@ -136,7 +136,7 @@ jobs:
       # here because Actions caches are branch-scoped, so writing this key needs
       # repo write access, which could tamper with the workflow anyway.
       - name: Cache xPack RISC-V toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/riscv-none-elf-gcc
           key: xpack-riscv-none-elf-gcc-${{ hashFiles('.ci/install-riscv-toolchain.sh') }}
@@ -154,7 +154,7 @@ jobs:
         run: make verify-prebuilt
       # Per-run copy for PR/branch runs (expires, needs login to fetch).
       - name: Upload built RV32I binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rv32i-binaries
           path: build/rv32i
