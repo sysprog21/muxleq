@@ -21,7 +21,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order.
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check
+.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check rv32i-prebuilt rv32i-auto verify-prebuilt
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -168,12 +168,19 @@ fuzz-rvopt: $(BIN) $(RVOPT) ## Differential-fuzz rvopt mux across many seeds (~2
 	$(Q)python3 scripts/rvopt-fuzz.py --wide --seeds $(if $(SEEDS),$(SEEDS),120) \
 	    --n $(if $(N),$(N),64) --body $(if $(BODY),$(BODY),24) --seed $(if $(SEED),$(SEED),1)
 
-# RV32I cross-build and conformance. Everything under tests/rv32i needs a
-# bare-metal RISC-V toolchain (riscv-none-elf-* by default; CI installs the
-# xPack build), so these targets stay out of the default build and "make check":
-# most machines lack that toolchain. A dedicated CI job runs them and uploads the
-# result. Each group builds into its own build/rv32i subdir so the intermediate
-# crt0.o that unopt and duremark share never collides.
+# RV32I cross-build and conformance. Building the test programs needs a bare-metal
+# RISC-V toolchain (riscv-none-elf-* by default; CI installs the xPack build), but
+# rvopt and muxleq build from plain C, so the toolchain is only ever needed to
+# produce the .elf inputs, never to lower or run them. "make check" therefore
+# covers RV32I either way (rv32i-auto): with the toolchain it builds from source,
+# without it it fetches prebuilt .elf inputs from the rolling pre-release. Each
+# group builds into its own build/rv32i subdir so the intermediate crt0.o that
+# unopt and duremark share never collides.
+# Cross prefix for the RV32I sub-makes and the toolchain probe. Default matches
+# the sub-makes' own CROSS default; deriving it from CROSS preserves the older
+# `make rv32i CROSS=<prefix>` knob (hardcoding CROSS=$(RVCROSS) on the sub-make
+# lines below would otherwise defeat a user's CROSS override).
+RVCROSS ?= $(if $(CROSS),$(CROSS),riscv-none-elf-)
 RV32I_OUT := $(abspath $(OUT)/rv32i)
 # One output dir per group. The build (rv32i) and run (rv32i-check) targets must
 # pass the same dir for a group; naming it once keeps them from drifting, which
@@ -183,9 +190,9 @@ RV32I_UNOPT := $(RV32I_OUT)/unopt
 RV32I_DUREMARK := $(RV32I_OUT)/duremark
 
 rv32i: ## Cross-build the RV32I test programs into build/rv32i (needs riscv-none-elf-gcc).
-	$(Q)$(MAKE) -C tests/rv32i          OUT=$(RV32I_DEMOS)
-	$(Q)$(MAKE) -C tests/rv32i/unopt    OUT=$(RV32I_UNOPT)
-	$(Q)$(MAKE) -C tests/rv32i/duremark OUT=$(RV32I_DUREMARK)
+	$(Q)$(MAKE) -C tests/rv32i          OUT=$(RV32I_DEMOS)    CROSS=$(RVCROSS)
+	$(Q)$(MAKE) -C tests/rv32i/unopt    OUT=$(RV32I_UNOPT)    CROSS=$(RVCROSS)
+	$(Q)$(MAKE) -C tests/rv32i/duremark OUT=$(RV32I_DUREMARK) CROSS=$(RVCROSS)
 
 # Point the sub-make run/check recipes at the binaries this build produced, as
 # absolute paths that survive the -C into each subdir. Without this they would
@@ -194,9 +201,51 @@ rv32i: ## Cross-build the RV32I test programs into build/rv32i (needs riscv-none
 RV32I_VM := RVOPT=$(abspath $(RVOPT)) MUXLEQ=$(abspath $(BIN))
 
 rv32i-check: $(BIN) $(RVOPT) rv32i ## Lower the RV32I programs and run the rv32ui conformance suite.
-	$(Q)$(MAKE) -C tests/rv32i       OUT=$(RV32I_DEMOS) $(RV32I_VM) run
-	$(Q)$(MAKE) -C tests/rv32i/unopt OUT=$(RV32I_UNOPT) $(RV32I_VM) run
-	$(Q)$(MAKE) -C tests/rv32i/riscv-tests $(RV32I_VM) check
+	$(Q)$(MAKE) -C tests/rv32i       OUT=$(RV32I_DEMOS) CROSS=$(RVCROSS) $(RV32I_VM) run
+	$(Q)$(MAKE) -C tests/rv32i/unopt OUT=$(RV32I_UNOPT) CROSS=$(RVCROSS) $(RV32I_VM) run
+	$(Q)$(MAKE) -C tests/rv32i/riscv-tests CROSS=$(RVCROSS) $(RV32I_VM) check
+# Stage the rv32ui .elf inputs (built in-tree) under build/rv32i so the published
+# tarball carries them, letting the toolchain-less prebuilt path run the full
+# conformance suite, not just the demos. count.txt records the expected number so
+# the prebuilt consumer can reject a truncated release instead of passing green
+# on a reduced suite.
+	$(Q)mkdir -p $(RV32I_OUT)/riscv-tests
+	$(Q)cp tests/rv32i/riscv-tests/*.elf $(RV32I_OUT)/riscv-tests/
+	$(Q)ls tests/rv32i/riscv-tests/*.elf | wc -l | tr -d ' ' > $(RV32I_OUT)/riscv-tests/count.txt
+
+# Toolchain-less RV32I coverage: fetch prebuilt .elf inputs from the rolling
+# pre-release and run the same rvopt-mux + muxleq gate over them. The script
+# exits 77 for any transient/degraded condition (no network, no conformance
+# elfs, torn download) and prints the specific reason itself; treat 77 as a skip
+# so an offline machine is not blocked.
+rv32i-prebuilt: $(BIN) $(RVOPT) ## Run RV32I tests from the prebuilt release (no toolchain).
+	$(Q)RVOPT=$(abspath $(RVOPT)) MUXLEQ=$(abspath $(BIN)) scripts/rv32i-prebuilt.sh; rc=$$?; \
+	    if [ $$rc -eq 77 ]; then $(PRINTF) "rv32i-prebuilt "; $(call notice, [SKIP]); \
+	    elif [ $$rc -ne 0 ]; then exit 1; fi
+
+# Offline contract test for the prebuilt-release script: mock curl, crafted
+# tarballs, asserts the 0/1/77 exit contract. Needs no toolchain or network; the
+# pass cases additionally run when rv32i-check has populated build/rv32i.
+verify-prebuilt: $(BIN) $(RVOPT) ## Contract-test scripts/rv32i-prebuilt.sh offline.
+	$(Q)RVOPT=$(abspath $(RVOPT)) MUXLEQ=$(abspath $(BIN)) tests/rv32i-prebuilt-test.sh
+
+# What "make check" uses: build+run from source when the cross toolchain is
+# present, else fall back to the prebuilt release. A machine with neither the
+# toolchain nor network skips rather than failing the gate.
+rv32i-auto: $(BIN) $(RVOPT) ## RV32I coverage: from source if toolchain present, else prebuilt.
+	$(Q)if [ -n "$(RVCROSS)" ] && command -v $(RVCROSS)gcc >/dev/null 2>&1 \
+	    && command -v $(RVCROSS)objcopy >/dev/null 2>&1 \
+	    && command -v $(RVCROSS)as >/dev/null 2>&1 \
+	    && command -v $(RVCROSS)ld >/dev/null 2>&1; then \
+	    if $(MAKE) -C tests/rv32i/riscv-tests upstream/.rev >/dev/null 2>&1; then \
+	        $(MAKE) rv32i-check; \
+	    else \
+	        $(PRINTF) "rv32i-auto: "; $(call notice, [SKIP: cannot fetch the riscv-tests conformance suite (offline?)]); \
+	    fi; \
+	else \
+	    $(PRINTF) "rv32i-auto: no complete $(RVCROSS) toolchain -- running the prebuilt release\n"; \
+	    $(MAKE) rv32i-prebuilt; \
+	fi
 
 run: $(BIN) ## Run the interactive VM.
 	$(Q)./$(BIN)
@@ -333,20 +382,20 @@ golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mand
 	$(Q)$(PRINTF) "golden-mandel: bounded mandel prefix "; $(call notice, [OK])
 # The pre-commit gate: byte-exact 32-bit golden diff, pty editor screen, 32-bit
 # image sanity smokes, and the 32-bit self-hosting proof.
-check: golden golden-see golden-pty verify-eforth-stage0 verify-eforth-repl bootstrap ## Run the fast pre-commit gate.
+check: golden golden-see golden-pty verify-eforth-stage0 verify-eforth-repl bootstrap rv32i-auto ## Run the fast pre-commit gate.
 
 # Deep pre-release gate: the standard check plus wide native-image fuzz,
-# loader rejection, and ASan+UBSan.
-check-all: check verify-mux verify-loader-rejects sanitize ## Run deep validation.
+# loader rejection, the prebuilt-script contract test, and ASan+UBSan.
+check-all: check verify-mux verify-loader-rejects verify-prebuilt sanitize ## Run deep validation.
 
 # bootstrapping
 bootstrap: $(STAGE0_DEC) $(STAGE1_DEC) ## Prove self-host bootstrap is byte-exact.
 	$(Q)if diff $(STAGE0_DEC) $(STAGE1_DEC); then \
-	$(call notice, [OK]); \
+	    $(PRINTF) "bootstrap: self-host image byte-exact "; $(call notice, [OK]); \
 	else \
-	$(PRINTF) "Unable to bootstrap. Aborting"; \
-	exit 1; \
-	fi;
+	    $(PRINTF) "bootstrap: self-host image NOT byte-exact -- aborting\n"; \
+	    exit 1; \
+	fi
 
 $(STAGE1_DEC): $(BIN) $(MUXLEQ_FTH) | $(OUT)
 	$(VECHO)  "Bootstrapping... "
