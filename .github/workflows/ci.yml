@@ -2,14 +2,20 @@
 # validation suite, split into independent jobs that run in parallel.
 #
 #   format   : clang-format 20 and a trailing-newline check (no toolchain)
-#   check    : make check
+#   check    : make check, including RV32I coverage; with no cross toolchain
+#              installed (as here) it fetches the prebuilt .elf inputs from the
+#              rv32i-latest pre-release and runs them through rvopt+muxleq
 #   sanitize : make sanitize (ASan/UBSan over the interpreter and emitters)
 #   deep     : wide native-image validation, multi-seed rvopt differential
-#              fuzz (make fuzz-rvopt), and loader rejection
+#              fuzz (make fuzz-rvopt), loader rejection, and the offline
+#              prebuilt-script contract test
 #   rv32i    : cross-build the tests/rv32i programs with the xPack RISC-V
 #              toolchain, run them + the rv32ui conformance suite through
 #              rvopt+muxleq, upload the binaries as an artifact, and (on the
-#              default branch) publish them as a rolling pre-release
+#              default branch, only when tests/rv32i changed) publish them as a
+#              rolling pre-release. The published tarball includes the rv32ui
+#              .elf inputs, so the toolchain-less "check" job above can run the
+#              full suite too.
 #
 # check, sanitize, and deep cover the local check-all gate. No job depends on
 # another, so all five run concurrently.
@@ -66,7 +72,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang gforth
+      # No cross toolchain here, so make check's RV32I step fetches the prebuilt
+      # release. Point it at THIS repo so a fork tests its own artifacts (and
+      # cleanly skips if it has none) instead of pulling upstream's.
       - name: Run pre-commit gate
+        env:
+          REPO: ${{ github.repository }}
         run: make check
 
   sanitize:
@@ -91,8 +102,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang gforth
       - name: Wide native-image validation
+        # REPO points the prebuilt-script live smoke at this repo's own release,
+        # so a fork tests its own artifacts (or skips) rather than upstream's.
+        env:
+          REPO: ${{ github.repository }}
         run: |
-          make verify-mux verify-loader-rejects
+          make verify-mux verify-loader-rejects verify-prebuilt
           make fuzz-rvopt
 
   rv32i:
@@ -103,7 +118,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history so the publish gate below can diff this push's range
+      # (before..sha) to see whether tests/rv32i changed.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -125,6 +144,14 @@ jobs:
         run: .ci/install-riscv-toolchain.sh
       - name: Build and run the RV32I programs and rv32ui conformance
         run: make rv32i-check
+      # This job is the only one with a populated build/rv32i tree, so it is the
+      # only place the prebuilt contract test's pass/demos/truncated-release
+      # assertions can run (the deep job exercises only the skip/refuse paths).
+      # REPO points the live smoke at this repo's own release.
+      - name: Contract-test the prebuilt-release script
+        env:
+          REPO: ${{ github.repository }}
+        run: make verify-prebuilt
       # Per-run copy for PR/branch runs (expires, needs login to fetch).
       - name: Upload built RV32I binaries
         uses: actions/upload-artifact@v4
@@ -132,17 +159,76 @@ jobs:
           name: rv32i-binaries
           path: build/rv32i
           if-no-files-found: error
-      # On the default branch, publish the binaries as a single rolling
-      # pre-release anyone can download without logging in. The tag is deleted
-      # and recreated each push, so only the newest build's assets exist; no
+      # The prebuilt release exists only to carry the RV32I .elf inputs to
+      # machines without the cross toolchain; those inputs change only when
+      # tests/rv32i changes. So republish only then, not on every push that
+      # merely touched rvopt/muxleq. Two self-heal valves keep the release
+      # correct regardless: publish when there is no usable baseline commit, and
+      # publish when the CURRENT release's tarball is missing or does not carry
+      # the rv32ui conformance elfs (a demos-only, partial, or absent publish).
+      # The content check, not mere release existence, is what activates the
+      # full suite on this very change, whose staging logic lives in the Makefile
+      # and so does not touch tests/rv32i.
+      - name: Decide whether the prebuilt release needs updating
+        id: pub
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          publish=false
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "$BEFORE" 2>/dev/null; then
+            echo "no usable baseline commit -- publishing"; publish=true
+          elif ! git diff --quiet "$BEFORE" "$AFTER" -- tests/rv32i/; then
+            echo "tests/rv32i changed -- publishing"; publish=true
+          else
+            # Content self-heal: compare the conformance-elf COUNT in the current
+            # release against what this build just staged, and republish unless
+            # they match. Comparing counts (not mere presence) also covers stale
+            # releases from changes outside tests/rv32i -- a staging or suite-size
+            # change alters the count, so no separate path gate is needed; a
+            # toolchain-only rebuild keeps the count and is harmlessly skipped
+            # (the consumer re-lowers the elfs, so their bytes do not matter).
+            # Download to a file, not a pipe: with pipefail, grep -q short-
+            # circuiting would SIGPIPE tar and misreport. Use a fresh RUNNER_TEMP
+            # path since gh release download -O refuses to clobber.
+            cur="$RUNNER_TEMP/rv32i-cur-release.tgz"
+            rm -f "$cur" "$cur.list" "$cur.sha"
+            fresh=$(ls build/rv32i/riscv-tests/*.elf 2>/dev/null | wc -l | tr -d ' ')
+            if gh release download rv32i-latest -p rv32i-binaries.tar.gz -O "$cur" 2>/dev/null \
+              && tar -tzf "$cur" 2>/dev/null >"$cur.list"; then
+              rel=$(grep -cE '^rv32i/riscv-tests/[^/]+\.elf$' "$cur.list" || true)
+              # Also re-verify the published checksum still matches the tarball:
+              # an interrupted publish or a manual edit can drift the pair, and
+              # a drifted sha makes every consumer fail verification and skip.
+              want=""
+              gh release download rv32i-latest -p rv32i-binaries.tar.gz.sha256 -O "$cur.sha" 2>/dev/null \
+                && want=$(awk '{ print $1 }' "$cur.sha")
+              got=$(sha256sum "$cur" | awk '{ print $1 }')
+              if [ "$fresh" -gt 0 ] && [ "$rel" = "$fresh" ] && [ -n "$want" ] && [ "$want" = "$got" ]; then
+                echo "release carries the full rv32ui suite ($rel elfs) with a matching checksum -- skipping publish"
+              else
+                echo "release stale ($rel of $fresh elfs) or checksum drifted -- publishing to self-heal"
+                publish=true
+              fi
+            else
+              echo "release missing or unreadable -- publishing to self-heal"
+              publish=true
+            fi
+          fi
+          echo "publish=$publish" >>"$GITHUB_OUTPUT"
+      # A single rolling pre-release anyone can download without logging in. The
+      # tag is deleted and recreated, so only the newest build's assets exist; no
       # stale files accumulate.
       - name: Package RV32I binaries
-        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        if: steps.pub.outputs.publish == 'true'
         run: |
           tar -czf rv32i-binaries.tar.gz -C build rv32i
           sha256sum rv32i-binaries.tar.gz > rv32i-binaries.tar.gz.sha256
       - name: Publish rolling pre-release
-        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        if: steps.pub.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -150,5 +236,5 @@ jobs:
           gh release delete "$tag" --cleanup-tag --yes || true
           gh release create "$tag" --prerelease \
             --title "RV32I prebuilt binaries (latest)" \
-            --notes "Prebuilt RV32I test binaries lowered from ${GITHUB_SHA}. Rolling pre-release: replaced on every push to the default branch." \
+            --notes "Prebuilt RV32I test binaries lowered from ${GITHUB_SHA}. Rolling pre-release: replaced when tests/rv32i changes on the default branch." \
             rv32i-binaries.tar.gz rv32i-binaries.tar.gz.sha256
