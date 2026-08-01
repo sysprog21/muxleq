@@ -72,15 +72,30 @@ Once defined, the word `hello` can be executed by typing its name.
 
 ### Testing, benchmarking, and internals
 
-- `make check` -- the pre-commit gate: byte-exact 32-bit golden-output tests,
+- `make check` runs the pre-commit gate: byte-exact 32-bit golden-output tests,
   the PTY editor golden, 32-bit eForth smokes, and the self-hosting bootstrap.
-- `make check-all` -- `make check` plus wide native-image fuzz, loader rejection,
+- `make check-all` runs `make check` plus wide native-image fuzz, loader rejection,
   and ASan/UBSan validation.
-- `rvopt` -- a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat binary to a native
+- `rvopt` is a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat binary to a native
   MUXLEQ image running on the two ops directly, with no interpreter layer:
   `rvopt mux prog > prog.dec` then `./build/muxleq prog.dec`.
   See [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
-- [`docs/manual.md`](docs/manual.md) -- reference manual: the instruction set, memory image and
+- RV32I test programs: freestanding RISC-V demos, benchmarks, and the official
+  rv32ui conformance suite live in [`tests/rv32i/`](tests/rv32i). `make rv32i`
+  cross-builds the demo, unopt, and DureMark programs into `build/rv32i`;
+  `make rv32i-check` additionally lowers the demo and unopt programs with
+  `rvopt mux`, runs them on the VM, and runs the rv32ui conformance suite
+  (DureMark is build-checked only, since it uses computed jumps `rvopt` cannot
+  lower). Both need a bare-metal
+  `riscv-none-elf-*` toolchain, such as the
+  [xPack GNU RISC-V toolchain](https://xpack-dev-tools.github.io/riscv-none-elf-gcc-xpack/).
+  CI builds and runs everything with the xPack toolchain on every push. On the
+  default branch it also packs `build/rv32i` into a compressed archive and
+  publishes it as a rolling `rv32i-latest` pre-release, replaced on every push;
+  every run additionally uploads the same tree as the `rv32i-binaries` workflow
+  artifact. Either lets you download prebuilt images without a cross toolchain
+  installed.
+- [`docs/manual.md`](docs/manual.md) is the reference manual: the instruction set, memory image and
   self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, and the eForth
   environment.
 
@@ -106,7 +121,7 @@ if Mem[b] <= 0:
 Special operand values trigger I/O or halt the machine:
 * Input: If `a` is -1, a byte is read from input and stored at the address `b`.
 * Output: If `b` is -1, the byte at address `a` is sent to the output.
-* Halt: a taken branch to a negative address halts the machine -- the program
+* Halt: a taken branch to a negative address halts the machine: the program
   counter itself goes negative. By convention the halt target is -1 (`Z, Z, -1`).
 
 ### The MUX Enhancement
@@ -155,7 +170,7 @@ Setting the mask to 0 makes a single-instruction MOVE, replacing SUBLEQ's
 multi-instruction copy sequence. Boolean masking through MUX likewise collapses
 bit-twiddling that pure SUBLEQ would build from many subtract-and-branch steps.
 Because MUX is a *same-lane* selector, though, it cannot move a bit between
-positions -- it cannot shift. That gap is what the native-primitive mechanism
+positions (it cannot shift). That gap is what the native-primitive mechanism
 below fills.
 
 ### Native primitives and their limits
@@ -169,24 +184,24 @@ That one op is not arbitrary; it marks the boundary of what belongs in the ISA.
 The core is cheap at same-lane logic (MUX), arithmetic and branching (SUBLEQ), and
 *upward* bit movement (a left shift is just `x + x`, since a carry propagates low
 to high). Moving a bit the other way, *downward*, it can do only through a
-bit-serial loop -- so a right shift is the single primitive that turns that loop
+bit-serial loop, so a right shift is the single primitive that turns that loop
 into one step. Everything else is a composition of it: a variable shift is a loop
 of right shifts (a barrel shift does the same in one step but adds no new
-capability), multiply is shift-and-add, divide is shift-and-subtract -- all
+capability), multiply is shift-and-add, divide is shift-and-subtract, all in
 software. Native byte load/store are deliberately excluded too: on a cell-addressed
 machine they would bake a byte-packing convention into the VM. (A comparison op would not
 qualify either: SUBLEQ already subtracts and branches, so it is no gap.) The one
-further candidate that does fit the rule is a bit-reversal -- genuinely
+further candidate that does fit the rule is a bit-reversal, genuinely
 cross-lane, which the core cannot do, and per "[Subleq: An Area-Efficient
 Two-Instruction-Set Computer](https://janders.eecg.utoronto.ca/pdfs/esl.pdf)" an
-efficient route to arithmetic shifts -- were a workload ever to justify it.
+efficient route to arithmetic shifts, were a workload ever to justify it.
 
 ## eForth and Meta-Compilation
 The Forth environment provided is a variant of **eForth**, designed by Bill Muench and C.H. Ting for portability and efficiency.
 It is implemented with a small set of assembly primitives, making it ideal for unconventional targets like MUXLEQ.
 
 The cross-compiler source lives in the numbered `forth/*.fth` modules, which
-concatenate in order into the generated `build/muxleq.fth` -- a Forth program
+concatenate in order into the generated `build/muxleq.fth`, a Forth program
 that translates eForth source into a MUXLEQ memory image. Edit the modules, not
 the generated file. The cross-compilation proceeds in four stages:
 
