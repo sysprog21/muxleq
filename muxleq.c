@@ -218,6 +218,45 @@ static struct muxleq_image load_muxleq(const char *path)
     return img;
 }
 
+/* A negative c selects MUX over SUBLEQ -- but c == IO_MARKER32 is a SUBLEQ jump
+ * target, not a MUX, so that value must fall through. The guard is load-bearing
+ * and shared by exec_alu() and run()'s MOVE gate; keep them in sync here.
+ */
+static inline bool is_mux(uint32_t c)
+{
+    return (c & NEG_FLAG32) && c != IO_MARKER32;
+}
+
+/* Execute one non-I/O instruction (a, b, c) and return the next pc. A MOVE
+ * (mask address ZERO_MASK_ADDR) skips the general mask formula's dead read of
+ * the destination; SHR1 is the reserved native right-shift; everything else is
+ * a mask MUX or a SUBLEQ. The caller has already ruled out I/O.
+ */
+static inline uint32_t exec_alu(uint32_t *m32,
+                                uint32_t mask32,
+                                uint32_t a,
+                                uint32_t b,
+                                uint32_t c,
+                                uint32_t pc)
+{
+    if (is_mux(c)) {
+        const uint32_t maddr = c & ADDR_MASK32;
+        if (maddr == ZERO_MASK_ADDR) { /* the common case: a MOVE */
+            m32[b & mask32] = m32[a & mask32];
+        } else if (maddr == SHR1_MARK_ADDR) {
+            m32[b & mask32] = m32[a & mask32] >> 1;
+        } else {
+            const uint32_t mask = m32[maddr & mask32];
+            m32[b & mask32] =
+                (m32[a & mask32] & ~mask) | (m32[b & mask32] & mask);
+        }
+        return pc + INSN_SIZE;
+    }
+    const uint32_t r = m32[b & mask32] - m32[a & mask32];
+    m32[b & mask32] = r;
+    return (r == 0 || (r & NEG_FLAG32)) ? c : pc + INSN_SIZE;
+}
+
 static int run(const struct muxleq_image *img)
 {
     uint32_t *m32 = img->m;
@@ -240,25 +279,45 @@ static int run(const struct muxleq_image *img)
             if (UNLIKELY(rc))
                 return rc;
             pc += INSN_SIZE;
-        } else if ((c & NEG_FLAG32) && c != IO_MARKER32) {
-            const uint32_t maddr = c & ADDR_MASK32;
-            uint32_t mask;
-            if (maddr == ZERO_MASK_ADDR) { /* the common case: a MOVE */
-                mask = 0;
-            } else if (maddr == SHR1_MARK_ADDR) {
-                m32[b & mask32] = m32[a & mask32] >> 1;
-                pc += INSN_SIZE;
-                continue;
-            } else {
-                mask = m32[maddr & mask32];
+        } else if (is_mux(c) && (c & ADDR_MASK32) == ZERO_MASK_ADDR) {
+            /* A MOVE. eForth fakes SUBLEQ's missing indirection by MOVEing a
+             * live address into an operand field of the very next instruction,
+             * then executing it -- an idiom that is ~23% of all ops (fusing it
+             * measured ~1.5x on the compute goldens). Fuse the pair: do the
+             * MOVE's store, then run that next instruction here, forwarding the
+             * just-written field from a register instead of storing it and
+             * reloading it through the store-to-load stall. The store still
+             * happens, so state stays byte-identical to running the two
+             * instructions in sequence; only the reload is elided.
+             */
+            const uint32_t d = b & mask32, va = m32[a & mask32];
+            m32[d] = va;
+
+            /* pc is unmasked (bit 31 is the halt flag); only memory accesses
+             * mask. Fuse only when the store hit an operand slot of the next
+             * word and that word is not the halt boundary.
+             */
+            const uint32_t next_pc = pc + INSN_SIZE;
+
+            /* np is the masked next pc and, since A == 0, also its a-field
+             * addr. (d - np) & mask32 is d's distance from np mod size, so <
+             * INSN_SIZE means the MOVE's store landed on one of the next word's
+             * 3 fields.
+             */
+            const uint32_t np = next_pc & mask32;
+            if (!(next_pc & NEG_FLAG32) && ((d - np) & mask32) < INSN_SIZE) {
+                const uint32_t nbs = (np + B) & mask32, ncs = (np + C) & mask32;
+                const uint32_t na = d == np ? va : m32[np];
+                const uint32_t nb = d == nbs ? va : m32[nbs];
+                const uint32_t nc = d == ncs ? va : m32[ncs];
+                if (na != IO_MARKER32 && nb != IO_MARKER32) {
+                    pc = exec_alu(m32, mask32, na, nb, nc, next_pc);
+                    continue;
+                }
             }
-            m32[b & mask32] =
-                (m32[a & mask32] & ~mask) | (m32[b & mask32] & mask);
-            pc += INSN_SIZE;
+            pc = next_pc;
         } else {
-            const uint32_t r = m32[b & mask32] - m32[a & mask32];
-            m32[b & mask32] = r;
-            pc = (r == 0 || (r & NEG_FLAG32)) ? c : pc + INSN_SIZE;
+            pc = exec_alu(m32, mask32, a, b, c, pc);
         }
     }
 }

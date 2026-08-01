@@ -21,8 +21,8 @@ most the one guarded op that follows it), and every third program is a bounded
 do-while loop (rc = K in [2,5]; a body that never writes rc; `bne rc,x0` back
 to the head) that stresses loop-carried values and store/load ordering ACROSS
 the back-edge -- the multi-iteration class only unopt covered. Reproduce a
-failure with:
-  rvopt-fuzz.py --seed S --only I --keep
+failure with the exact command the fuzzer prints, e.g.:
+  rvopt-fuzz.py --seed S --n N --only I --body B --keep
 """
 
 import argparse
@@ -90,6 +90,21 @@ def enc_jalr(rd, rs1, imm):  # JALR is always funct3=0
     return ((imm & 0xFFF) << 20) | (rs1 << 15) | (rd << 7) | 0x67
 
 
+def enc_jal(rd, imm):  # J-type direct jump, imm is a byte offset (even)
+    return (
+        (((imm >> 20) & 1) << 31)
+        | (((imm >> 1) & 0x3FF) << 21)
+        | (((imm >> 11) & 1) << 20)
+        | (((imm >> 12) & 0xFF) << 12)
+        | (rd << 7)
+        | 0x6F
+    )
+
+
+def enc_fence():  # FENCE iorw,iorw -- rvopt lowers it to a nop
+    return 0x0FF0000F
+
+
 def enc_s(f3, rs2, rs1, imm):  # store: SW f3=2, SB f3=0
     imm &= 0xFFF
     return (
@@ -150,7 +165,7 @@ def li(words, rd, val, force_wide=False):
 def build_program(rng, body_len):
     """Return (flat_bytes, seeds, ops, desc) for one random program (ALU +
     load/store round-trips + forward skip-next branches + forward computed/linking
-    JALRs; always terminating)."""
+    JALRs + forward direct JALs + FENCE nops; always terminating)."""
     seeds = {r: rng.getrandbits(32) for r in WORK}
     words, desc = [], []
     for r in WORK:  # prologue: seed every work register
@@ -160,9 +175,26 @@ def build_program(rng, body_len):
     )  # x30 = scratch RAM base (wide: runtime addr)
     ops = []  # (rd, rs1, rs2_or_imm, f3, f7, extra)
     for _ in range(body_len):
-        kind = rng.randrange(6)
+        kind = rng.randrange(8)
         rd = rng.choice(WORK)
-        if kind == 5:  # forward computed/linking JALR, jumping over one ADDI
+        if kind == 7:  # FENCE -- rvopt lowers to a nop, no register effect
+            _emit_fence(words, desc)
+        elif kind == 6:  # forward direct JAL, linking, jumping over one ADDI
+            # jal rlink, +8: rlink = jal_pc+4 (x0 = no link), jump to jal_pc+8,
+            # so the guarded ADDI at jal_pc+4 is unreachable (dead) and rskip keeps
+            # its prior value. Forward-only -> always terminates.
+            pc0 = 4 * len(words)  # guest byte address of the jal (flat image @ 0)
+            rskip = rng.choice(WORK)
+            rlink = rng.choice(WORK + [0])
+            gs1 = rng.choice(WORK)
+            gimm = rng.getrandbits(12)
+            words.append(enc_jal(rlink, 8))  # link rlink, jump over next instr
+            words.append(enc_i_rd(0, gimm, rskip, gs1))  # SKIPPED ADDI rskip = gs1+imm
+            ops.append((rlink, None, rskip, "JAL", pc0, None))
+            desc.append(
+                "JAL link x%d skip [x%d = x%d + %03x]" % (rlink, rskip, gs1, gimm)
+            )
+        elif kind == 5:  # forward computed/linking JALR, jumping over one ADDI
             # auipc rtmp,0; addi rtmp,rtmp,16; jalr rlink,rtmp,0 -- rtmp becomes a
             # compile-time constant (auipc pc + 16), so rvopt resolves the jump to
             # a static forward target that skips exactly the guarded ADDI (proving
@@ -252,6 +284,15 @@ def _finish(words, seeds, ops, desc):
     return blob, seeds, ops, desc
 
 
+def _emit_fence(words, desc, prefix=""):
+    """Emit a FENCE (rvopt lowers it to a nop) -- append no model op, since it
+    has no architectural effect on this single-hart in-order VM. Shared by
+    build_program and the loop body (prefix indents the loop's desc line).
+    """
+    words.append(enc_fence())
+    desc.append(prefix + "FENCE (nop)")
+
+
 def _emit_ls(rng, rd, words, desc, prefix=""):
     """Emit a store-then-load-back round-trip through scratch RAM (x30 base) and
     return its model tuple. Exercises every emitter load/store path and its
@@ -319,6 +360,9 @@ def build_loop_program(rng, body_len):
     loop_head = len(words)  # word index of the loop head (a leader)
     body_ops = []
     for _ in range(body_len):
+        if rng.randrange(4) == 0:  # a FENCE nop in the loop body: executed K
+            _emit_fence(words, desc, "  ")  # times across the back-edge, so
+            continue  # promotion/leaders are live, not just straight-line
         body_ops.append(_loop_body_op(rng, rng.choice(body_regs), words, desc))
     words.append(enc_i_rd(0, (-1) & 0xFFF, rc, rc))  # addi rc, rc, -1
     body_ops.append((rc, rc, None, 0, 0x00, (-1) & 0xFFF))
@@ -379,6 +423,10 @@ def model(seeds, ops):
             if rd != 0:  # rlink = jalr_pc + 4 (x0 = no link)
                 reg[rd] = (f7 + 12) & MASK
             # rskip is jumped over -> unchanged
+            continue
+        if f3 == "JAL":  # rd=rlink, rs2=rskip, f7=jal pc; rskip jumped over
+            if rd != 0:  # rlink = jal_pc + 4 (x0 = no link)
+                reg[rd] = (f7 + 4) & MASK
             continue
         a = reg[rs1]
         if rs2 is not None:  # R-type
@@ -447,6 +495,13 @@ def main(argv):
     ap.add_argument("--n", type=int, default=64, help="number of programs")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument(
+        "--seeds",
+        type=int,
+        default=1,
+        help="run this many consecutive seeds from --seed, cycling body sizes "
+        "for image-size diversity (branch range, const-pool, coalescing)",
+    )
+    ap.add_argument(
         "--body",
         type=int,
         default=20,
@@ -473,33 +528,56 @@ def main(argv):
     for exe in (muxleq, rvopt):
         if not os.path.exists(exe):
             sys.exit("missing %s -- run `make` first" % exe)
+    if a.only >= a.n:
+        # An out-of-range --only would test zero programs and "pass" silently --
+        # a false green on a typo'd reproduce command. Fail loudly instead.
+        sys.exit("--only %d is out of range [0, %d)" % (a.only, a.n))
+    # (seed << 20) ^ i is a bijection over (seed, i) only while i stays in the
+    # low 20 bits; beyond that program indices would collide with the seed field
+    # and silently collapse coverage. sys.exit (not assert) so it survives -O.
+    if a.n > (1 << 20):
+        sys.exit("--n %d exceeds the RNG index field (2^20); seeds would collide" % a.n)
+    # --only reproduces one program at one seed; multi-seed makes no sense there.
+    nseeds = 1 if a.only >= 0 else max(1, a.seeds)
+    # Cycle body sizes across seeds so a sweep exercises several image sizes
+    # (branch range, const-pool growth, block coalescing), not just one. All stay
+    # under the skip ceiling; a single seed uses k == 0 -> body_cycle[0] == --body.
+    lo = min(6, a.body)  # never cycle a small --body UP past what was asked for
+    body_cycle = [a.body, max(lo, a.body - 4), max(lo, a.body - 8)]
+
     tested = skipped = 0
+    bodies_used = set()
     with tempfile.TemporaryDirectory() as tmp:
-        for i in range(a.n):
-            if a.only >= 0 and i != a.only:
-                continue
-            rng = random.Random((a.seed << 20) ^ i)  # per-index reproducible
-            # Every third program is a bounded loop (multi-iteration + loop-carried
-            # memory across a back-edge); the rest are straight-line.
-            builder = build_loop_program if i % 3 == 0 else build_program
-            blob, seeds, ops, desc = builder(rng, a.body)
-            err = check_one(i, blob, seeds, ops, muxleq, rvopt, tmp, a.keep)
-            if err is SKIP:
-                skipped += 1
-                continue
-            if err:
-                print(
-                    "FAIL program %d (seed %d): %s" % (i, a.seed, err), file=sys.stderr
-                )
-                print(
-                    "reproduce: scripts/rvopt-fuzz.py --seed %d --only %d --body %d --keep%s"
-                    % (a.seed, i, a.body, " --wide"),
-                    file=sys.stderr,
-                )
-                for d in desc:
-                    print("   " + d, file=sys.stderr)
-                return 1
-            tested += 1
+        for k in range(nseeds):
+            seed = a.seed + k
+            body = body_cycle[k % len(body_cycle)]
+            bodies_used.add(body)
+            for i in range(a.n):
+                if a.only >= 0 and i != a.only:
+                    continue
+                rng = random.Random((seed << 20) ^ i)  # per-index reproducible
+                # Every third program is a bounded loop (multi-iteration +
+                # loop-carried memory across a back-edge); the rest straight-line.
+                builder = build_loop_program if i % 3 == 0 else build_program
+                blob, seeds, ops, desc = builder(rng, body)
+                err = check_one(i, blob, seeds, ops, muxleq, rvopt, tmp, a.keep)
+                if err is SKIP:
+                    skipped += 1
+                    continue
+                if err:
+                    print(
+                        "FAIL program %d (seed %d, body %d): %s" % (i, seed, body, err),
+                        file=sys.stderr,
+                    )
+                    print(
+                        "reproduce: scripts/rvopt-fuzz.py --seed %d --n %d --only %d --body %d --keep%s"
+                        % (seed, a.n, i, body, " --wide"),
+                        file=sys.stderr,
+                    )
+                    for d in desc:
+                        print("   " + d, file=sys.stderr)
+                    return 1
+                tested += 1
     if a.only < 0 and tested == 0:
         print(
             "rvopt-fuzz: ALL %d programs overflowed the image -- lower --body"
@@ -507,10 +585,23 @@ def main(argv):
             file=sys.stderr,
         )
         return 1
-    print(
-        "rvopt-fuzz mux: %d programs x %d ops OK (seed %d) native == model (%d skipped, too big)"
-        % (tested, a.body, a.seed, skipped)
-    )
+    if nseeds == 1:
+        print(
+            "rvopt-fuzz mux: %d programs x %d ops OK (seed %d) native == model "
+            "(%d skipped, too big)" % (tested, a.body, a.seed, skipped)
+        )
+    else:
+        print(
+            "rvopt-fuzz mux: %d programs OK across seeds %d..%d, bodies %s "
+            "(%d skipped, too big) native == model"
+            % (
+                tested,
+                a.seed,
+                a.seed + nseeds - 1,
+                "/".join(str(b) for b in sorted(bodies_used)),
+                skipped,
+            )
+        )
     return 0
 
 

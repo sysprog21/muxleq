@@ -4,7 +4,8 @@
 #   format   : clang-format 20 and a trailing-newline check (no toolchain)
 #   check    : make check
 #   sanitize : make sanitize (ASan/UBSan over the interpreter and emitters)
-#   deep     : wide native-image fuzz and loader rejection
+#   deep     : wide native-image validation, multi-seed rvopt differential
+#              fuzz (make fuzz-rvopt), and loader rejection
 #
 # check, sanitize, and deep cover the local check-all gate. No job depends on
 # another, so all four run concurrently.
@@ -88,3 +89,4 @@ jobs:
       - name: Wide native-image validation
         run: |
           make verify-mux verify-loader-rejects
+          make fuzz-rvopt
