@@ -6,7 +6,9 @@ to test the routines, type:  ok
  ok
  ok
  ok
-here 1 crc . =>  -11885 ok
+ ok
+ ok
+one 1 crc . =>  61905 ok
  ok
  ok
  ok

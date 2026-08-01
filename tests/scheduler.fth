@@ -20,17 +20,19 @@ variable state2   1 state2 !      \ consumer starts waiting
 : ready2   0 state2 ! ;
 : wait2    1 state2 ! ;
 
-\ ----- one-slot mailbox (four 16-bit numbers) ----------------------
+\ ----- one-slot mailbox (four numbers) -----------------------------
+\ cell+/cells keep the strides cell-width-agnostic; sizing the buffer by
+\ cells is what stops the top slot from overrunning it at 32-bit cells.
 variable mbflag    0 mbflag !
-create  mb  8 allot            \ mb[0] .. mb[3] (8 bytes)
+create  mb  4 cells allot      \ mb[0] .. mb[3]
 
-: store4  ( n1 n2 n3 n4 -- )
-  mb       !          mb 2 +  !
-  mb 4 +   !          mb 6 +  !
+: store4  ( n1 n2 n3 n4 -- )         \ n4 is on top; store high slot first so
+  mb 3 cells + !      mb 2 cells + ! \ each slot i ends up holding n(i+1)
+  mb cell+ !          mb !
   1 mbflag ! ;
 
 : sum4    ( -- u )
-  mb 6 + @  mb 4 + @ +  mb 2 + @ +  mb @ + ;
+  mb 3 cells + @  mb 2 cells + @ +  mb cell+ @ +  mb @ + ;
 
 \ ----- dummy lock / unlock (single real thread) -------------------
 : lock ;

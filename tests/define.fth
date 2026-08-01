@@ -20,9 +20,10 @@
 : countup 0 begin dup 5 < while dup . 1+ repeat drop cr ;
 countup
 
-\ create stores cells; indexing reads them back
+\ create stores cells; indexing reads them back (cell+ keeps this
+\ cell-width-agnostic, so the readback is 10 20 30 at any cell size)
 create tbl 10 , 20 , 30 ,
-tbl @ . tbl 2 + @ . tbl 4 + @ . cr
+tbl @ . tbl cell+ @ . tbl cell+ cell+ @ . cr
 
 \ does> patches runtime behavior into the word at definition time -- the
 \ self-modifying code-field mechanism a decode-once VM must not stale on

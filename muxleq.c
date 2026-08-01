@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -116,23 +117,30 @@ struct muxleq_image {
     size_t size;
 };
 
+/* Print "muxleq: <message>" to stderr and exit non-zero. Process teardown
+ * reclaims the image and any open file, so callers need not free before dying.
+ */
+static void die(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("muxleq: ", stderr);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+    exit(1);
+}
+
 static void grow_muxleq(struct muxleq_image *img, const char *path)
 {
-    if (img->size >= MUX_MAX_CELLS) {
-        fprintf(stderr, "muxleq: '%s' exceeds the %u-cell wide image\n", path,
-                MUX_MAX_CELLS);
-        free(img->m);
-        exit(1);
-    }
+    if (img->size >= MUX_MAX_CELLS)
+        die("'%s' exceeds the %u-cell wide image", path, MUX_MAX_CELLS);
     size_t new_size = img->size * 2;
     if (new_size > MUX_MAX_CELLS)
         new_size = MUX_MAX_CELLS;
     uint32_t *m = calloc(new_size, sizeof *m);
-    if (!m) {
-        fprintf(stderr, "muxleq: out of memory for the wide image\n");
-        free(img->m);
-        exit(1);
-    }
+    if (!m)
+        die("out of memory for the wide image");
     memcpy(m, img->m, img->size * sizeof *m);
     free(img->m);
     img->m = m;
@@ -144,19 +152,14 @@ static struct muxleq_image alloc_muxleq(size_t cells, const char *path)
 {
     struct muxleq_image img = {.size = MUX_MIN_CELLS};
     while (img.size < cells) {
-        if (img.size >= MUX_MAX_CELLS) {
-            fprintf(stderr, "muxleq: '%s' exceeds the %u-cell wide image\n",
-                    path, MUX_MAX_CELLS);
-            exit(1);
-        }
+        if (img.size >= MUX_MAX_CELLS)
+            die("'%s' exceeds the %u-cell wide image", path, MUX_MAX_CELLS);
         img.size *= 2;
     }
     img.mask = (uint32_t) (img.size - 1);
     img.m = calloc(img.size, sizeof *img.m);
-    if (!img.m) {
-        fprintf(stderr, "muxleq: out of memory for the wide image\n");
-        exit(1);
-    }
+    if (!img.m)
+        die("out of memory for the wide image");
     return img;
 }
 
@@ -171,10 +174,8 @@ static struct muxleq_image load_default(void)
 static struct muxleq_image load_muxleq(const char *path)
 {
     FILE *f = fopen(path, "r");
-    if (!f) {
-        fprintf(stderr, "muxleq: cannot open '%s'\n", path);
-        exit(1);
-    }
+    if (!f)
+        die("cannot open '%s'", path);
     struct muxleq_image img = alloc_muxleq(1, path);
     size_t n = 0;
 
@@ -193,32 +194,22 @@ static struct muxleq_image load_muxleq(const char *path)
                                                                        : 10;
         const long long v = strtoll(tok, &end, base);
         if (*end != '\0' || errno == ERANGE || v < -2147483648LL ||
-            v > 4294967295LL) {
-            fprintf(stderr, "muxleq: '%s' has a bad cell '%s'\n", path, tok);
-            fclose(f);
-            free(img.m);
-            exit(1);
-        }
+            v > 4294967295LL)
+            die("'%s' has a bad cell '%s'", path, tok);
         if (n == img.size)
             grow_muxleq(&img, path);
         img.m[n++] = (uint32_t) v;
     }
     const bool io_err = ferror(f);
     fclose(f);
-    if (io_err) {
-        fprintf(stderr, "muxleq: read error on '%s'\n", path);
-        free(img.m);
-        exit(1);
-    }
-    if (n == 0) {
-        fprintf(stderr, "muxleq: '%s' is empty\n", path);
-        free(img.m);
-        exit(1);
-    }
+    if (io_err)
+        die("read error on '%s'", path);
+    if (n == 0)
+        die("'%s' is empty", path);
     return img;
 }
 
-/* A negative c selects MUX over SUBLEQ -- but c == IO_MARKER32 is a SUBLEQ jump
+/* A negative c selects MUX over SUBLEQ, but c == IO_MARKER32 is a SUBLEQ jump
  * target, not a MUX, so that value must fall through. The guard is load-bearing
  * and shared by exec_alu() and run()'s MOVE gate; keep them in sync here.
  */
@@ -282,7 +273,7 @@ static int run(const struct muxleq_image *img)
         } else if (is_mux(c) && (c & ADDR_MASK32) == ZERO_MASK_ADDR) {
             /* A MOVE. eForth fakes SUBLEQ's missing indirection by MOVEing a
              * live address into an operand field of the very next instruction,
-             * then executing it -- an idiom that is ~23% of all ops (fusing it
+             * then executing it. This idiom is ~23% of all ops (fusing it
              * measured ~1.5x on the compute goldens). Fuse the pair: do the
              * MOVE's store, then run that next instruction here, forwarding the
              * just-written field from a register instead of storing it and
@@ -391,6 +382,17 @@ static bool terminal_setup(void)
     return true;
 }
 
+/* Report a usage error on stderr and return the process exit code. A non-NULL
+ * opt names an unrecognized option; the single usage line lives only here.
+ */
+static int usage_error(const char *opt)
+{
+    if (opt)
+        fprintf(stderr, "muxleq: unknown option '%s'\n", opt);
+    fprintf(stderr, "usage: muxleq [--] [FILE]\n");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     struct muxleq_image img = {0};
@@ -399,22 +401,15 @@ int main(int argc, char **argv)
         /* "--" ends option parsing: the next arg, if any, is a FILE even when
          * it begins with '-'.
          */
-        if (argc > 3) {
-            fprintf(stderr, "usage: muxleq [--] [FILE]\n");
-            return 1;
-        }
+        if (argc > 3)
+            return usage_error(NULL);
         file = argc == 3 ? argv[2] : NULL;
     } else if (argc == 2) {
-        if (argv[1][0] == '-') {
-            fprintf(stderr,
-                    "muxleq: unknown option '%s'\nusage: muxleq [--] [FILE]\n",
-                    argv[1]);
-            return 1;
-        }
+        if (argv[1][0] == '-')
+            return usage_error(argv[1]);
         file = argv[1];
     } else if (argc > 2) {
-        fprintf(stderr, "usage: muxleq [--] [FILE]\n");
-        return 1;
+        return usage_error(NULL);
     }
     if (file)
         img = load_muxleq(file);

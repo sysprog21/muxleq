@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-import sys
-
 high = 1 << 21
 src = high + 1
 cells = {
