@@ -1,16 +1,10 @@
 # MUXLEQ
 
 ```
-       ______         _   _
-       |  ____|       | | | |
-  ___  | |__ ___  _ __| |_| |__
- / _ \ |  __/ _ \| '__| __| '_ \
-|  __/ | | | (_) | |  | |_| | | |
- \___| |_|  \___/|_|   \__|_| |_|
  _____ ______   ___  ___     ___    ___ ___       _______   ________
 |\   _ \  _   \|\  \|\  \   |\  \  /  /|\  \     |\  ___ \ |\   __  \
-\ \  \\\__\ \  \ \  \\\  \  \ \  \/  / \ \  \    \ \   __/|\ \  \|\  \
- \ \  \\|__| \  \ \  \\\  \  \ \    / / \ \  \    \ \  \_|/_\ \  \\\  \
+\ \  \\\__\ \  \ \  \\\  \  \ \  \/  / \ \  \    \ \   __/ \ \  \|\  \
+ \ \  \\|__| \  \ \  \\\  \  \ \    / / \ \  \    \ \  \   _\ \  \\\  \
   \ \  \    \ \  \ \  \\\  \  /     \/   \ \  \____\ \  \_|\ \ \  \\\  \
    \ \__\    \ \__\ \_______\/  /\   \    \ \_______\ \_______\ \_____  \
     \|__|     \|__|\|_______/__/ /\ __\    \|_______|\|_______|\|___| \__\
@@ -134,7 +128,7 @@ The core MUXLEQ logic is as follows (one reserved mask value is additionally
 dispatched as a native shift; see "Native primitives and their limits" below):
 ```python
 # Pseudo-code for the MUXLEQ virtual machine; cells are unsigned 32-bit
-while not (pc & 0x80000000):        # run until the PC's high bit is set (halt)
+while not (pc & 0x80000000): # run until the PC's high bit is set (halt)
     # every Mem[] index below is masked into the bounded host arena
     a = Mem[pc + 0]
     b = Mem[pc + 1]
@@ -145,16 +139,16 @@ while not (pc & 0x80000000):        # run until the PC's high bit is set (halt)
         Mem[b] = get_byte()
     elif b == 0xFFFFFFFF:           # -1: output
         put_byte(Mem[a])
-    elif (c & 0x80000000) and c != 0xFFFFFFFF:   # high bit set: MUX or a native escape
-        mask_addr = c & 0x7FFFFFFF               # low 31 bits address the mask cell
-        if mask_addr == 0x7FFFFFFE:              # reserved: native shift-right-by-1
+    elif (c & 0x80000000) and c != 0xFFFFFFFF: # high bit set: MUX or a native escape
+        mask_addr = c & 0x7FFFFFFF             # low 31 bits address the mask cell
+        if mask_addr == 0x7FFFFFFE:            # reserved: native shift-right-by-1
             Mem[b] = Mem[a] >> 1
         else:
-            mask = Mem[mask_addr]                # cell 6 is the zero register: a zero mask is a MOVE
-            Mem[b] = (Mem[a] & ~mask) | (Mem[b] & mask)   # Multiplex
+            mask = Mem[mask_addr] # cell 6 is the zero register: a zero mask is a MOVE
+            Mem[b] = (Mem[a] & ~mask) | (Mem[b] & mask) # Multiplex
     else:                           # SUBLEQ
         Mem[b] = Mem[b] - Mem[a]
-        if Mem[b] == 0 or (Mem[b] & 0x80000000):          # result <= 0 (signed)
+        if Mem[b] == 0 or (Mem[b] & 0x80000000): # result <= 0 (signed)
             pc = c                  # Branch
 ```
 
