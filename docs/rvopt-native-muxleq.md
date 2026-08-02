@@ -29,7 +29,9 @@ all shifts, LUI/AUIPC, all branches, JAL, LB/LH/LHU/LW/SB/SH/SW, ecall
 write/exit). JALR is lowered for statically resolvable targets (rs1 a
 compile-time constant in the same block, e.g. an auipc/lui/li/addi result) and
 the standard return form; other runtime-computed JALRs are rejected with an
-unsupported-JALR error.
+unsupported-JALR error. Encoding is checked at decode -- JALR takes funct3 000,
+SYSTEM only the exact ecall and ebreak words -- so a reserved form is an
+unsupported op rather than a jump or an exit.
 
 Optimizations: SW high-byte/address-share, const-OPIMM + mv-copy folding,
 same-block store-to-load forwarding, and simple-loop register promotion. def-use
