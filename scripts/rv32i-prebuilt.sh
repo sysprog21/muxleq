@@ -17,8 +17,8 @@ set -eu
 RVOPT="${RVOPT:?RVOPT must point at the built rvopt}"
 MUXLEQ="${MUXLEQ:?MUXLEQ must point at the built muxleq}"
 
-# rv32i-count.sh ships beside this script; resolve it from here so the caller's
-# working directory does not matter.
+# rv32i-count.sh and rv32i-manifest.sh ship beside this script; resolve them
+# from here so the caller's working directory does not matter.
 here="$(CDPATH= cd "$(dirname "$0")" && pwd)"
 
 # sysprog21/muxleq publishes the rolling pre-release; override REPO to test a
@@ -128,6 +128,21 @@ if ! tar -xzf "$tgz" -C "$work" 2>/dev/null; then
     exit 77
 fi
 root="$work/rv32i"
+
+# The outer checksum above covers the tarball as it was downloaded; this covers
+# the payload inside it, which is a different question: a release staged from a
+# stale tree, or republished with a file added or dropped, still arrives intact.
+# Neither is authentication. A release published before the manifest existed has
+# nothing to check against, so it skips like any other release this gate cannot
+# size.
+if [ ! -f "$root/MANIFEST.sha256" ]; then
+    echo "rv32i-prebuilt: release carries no content manifest [SKIP]"
+    exit 77
+fi
+if ! "$here/rv32i-manifest.sh" verify "$root" 2>/dev/null; then
+    echo "rv32i-prebuilt: payload does not match its manifest [SKIP]"
+    exit 77
+fi
 
 # One visible warning if no timeout tool bounds the VM runs (stock macOS has
 # neither timeout nor gtimeout): a lowered ELF that loops would otherwise hang
