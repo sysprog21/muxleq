@@ -825,6 +825,18 @@ static bool resolve_jalr(struct graph *g, const bool *reach)
     return changed;
 }
 
+/* A call: a jump that links into ra, so control comes back to the next word.
+ * A JAL always has its target from the immediate; a JALR only once resolve_jalr
+ * proves one, and a runtime JALR is a hard error rather than a call. Every pass
+ * that models the return has to use this, or promotion misses an entry the
+ * emitter still branches to.
+ */
+static bool is_link_call(const struct node *nd)
+{
+    return ((nd->word >> 7) & 31) == 1 &&
+           (nd->kind == K_JAL || (nd->kind == K_JALR && nd->target != NONE));
+}
+
 /* Control-flow successors of node i: the fall-through (unless the node
  * terminates) plus a branch/jump target. Writes up to 2 node indexes into
  * succ[] and returns the count. Only 'jal ra' and resolved 'jalr ra,...' have a
@@ -839,9 +851,7 @@ static int successors(const struct graph *g,
     const struct node *nd = &g->n[i];
     int n = 0;
     const int fall = addr2node(g, nd->pc + 4);
-    const int rd = (nd->word >> 7) & 31;
-    const bool link = rd == 1 && (nd->kind == K_JAL ||
-                                  (nd->kind == K_JALR && nd->target != NONE));
+    const bool link = is_link_call(nd);
     const bool terminates = nd->kind == K_ILL || (nd->kind == K_JAL && !link) ||
                             (nd->kind == K_JALR && !link) ||
                             (nd->kind == K_SYSTEM && sys[i].kind == SYS_EXIT);
@@ -1204,8 +1214,7 @@ static int compute_promotions(const struct graph *g,
              * fall through, but lacking syscall analysis here, counting every
              * K_SYSTEM only over-rejects, which is safe.)
              */
-            const bool call = nk->kind == K_JAL && ((nk->word >> 7) & 31) == 1;
-            if (call || nk->kind == K_SYSTEM) {
+            if (is_link_call(nk) || nk->kind == K_SYSTEM) {
                 const int ret = addr2node(g, nk->pc + 4);
                 if (ret >= header && ret <= latch) {
                     entry = k;
@@ -1249,8 +1258,7 @@ static int compute_promotions(const struct graph *g,
             const struct node *nk = &g->n[k];
             if (nk->next == exit || nk->target == exit)
                 npred++;
-            else if (((nk->kind == K_JAL && ((nk->word >> 7) & 31) == 1) ||
-                      nk->kind == K_SYSTEM) &&
+            else if ((is_link_call(nk) || nk->kind == K_SYSTEM) &&
                      addr2node(g, nk->pc + 4) == exit)
                 npred++;
         }
@@ -2363,11 +2371,7 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
         xcalloc((size_t) g->count, sizeof *rets.addr),
     };
     for (int i = 1; i < g->count; i++) {
-        const int rd = (g->n[i].word >> 7) & 31;
-        const bool link_call =
-            g->n[i].kind == K_JAL ||
-            (g->n[i].kind == K_JALR && g->n[i].target != NONE);
-        if (reach[i] && link_call && rd == 1 && g->n[i].target != NONE) {
+        if (reach[i] && is_link_call(&g->n[i]) && g->n[i].target != NONE) {
             const uint32_t addr = g->n[i].pc + 4;
             const int node = addr2node(g, addr);
             if (node != NONE) {

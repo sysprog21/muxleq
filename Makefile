@@ -99,6 +99,18 @@ RVOPT_CHAIN_ENC := \
 	00100513,04100593,00100613,04000893,00000073, \
 	05d00893,00000073, \
 	00004241
+# A loop entered both by a direct jump and by the return from a resolved jalr
+# call. Counting only the jal return site makes it look single-entry, so
+# promotion attaches its preload to a path the run never takes and the loop
+# reads a zeroed cell. The image writes back the byte it loaded, so it prints
+# 01 instead of B.
+RVOPT_LOOPCALL_ENC := \
+	05400513,00100393,00000293,00028663, \
+	0100006f,00000013,05000413,000400e7, \
+	00052303,00130313,00652023,fff38393, \
+	fe0398e3,00100513,05400593,00100613, \
+	04000893,00000073,05d00893,00000073, \
+	00008067,00000041
 PACK_WORDS = python3 -c 'import sys, struct; sys.stdout.buffer.write(b"".join(struct.pack("<I", int(w, 16)) for w in sys.argv[1].split(",")))'
 
 # Standalone native-image emission: run a hand-written smoke image (MOVE, SUBLEQ
@@ -154,6 +166,11 @@ verify-mux: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	        && $(RUN) ./$(BIN) $(TMPDIR)/rvopt-chain.dec > $(TMPDIR)/rvopt-chain.out 2>&1 \
 	        && printf AB | cmp -s - $(TMPDIR)/rvopt-chain.out \
 	        || { echo "verify-mux: static JALR chain lost its second target"; exit 1; }; \
+	    $(PACK_WORDS) "$(RVOPT_LOOPCALL_ENC)" > $(TMPDIR)/rvopt-loopcall.bin \
+	        && $(RVOPT) mux $(TMPDIR)/rvopt-loopcall.bin > $(TMPDIR)/rvopt-loopcall.dec 2>&1 \
+	        && $(RUN) ./$(BIN) $(TMPDIR)/rvopt-loopcall.dec > $(TMPDIR)/rvopt-loopcall.out 2>&1 \
+	        && printf B | cmp -s - $(TMPDIR)/rvopt-loopcall.out \
+	        || { echo "verify-mux: promoted loop bypassed its preload"; exit 1; }; \
 	else $(PRINTF) "verify-mux: JALR/SYSTEM encoding gate [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 scripts/rv32i-conformance.py >/dev/null \
