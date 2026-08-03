@@ -179,7 +179,8 @@ is `muxleq [--] [FILE]`; any other option argument is rejected.
 
 ## 5. eForth environment
 
-`muxleq.fth` builds a full eForth (~170 words). Feature toggles (the `opt.*`
+`muxleq.fth` builds a full eForth (~265 words in the default `forth` vocabulary).
+Feature toggles (the `opt.*`
 constants) select the multitasker (`pause`, `task:`, `activate` in the `system`
 vocabulary), block editor, extended control structures (`do`/`loop`, `case`),
 dynamic allocation, glossary tools, enhanced `see`, and the hardware
@@ -211,33 +212,34 @@ Each item below is a one-liner you can paste into `make run`.
   DEFAULT arm (after the last `of`, before `endcase`) cannot `dup` the selector off the data stack --
   it isn't there. To use the selector's value in the default arm, recompute or re-fetch it from its
   source. This differs from the classic eForth `case` that leaves the selector on the data stack.
-- The multitasker words (`pause`/`task:`/`activate`/`multi`/`single`/`send`/`receive`) live in
-  the `system` vocabulary: run `system +order` first, or they read as undefined (`-13`).
-  See `tests/tasker.fth`. This multitasker is COOPERATIVE and single-threaded: tasks run a
-  round-robin and only switch at an explicit `pause`, so execution is deterministic. It is NOT a
-  preemptive host-thread model -- a fuller Forth's `task`/`start` create and schedule real host OS
-  threads and `send`/`recv` pass messages between them (preemptive, with `clock`/`rank`/`lock`,
-  backed by `std::thread` + condition variables), which a single-threaded OISC VM cannot match. So
+- The multitasker words (`pause`/`task:`/`activate`/`multi`/`single`/`send`/`receive`, plus the
+  address-based signaling pair `wait`/`signal`) live in the `system` vocabulary: run
+  `system +order` first, or they read as undefined (`-13`). See
+  `tests/tasker.fth`. The multitasker is COOPERATIVE and single-threaded: tasks run round-robin and
+  switch only at an explicit `pause`, so execution is deterministic. It is NOT a preemptive
+  host-thread model. A fuller Forth's `task`/`start` create and schedule real host OS threads and
+  `send`/`recv` pass messages between them preemptively (`clock`/`rank`/`lock`, backed by
+  `std::thread` + condition variables), which a single-threaded OISC VM cannot match. So
   preemptive-thread demos do not port as conformance goldens: a `clock`-timing benchmark is
   nondeterministic, and preemptive message passing relies on thread scheduling. muxleq's cooperative
-  `pause`/`send`/`receive` is an analogous messaging capability with a different API and semantics
-  (a single-slot mailbox, not a stack-copy queue).
-- This eForth is fairly complete (~250 words: `case`, `marker`, `pick`, `within`, `nip`/`tuck`,
-  `2dup`/`2drop`, `type`, `cmove`, `fill`, `allocate`/`free`, `catch`/`throw`, `um*`/`d+`, the
-  pictured-output words `<# # #s #>`, …). Recent conformance additions: `*/`/`*/mod`/`m*`,
-  `.r`, `th` (array cell index), `octal`, `chars`, `spaces`, `2over`, `2swap`, `depth` (now in the
-  forth vocab), and `value`/`to`. `to` is interpret-time only (it parses the next word from input):
-  `5 to x` works at the REPL but `: foo 5 to x ;` does not -- the compiled
-  `to` has no input to read. (A `value` is a mutable `constant`; `to` writes any such word's cell,
-  with no value-vs-constant type guard.) Still absent and read as undefined
-  (`-13`); external programs may need adapting: `vocabulary`, `defer`, `s"` (no string literals),
-  `[']` (use `'` at the REPL only -- it reads the input stream, so it can't fetch an xt inside a
-  `:` definition), `roll` (needs recursion the metacompiler can't build), and the `#`/`%`/`'c'`
-  number-literal prefixes.
-  (`evaluate` IS present, but needs an addr/len string you must build yourself since `s"` is
-  absent.)
-  Number input: decimal by default; `$FF` or `hex … decimal` for hex. Use `[char] A` (not
-  `'A'`) for a character constant.
+  `pause`/`send`/`receive` offers analogous messaging with a different API and semantics -- a
+  single-slot mailbox, not a stack-copy queue.
+- This eForth is fairly complete (~265 words): `case`, `marker`, `pick`, `within`, `nip`/`tuck`,
+  `2dup`/`2drop`, `type`, `cmove`, `fill`, `allocate`/`free`, `catch`/`throw`, `um*`/`d+`, and the
+  pictured-output words `<# # #s #>`. Recent conformance additions: `*/`/`*/mod`/`m*`, `.r`,
+  `th` (array cell index), `octal`, `chars`, `spaces`, `2over`, `2swap`, `depth` (now in the forth
+  vocab), and `value`/`to`. A `value` is a mutable `constant`; `to` writes any such word's cell with
+  no value-vs-constant type guard. `to` is interpret-time only, since it parses the next word from
+  input: `5 to x` works at the REPL, but `: foo 5 to x ;` does not -- the compiled `to` has no input
+  to read.
+  Still absent, read as undefined (`-13`), and possibly needing external programs to adapt:
+  `vocabulary`, `defer`, `s"` (no string literals), `[']` (use `'` at the REPL only -- it reads the
+  input stream, so it can't fetch an xt inside a `:` definition), `roll` (needs recursion the
+  metacompiler can't build), and the `#`/`%`/`'c'` number-literal prefixes. `evaluate` IS present,
+  but needs an addr/len string you build yourself since `s"` is absent.
+  Number input: decimal by default; `$FF` or `hex … decimal` for hex. For a character code, use
+  `char A` at the REPL and `[char] A` inside a `:` definition (`[char]` is compile-only); the `'A'`
+  literal syntax is absent.
 - `." text"` outside a definition is fragile. Common error codes: `-4` (stack underflow),
   `-13` (undefined word / compile-only misuse), `-14` (execution/output error).
 
@@ -289,7 +291,8 @@ its bounded prefix check is separate: `make golden-mandel`.
 ## 7. References
 
 - README.md -- project overview and the MUX encoding.
-- CLAUDE.md -- operational notes and build-pipeline warnings.
+- docs/muxleq-host.md -- the host VM contract (cell encoding, arena bounds).
 - docs/rvopt-native-muxleq.md -- the standalone RV32I-to-MUXLEQ compiler.
+- docs/design-threading.md -- inner-interpreter performance notes.
 - The interpreter's runtime peek-ahead fusion is inspired by macro-op decoding of the
   SUBLEQ ancestor from which MUXLEQ descends.

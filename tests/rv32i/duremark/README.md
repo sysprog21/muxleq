@@ -1,16 +1,10 @@
-# DureMark (historical)
+# DureMark
 
 DureMark, a tiny CoreMark-alike (linked-list, 10×10 matrix, and number-format
-state-machine workloads), was built freestanding for the retired RV32I microcode
-interpreter (`muxleq -r`). That interpreter is gone and its computed jumps are
-outside what `rvopt mux` can lower, so this is kept as historical source with
-no current runner.
+state-machine workloads).
 
 ## Layout
 
-- `list.c`, `matrix.c`, `state.c`, `duremark.h`, `LICENSE`: vendored verbatim
-  from https://github.com/sergev/duremark (MIT). The three `du_bench_*` workloads
-  run unmodified.
 - `run.c`: replaces upstream `main.c` with a fixed-iteration, clockless harness
   that prints the combined workload checksum via the `write(64)` ecall.
 - `crt0.S`: entry at guest address 0, sets `sp`, calls `du_main`, then `exit(93)`.
@@ -28,5 +22,5 @@ which are themselves pure RV32I; no `MUL`/`DIV` instruction is emitted.
 Needs a bare-metal `riscv-none-elf-*` toolchain:
 
 ```
-make                       # build duremark.elf
+make   # build duremark.elf
 ```
