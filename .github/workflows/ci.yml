@@ -11,11 +11,11 @@
 #              prebuilt-script contract test
 #   rv32i    : cross-build the tests/rv32i programs with the xPack RISC-V
 #              toolchain, run them + the rv32ui conformance suite through
-#              rvopt+muxleq, upload the binaries as an artifact, and (on the
-#              default branch, only when tests/rv32i changed) publish them as a
-#              rolling pre-release. The published tarball includes the rv32ui
-#              .elf inputs, so the toolchain-less "check" job above can run the
-#              full suite too.
+#              rvopt+muxleq, time the benchmarks (make bench), upload the
+#              binaries as an artifact, and (on the default branch, only when
+#              tests/rv32i changed) publish them as a rolling pre-release. The
+#              published tarball includes the rv32ui .elf inputs, so the
+#              toolchain-less "check" job above can run the full suite too.
 #
 # check, sanitize, and deep cover the local check-all gate. No job depends on
 # another, so all five run concurrently.
@@ -126,7 +126,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang gforth
+          # 'time' is GNU /usr/bin/time, used by 'make bench' below; without it the
+          # bench targets still run (and gate on the DureMark checksum) but untimed.
+          sudo apt-get install -y build-essential clang gforth time
       # The ~150 MB toolchain is cached across runs; the install script skips the
       # download when the cache already holds the pinned version (which lives in
       # the script). Keying on the script's hash busts the cache on a version
@@ -144,6 +146,13 @@ jobs:
         run: .ci/install-riscv-toolchain.sh
       - name: Build and run the RV32I programs and rv32ui conformance
         run: make rv32i-check
+      # Timing-only, informational: the eForth kernels and the rvopt-lowered
+      # DureMark. This job is the only one with the cross toolchain, so it is the
+      # only place bench-rv32i actually builds and runs (it skips elsewhere). The
+      # bench targets still fail the job on a non-zero VM exit, so a crash is
+      # caught here, not just slowness.
+      - name: Run benchmarks
+        run: make bench
       # This job is the only one with a populated build/rv32i tree, so it is the
       # only place the prebuilt contract test's pass/demos/truncated-release
       # assertions can run (the deep job exercises only the skip/refuse paths).
