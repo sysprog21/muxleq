@@ -57,6 +57,9 @@ $(RVOPT): rvopt.c | $(OUT)
 # Each case is "name:comma-separated hex words"; the li ahead of the tested word
 # is the constant the resolver would otherwise fold into a jump or an exit.
 # ebreak decodes: analyze_syscalls() marks it SYS_BAD, not the decode gate.
+# The last four are control-flow cases, not encodings: an ecall entered by a
+# jump or by a return past its own li a7, an unresolvable jalr reached only
+# through a second one, and a target a later leader invalidates.
 RVOPT_BAD_ENC := \
 	reserved-JALR-funct3-1:00800093,00009067,05d00893,00000073 \
 	reserved-JALR-funct3-7:00800093,0000f067,05d00893,00000073 \
@@ -66,16 +69,36 @@ RVOPT_BAD_ENC := \
 	CSR-funct3-5:05d00893,00005073 \
 	ebreak:05d00893,00100073 \
 	ecall-with-rd:05d00893,000000f3 \
-	ecall-with-rs1:05d00893,00008073
-# The jump-over cases exercise reachability, not the decode gate: an illegal
-# word off the reachable path must not change what the reachable path lowers to.
+	ecall-with-rs1:05d00893,00008073 \
+	jumped-into-ecall:01000093,00008067,05d00893,00000013,00000073 \
+	returned-into-ecall:05d00893,008000ef,00000073,04000893,00008067 \
+	chain-uncovers-JALR:01000113,00010067,00800093,00010067,00800093,00008067 \
+	JALR-invalidated-target:00000c63,01000113,00000013,00010067,05d00893,00000073,00800193,00018067
+# The jump-over cases exercise reachability, not the decode gate: an off-path
+# word must not change what the reachable path lowers to, whatever it decodes
+# to. In the last three that word is itself a control transfer aimed at a live
+# instruction, which must not split the block that instruction sits in.
 RVOPT_OK_ENC := \
 	JALR:00800093,00008067,05d00893,00000073 \
 	ret:00c000ef,05d00893,00000073,00008067 \
 	ecall-exit:05d00893,00000073 \
 	ecall-write:04000893,00000073 \
 	jump-over-reserved-JALR:0100006f,01400093,00009067,00008067,05d00893,00000073 \
-	jump-over-CSR:0100006f,01400093,00001073,00008067,05d00893,00000073
+	jump-over-CSR:0100006f,01400093,00001073,00008067,05d00893,00000073 \
+	jump-over-JALR:0100006f,01400093,00000013,00008067,05d00893,00000073 \
+	jump-over-JAL:00c0006f,0100006f,00000013,05d00893,00000013,00000073 \
+	jump-over-branch:00c0006f,00000863,00000013,05d00893,00000013,00000073
+# Two static jalrs in a chain: the block that makes the second resolvable is
+# reachable only through the first. Each target writes one byte of the "AB" at
+# the end of the image, so the check is the exact output of a run; lowering
+# without an error proves nothing, since a dropped half still exits cleanly.
+RVOPT_CHAIN_ENC := \
+	00800093,00008067, \
+	00100513,04000593,00100613,04000893,00000073, \
+	02400113,00010067, \
+	00100513,04100593,00100613,04000893,00000073, \
+	05d00893,00000073, \
+	00004241
 PACK_WORDS = python3 -c 'import sys, struct; sys.stdout.buffer.write(b"".join(struct.pack("<I", int(w, 16)) for w in sys.argv[1].split(",")))'
 
 # Standalone native-image emission: run a hand-written smoke image (MOVE, SUBLEQ
@@ -126,6 +149,11 @@ verify-mux: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	        $(RVOPT) mux $(TMPDIR)/rvopt-enc.bin >/dev/null 2>&1 \
 	            || { echo "verify-mux: rejected $${c%%:*}"; exit 1; }; \
 	    done; \
+	    $(PACK_WORDS) "$(RVOPT_CHAIN_ENC)" > $(TMPDIR)/rvopt-chain.bin \
+	        && $(RVOPT) mux $(TMPDIR)/rvopt-chain.bin > $(TMPDIR)/rvopt-chain.dec 2>&1 \
+	        && $(RUN) ./$(BIN) $(TMPDIR)/rvopt-chain.dec > $(TMPDIR)/rvopt-chain.out 2>&1 \
+	        && printf AB | cmp -s - $(TMPDIR)/rvopt-chain.out \
+	        || { echo "verify-mux: static JALR chain lost its second target"; exit 1; }; \
 	else $(PRINTF) "verify-mux: JALR/SYSTEM encoding gate [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 scripts/rv32i-conformance.py >/dev/null \

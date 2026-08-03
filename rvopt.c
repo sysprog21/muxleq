@@ -768,47 +768,55 @@ static void analyze_syscalls(const struct graph *g,
  * emit lowers a direct jump (+ a pc+4 link when rd != 0). A jalr whose rs1 is a
  * runtime value (notably 'ret', rs1 = ra, which cprop never knows since JAL
  * clears its rd) keeps target == NONE and falls back to the ra-checked ret
- * form. Same in-block cprop as analyze_syscalls; MUST run before mark_reachable
- * so the target joins the emitted set.
+ * form. Same in-block cprop as analyze_syscalls. Only a JALR the reachability
+ * walk reached may resolve: an unreachable one whose rs1 happens to be constant
+ * would otherwise mark its target a leader, and that clears cprop at an
+ * instruction that does run, losing a live a7 and turning a valid ecall into an
+ * unsupported op.
+ *
+ * Returns whether any target or leader moved, so the caller can rerun
+ * analyze_syscalls and mark_reachable and resolve again until nothing moves.
  */
-static void resolve_jalr(struct graph *g)
+static bool resolve_jalr(struct graph *g, const bool *reach)
 {
     /* A resolved JALR is a NEW control-flow entry into its target, so that
      * target must become a leader; otherwise this pass (and analyze_syscalls,
      * which shares the leader-clears-cprop rule) would leak the linear
      * predecessor's constants into a node reached only by the jump, and could
      * misresolve a later JALR or fold a write with registers not live on the
-     * jumped-from path. Marking a target leader can change cprop clearing,
-     * which can change which JALRs resolve, so iterate to a fixpoint (leaders
-     * only grow; each pass re-resolves every JALR from scratch).
+     * jumped-from path. Every target is recomputed from scratch, so one the
+     * walk no longer reaches drops back to NONE rather than surviving as an
+     * edge nothing takes.
      */
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        struct cprop c;
-        cprop_clear(&c);
-        for (int i = 1; i < g->count; i++) {
-            struct node *nd = &g->n[i];
-            if (nd->leader)
-                cprop_clear(&c);
-            if (nd->kind == K_JALR) {
-                int tgt = NONE;
-                if (c.known[nd->rs1]) {
-                    const uint32_t a =
-                        (c.val[nd->rs1] + (uint32_t) nd->imm) & ~1u;
-                    tgt = addr2node(g, a); /* NONE if not a decoded instr */
-                }
-                nd->target = tgt; /* reset every pass so a stale target cannot
-                                     survive a newly inserted leader
-                                     */
-                if (tgt != NONE && !g->n[tgt].leader) {
-                    g->n[tgt].leader = 1;
-                    changed = true;
-                }
+    bool changed = false;
+    struct cprop c;
+    cprop_clear(&c);
+    for (int i = 1; i < g->count; i++) {
+        struct node *nd = &g->n[i];
+        if (nd->leader)
+            cprop_clear(&c);
+        if (nd->kind == K_JALR) {
+            int tgt = NONE;
+            if (reach[i] && c.known[nd->rs1]) {
+                const uint32_t a = (c.val[nd->rs1] + (uint32_t) nd->imm) & ~1u;
+                tgt = addr2node(g, a); /* NONE if not a decoded instr */
             }
-            cprop_update(&c, nd);
+            if (nd->target != tgt) {
+                /* An edge into a node that is already a leader still changes
+                 * what the walk reaches, so report a moved target too, not
+                 * just a new leader.
+                 */
+                nd->target = tgt;
+                changed = true;
+            }
+            if (tgt != NONE && !g->n[tgt].leader) {
+                g->n[tgt].leader = 1;
+                changed = true;
+            }
         }
+        cprop_update(&c, nd);
     }
+    return changed;
 }
 
 /* Control-flow successors of node i: the fall-through (unless the node
@@ -859,6 +867,35 @@ static void mark_reachable(const struct graph *g,
             stack[sp++] = succ[k];
     }
     free(stack);
+}
+
+/* Basic-block leaders for the code that runs. decode_graph() marks the target
+ * of every static transfer without knowing which of them execute, so a jump on
+ * a dead path splits a live block, and analyze_syscalls() then clears cprop at
+ * an instruction whose incoming constants are in fact still good. Mark from the
+ * transfers a walk reached instead.
+ *
+ * Returns whether a leader was added; leaders only grow, which bounds the
+ * caller's loop.
+ */
+static bool mark_leaders(struct graph *g, const bool *reach)
+{
+    bool changed = false;
+    for (int i = 1; i < g->count; i++) {
+        const struct node *nd = &g->n[i];
+        if (!reach[i])
+            continue;
+        const int fall = addr2node(g, nd->pc + 4);
+        if (nd->target != NONE && !g->n[nd->target].leader) {
+            g->n[nd->target].leader = 1;
+            changed = true;
+        }
+        if (is_block_end(nd->kind) && fall != NONE && !g->n[fall].leader) {
+            g->n[fall].leader = 1;
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 /* Can control reach node 'to' starting AFTER node 'from' executes (i.e. from
@@ -2243,9 +2280,33 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
 {
     struct sysinfo *sys = xcalloc((size_t) g->count, sizeof *sys);
     bool *reach = xcalloc((size_t) g->count, sizeof *reach);
-    resolve_jalr(g);
-    analyze_syscalls(g, used, sys);
-    mark_reachable(g, sys, reach);
+    /* Which transfers may mark a leader, and which JALRs may resolve, both
+     * depend on reachability; reachability depends on sys[], which cprop reads
+     * off the leaders. Break the cycle with a walk over a zeroed sys[], where
+     * no ecall counts as an exit: it needs no cprop and reaches at least what
+     * the real walk does, so the leaders it justifies cover every live block.
+     * Then classify the syscalls, walk for real, and resolve the JALRs that
+     * walk reached. Leaders only grow, so this settles. reach[] doubles as
+     * mark_reachable's visited set, so clear it before each walk. The vd and
+     * use-list edges decode built against the leader set discarded here are
+     * not rebuilt; only dump and the IR check read those, and neither runs
+     * this path.
+     */
+    for (int i = 1; i < g->count; i++)
+        g->n[i].leader = 0;
+    g->n[g->entry].leader = 1;
+    bool changed;
+    do {
+        memset(sys, 0, (size_t) g->count * sizeof *sys);
+        memset(reach, 0, (size_t) g->count * sizeof *reach);
+        mark_reachable(g, sys, reach);
+        changed = mark_leaders(g, reach);
+        analyze_syscalls(g, used, sys);
+        memset(reach, 0, (size_t) g->count * sizeof *reach);
+        mark_reachable(g, sys, reach);
+        if (resolve_jalr(g, reach))
+            changed = true;
+    } while (changed);
     /* refuse self-modifying code, never miscompile it */
     detect_smc(g, sys, reach);
 
