@@ -408,7 +408,13 @@ static struct graph decode_graph(const unsigned char *img, size_t used)
             g.n[fall].leader = 1;
     }
 
-    /* Memory-order chain + intra-block value edges in one linear pass. */
+    /* Memory-order chain + intra-block value edges in one linear pass, against
+     * the DECODE-TIME leader set. resolve_jalr may add leaders later and does
+     * NOT rebuild these, so vd1/vd2/mem and the use-lists feed only dump and
+     * IR-check (pre-resolve). The live emit passes (store-forwarding,
+     * promotion) use the 'leader' flag and the leader-guarded mem chain, never
+     * vd -- so a future DCE pass must not trust vd/use-lists post-resolve_jalr.
+     */
     int last_def[32];
     for (int r = 0; r < 32; r++)
         last_def[r] = NONE;
@@ -898,16 +904,18 @@ static bool reaches_after(const struct graph *g,
 /* Self-modifying-code guard. An interpreter re-fetches each instruction from
  * guest RAM every step, so it honors a guest STORE into its own code; the
  * native mux image bakes decode once, so such a store would silently run the
- * STALE instruction. Refuse rather than miscompile: reject a reachable STORE
- * whose target is a COMPILE-TIME CONSTANT (its base register li'd/la'd in the
- * same block, tracked by cprop) landing on a reachable instruction word. An
- * unknown base (sp-relative stack, computed pointer) is assumed disjoint from
- * code, the standard freestanding convention; flagging those would reject
- * every real program (all push to sp). The store must also be able to
- * RE-EXECUTE the word it overwrites (reaches_after); overwriting an
- * already-passed word, e.g. code space reused as scratch, is harmless. The
- * residual gap (a store into code through a RUNTIME-computed address) is
- * not caught here (documented).
+ * STALE instruction. Refuse the analyzable case rather than miscompile it:
+ * reject a reachable STORE whose target is a COMPILE-TIME CONSTANT (its base
+ * register li'd/la'd in the same block, tracked by cprop) landing on a
+ * reachable instruction word. An unknown base (sp-relative stack, computed
+ * pointer) is assumed disjoint from code, the standard freestanding convention;
+ * flagging those would reject every real program (all push to sp). The store
+ * must also be able to RE-EXECUTE the word it overwrites (reaches_after);
+ * overwriting an already-passed word, e.g. code space reused as scratch, is
+ * harmless. Scope stated precisely: constant-address SMC into live code is
+ * refused here; runtime-address SMC into code is UNMODELED -- if a program does
+ * it, the baked image runs the stale word (a miscompile, not a refusal), out of
+ * scope by the freestanding convention above, not an oversight.
  */
 static void detect_smc(const struct graph *g,
                        const struct sysinfo *sys,
@@ -1770,8 +1778,13 @@ static void sign_extend32(int *p, long long acc, int sb, const struct m32 *m)
 }
 
 /* SB/SH/SW as 'n' little-endian bytes (n = 2 half, 4 word; SB uses the cheaper
- * masked emit_store_byte32). The address is computed once; OL walks to the next
- * cell after each byte.
+ * masked emit_store_byte32). The address is computed (and window-masked) once;
+ * OL then walks to the next cell per byte via a raw += 1, NOT a re-mask. That
+ * diverges from the (rs1+imm+k) & winmask fold only when the base falls in the
+ * top n-1 bytes of the window -- which a well-formed program never does
+ * (winsize >= used, and RV32I's real wrap is at 2^32, not winsize). Re-masking
+ * per byte would call emit_addr32 n times (~4x the address-gen on every
+ * multi-byte store) to defend an access already outside the window contract.
  */
 static void emit_store_bytes32(int *p,
                                long long rs2,
@@ -1793,6 +1806,8 @@ static void emit_store_bytes32(int *p,
  * cheaper emit_load_byte_u32). Each RAM cell holds a bare 0..255 byte; copybit
  * places byte i's 8 bits at rd bits [8*i, 8*i+7], disjoint so the accumulator
  * ORs cleanly. 'sign' fills the top bits from the last byte's high bit (LH).
+ * Per-byte advance is a raw OL += 1 (no re-mask); see emit_store_bytes32 for
+ * why the window-top wrap edge is unreachable for well-formed programs.
  */
 static void emit_load_bytes32(int *p,
                               long long rd,

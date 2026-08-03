@@ -21,7 +21,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order.
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check rv32i-prebuilt rv32i-auto verify-prebuilt
+.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check rv32i-prebuilt rv32i-auto verify-prebuilt bench bench-forth bench-rv32i
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -236,8 +236,9 @@ rv32i: ## Cross-build the RV32I test programs into build/rv32i (needs riscv-none
 RV32I_VM := RVOPT=$(abspath $(RVOPT)) MUXLEQ=$(abspath $(BIN))
 
 rv32i-check: $(BIN) $(RVOPT) rv32i ## Lower the RV32I programs and run the rv32ui conformance suite.
-	$(Q)$(MAKE) -C tests/rv32i       OUT=$(RV32I_DEMOS) CROSS=$(RVCROSS) $(RV32I_VM) run
-	$(Q)$(MAKE) -C tests/rv32i/unopt OUT=$(RV32I_UNOPT) CROSS=$(RVCROSS) $(RV32I_VM) run
+	$(Q)$(MAKE) -C tests/rv32i          OUT=$(RV32I_DEMOS)    CROSS=$(RVCROSS) $(RV32I_VM) run
+	$(Q)$(MAKE) -C tests/rv32i/unopt    OUT=$(RV32I_UNOPT)    CROSS=$(RVCROSS) $(RV32I_VM) run
+	$(Q)$(MAKE) -C tests/rv32i/duremark OUT=$(RV32I_DUREMARK) CROSS=$(RVCROSS) $(RV32I_VM) run
 	$(Q)$(MAKE) -C tests/rv32i/riscv-tests CROSS=$(RVCROSS) $(RV32I_VM) check
 # Stage the rv32ui .elf inputs (built in-tree) under build/rv32i so the published
 # tarball carries them, letting the toolchain-less prebuilt path run the full
@@ -281,6 +282,43 @@ rv32i-auto: $(BIN) $(RVOPT) ## RV32I coverage: from source if toolchain present,
 	    $(PRINTF) "rv32i-auto: no complete $(RVCROSS) toolchain -- running the prebuilt release\n"; \
 	    $(MAKE) rv32i-prebuilt; \
 	fi
+
+# Benchmarks. "bench-*" targets are benchmark actions: they measure wall-clock
+# throughput and are deliberately NOT part of "make check" (which gates
+# correctness, not speed). Timing uses POSIX "/usr/bin/time -p" (real/user/sys to
+# stderr) when present; without it the workload still runs, just untimed.
+TIME_P := $(shell command -v /usr/bin/time >/dev/null 2>&1 && echo "/usr/bin/time -p")
+
+# eForth benchmark kernels, fed through the VM on stdin and timed. A curated,
+# compute-bound subset of the golden workloads (not the feature demos), spanning
+# kernel types: prng (16-bit xorshift PRNG), sieve (Sieve of Eratosthenes),
+# fibonacci (recursion), sqrt (integer square root), crc (CRC-16), chacha20
+# (stream cipher), multiply (um* multiplication). Correctness is pinned by
+# "make golden"; here they are only timed, so stdout is discarded and just the
+# per-kernel real/user/sys (from /usr/bin/time -p, on stderr) shows.
+BENCH_FORTH_FILES := prng sieve fibonacci sqrt crc chacha20 multiply
+bench-forth: $(BIN) ## Benchmark the eForth compute kernels (timed).
+	$(Q)$(foreach t,$(BENCH_FORTH_FILES),\
+	    $(PRINTF) "bench-forth: $(t)\n"; \
+	    $(TIME_P) $(RUN) ./$(BIN) < tests/$(t).fth >/dev/null || exit $$?; \
+	)
+
+# DureMark lowered to native MUXLEQ by rvopt (the "tuned" path: straight-line
+# native ops, not RV32I interpretation), then timed on the VM. Delegates to the
+# duremark sub-make's own `run` target (build + lower + bounded VM run + checksum
+# assert) with TIME_P set, so the benchmark times exactly the gated path instead
+# of re-implementing the lowering -- one source of truth, and it inherits the
+# run's timeout bound. Needs the cross toolchain to build the .elf; skips without.
+bench-rv32i: $(BIN) $(RVOPT) ## Benchmark rvopt-lowered DureMark on the VM (timed).
+	$(Q)if command -v $(RVCROSS)gcc >/dev/null 2>&1 && command -v $(RVCROSS)objcopy >/dev/null 2>&1; then \
+	    $(PRINTF) "bench-rv32i: rvopt-lowered DureMark\n"; \
+	    $(MAKE) -C tests/rv32i/duremark OUT=$(RV32I_DUREMARK) CROSS=$(RVCROSS) \
+	        $(RV32I_VM) TIME_P='$(TIME_P)' run; \
+	else \
+	    $(PRINTF) "bench-rv32i: no $(RVCROSS) toolchain to build DureMark "; $(call notice, [SKIP]); \
+	fi
+
+bench: bench-forth bench-rv32i ## Run all benchmarks (eForth + RV32I).
 
 run: $(BIN) ## Run the interactive VM.
 	$(Q)./$(BIN)
@@ -352,7 +390,7 @@ GOLDEN_FILES := \
 	fibonacci bitcount clz log \
 	life rainbow control \
 	tasker sieve collatz base recurse rot13 double sort heap except eof \
-	arith crc define prng-bench scheduler chacha20 \
+	arith crc define prng scheduler chacha20 \
 	hello bigf asterisks trig multiply \
 	array does ascii \
 	text money temp weather calendar \

@@ -77,10 +77,10 @@ Once defined, the word `hello` can be executed by typing its name.
 - RV32I test programs: freestanding RISC-V demos, benchmarks, and the official
   rv32ui conformance suite live in [`tests/rv32i/`](tests/rv32i). `make rv32i`
   cross-builds the demo, unopt, and DureMark programs into `build/rv32i`;
-  `make rv32i-check` additionally lowers the demo and unopt programs with
-  `rvopt mux`, runs them on the VM, and runs the rv32ui conformance suite
-  (DureMark is build-checked only, since it uses computed jumps `rvopt` cannot
-  lower). Both need a bare-metal
+  `make rv32i-check` additionally lowers the demo, unopt, and DureMark programs
+  with `rvopt mux`, runs them on the VM, and runs the rv32ui conformance suite.
+  DureMark asserts its deterministic checksum, so it gates rvopt lowering and VM
+  execution end to end. Both need a bare-metal
   `riscv-none-elf-*` toolchain, such as the
   [xPack GNU RISC-V toolchain](https://xpack-dev-tools.github.io/riscv-none-elf-gcc-xpack/).
   CI builds and runs everything with the xPack toolchain on every push. On the
