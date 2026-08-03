@@ -52,6 +52,28 @@ $(RVOPT): rvopt.c | $(OUT)
 	$(VECHO) "  CC+LD\t$@\n"
 	$(Q)$(CC) $(CFLAGS) -o $@ rvopt.c
 
+# Encoding cases for the two opcodes whose fields decode_word has to check: JALR
+# takes funct3 000 only, and SYSTEM takes just the exact ecall and ebreak words.
+# Each case is "name:comma-separated hex words"; the li ahead of the tested word
+# is the constant the resolver would otherwise fold into a jump or an exit.
+# ebreak decodes: analyze_syscalls() marks it SYS_BAD, not the decode gate.
+RVOPT_BAD_ENC := \
+	reserved-JALR-funct3-1:00800093,00009067,05d00893,00000073 \
+	reserved-JALR-funct3-7:00800093,0000f067,05d00893,00000073 \
+	reserved-JALR-link-funct3-2:00800093,0000a0e7,05d00893,00000073 \
+	reserved-ret-funct3-1:00c000ef,05d00893,00000073,00009067 \
+	CSR-funct3-1:05d00893,00001073 \
+	CSR-funct3-5:05d00893,00005073 \
+	ebreak:05d00893,00100073 \
+	ecall-with-rd:05d00893,000000f3 \
+	ecall-with-rs1:05d00893,00008073
+RVOPT_OK_ENC := \
+	JALR:00800093,00008067,05d00893,00000073 \
+	ret:00c000ef,05d00893,00000073,00008067 \
+	ecall-exit:05d00893,00000073 \
+	ecall-write:04000893,00000073
+PACK_WORDS = python3 -c 'import sys, struct; sys.stdout.buffer.write(b"".join(struct.pack("<I", int(w, 16)) for w in sys.argv[1].split(",")))'
+
 # Standalone native-image emission: run a hand-written smoke image (MOVE, SUBLEQ
 # arithmetic + branch-to-halt, PUT at the 32-bit encoding), a high-address
 # image, and wide differential fuzz.
@@ -86,6 +108,19 @@ verify-mux: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	        && $(RVOPT) mux $(TMPDIR)/rvopt-tso.bin >/dev/null 2>&1 \
 	        || { echo "verify-mux: FENCE.TSO (a nop here) was rejected"; exit 1; }; \
 	else $(PRINTF) "verify-mux: FENCE reject/accept [SKIP: no python3]\n"; fi
+	$(Q)if command -v python3 >/dev/null 2>&1; then \
+	    for c in $(RVOPT_BAD_ENC); do \
+	        $(PACK_WORDS) "$${c#*:}" > $(TMPDIR)/rvopt-enc.bin; \
+	        ! $(RVOPT) mux $(TMPDIR)/rvopt-enc.bin >/dev/null 2>$(TMPDIR)/rvopt-enc.err \
+	            && grep -q 'unsupported op' $(TMPDIR)/rvopt-enc.err \
+	            || { echo "verify-mux: accepted $${c%%:*}"; exit 1; }; \
+	    done; \
+	    for c in $(RVOPT_OK_ENC); do \
+	        $(PACK_WORDS) "$${c#*:}" > $(TMPDIR)/rvopt-enc.bin; \
+	        $(RVOPT) mux $(TMPDIR)/rvopt-enc.bin >/dev/null 2>&1 \
+	            || { echo "verify-mux: rejected $${c%%:*}"; exit 1; }; \
+	    done; \
+	else $(PRINTF) "verify-mux: JALR/SYSTEM encoding gate [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 scripts/rv32i-conformance.py >/dev/null \
 	        || { echo "verify-mux: RV32I reference-model self-check FAILED"; exit 1; }; \

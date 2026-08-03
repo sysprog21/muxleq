@@ -215,6 +215,9 @@ static unsigned char *load_guest(const char *path, size_t *used)
 
 /* RV32I decode */
 
+#define RV_ECALL 0x00000073u
+#define RV_EBREAK 0x00100073u
+
 /* Sign-extend the low 'bits' of v. */
 static int32_t sext(uint32_t v, int bits)
 {
@@ -246,6 +249,11 @@ static void decode_word(uint32_t pc, uint32_t w, struct node *nd)
                        21);
         break;
     case 0x67: /* JALR */
+        /* funct3 000 only; the other seven are reserved, not jumps. */
+        if (nd->funct3 != 0) {
+            nd->kind = K_ILL;
+            break;
+        }
         nd->kind = K_JALR, nd->rd = rd, nd->rs1 = rs1,
         nd->imm = sext(w >> 20, 12);
         break;
@@ -285,8 +293,13 @@ static void decode_word(uint32_t pc, uint32_t w, struct node *nd)
         else
             nd->kind = K_ILL;
         break;
-    case 0x73: /* SYSTEM (ECALL/EBREAK) */
-        nd->kind = K_SYSTEM;
+
+    /* SYSTEM: only the two base-ISA words. Every other encoding here is a CSR
+     * or privileged instruction, and admitting one would leave a7 alone to
+     * decide it is an ecall, so they stay illegal.
+     */
+    case 0x73:
+        nd->kind = (w == RV_ECALL || w == RV_EBREAK) ? K_SYSTEM : K_ILL;
         break;
     default:
         nd->kind = K_ILL;
@@ -720,10 +733,12 @@ static void analyze_syscalls(const struct graph *g,
             cprop_clear(&c);
         sys[i].kind = SYS_NONE;
         if (nd->kind == K_SYSTEM) {
-            const uint32_t funct12 = nd->word >> 20;
             const int a7 = 17, a1 = 11, a2 = 12; /* ecall ABI registers */
-            if (funct12 != 0 || !c.known[a7]) {
-                sys[i].kind = SYS_BAD; /* ebreak/CSR, or unresolved a7 */
+            /* decode admits ebreak here too; match the exact word so this does
+             * not depend on how wide the SYSTEM case is.
+             */
+            if (nd->word != RV_ECALL || !c.known[a7]) {
+                sys[i].kind = SYS_BAD; /* ebreak, or unresolved a7 */
             } else if (c.val[a7] == 93) {
                 sys[i].kind = SYS_EXIT;
             } else if (c.val[a7] == 64) { /* write (fd a0 ignored) */
