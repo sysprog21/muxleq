@@ -21,7 +21,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order.
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check rv32i-prebuilt rv32i-auto verify-prebuilt bench bench-forth bench-rv32i rv32i-release
+.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel golden-raytracer verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check rv32i-prebuilt rv32i-auto verify-prebuilt bench bench-forth bench-rv32i rv32i-release
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -476,6 +476,21 @@ golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mand
 	    cmp -s tests/expected/mandel-prefix.out $(TMPDIR)/mandel-prefix.out \
 	        || { echo "golden-mandel: prefix drift"; exit 1; }
 	$(Q)$(PRINTF) "golden-mandel: bounded mandel prefix "; $(call notice, [OK])
+
+# Showcase: the baked eForth interprets a raytracer that streams one
+# deterministic 64x32 frame to a real RGB888 PNG on stdout (svpng stored-block
+# technique). Integer-only 16.16 fixed point, so the bytes are stable across
+# runs and machines. Standalone, not in `check`: one frame is a few minutes of
+# pure-eForth interpretation. Binary compare with no tr/head filtering.
+RAYTRACE_TIMEOUT ?= 600
+golden-raytracer: $(BIN) tests/expected/raytracer.png ## Byte-exact 64x32 eForth raytracer PNG.
+	$(Q)test -n "$(TIMEOUT)" || $(PRINTF) \
+	    "golden-raytracer: WARNING: no timeout(1)/gtimeout; a hung render will not be bounded\n"
+	$(Q)if $(TIMEOUT) $(if $(TIMEOUT),$(RAYTRACE_TIMEOUT)) ./$(BIN) < tests/raytracer.fth \
+	        > $(TMPDIR)/raytracer.png 2>/dev/null \
+	        && cmp -s tests/expected/raytracer.png $(TMPDIR)/raytracer.png; \
+	    then :; else echo "golden-raytracer: PNG drift or VM error (see tests/raytracer.fth)"; exit 1; fi
+	$(Q)$(PRINTF) "golden-raytracer: 64x32 RGB888 PNG "; $(call notice, [OK])
 # The pre-commit gate: byte-exact 32-bit golden diff, pty editor screen, 32-bit
 # image sanity smokes, and the 32-bit self-hosting proof.
 check: golden golden-see golden-pty verify-eforth-stage0 verify-eforth-repl bootstrap rv32i-auto ## Run the fast pre-commit gate.
