@@ -18,6 +18,11 @@ set -eu
 here="$(CDPATH= cd "$(dirname "$0")" && pwd)"
 root="$(CDPATH= cd "$here/.." && pwd)"
 script="$root/scripts/rv32i-prebuilt.sh"
+# The oracles below read count.txt through the same helper the script uses, so
+# a change to what a usable count is cannot leave the test predicting the old
+# contract. The fixtures, with their own expected exit codes, are what pin the
+# helper itself.
+count_sh="$root/scripts/rv32i-count.sh"
 
 sha_tool() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -104,10 +109,50 @@ PY
     have_py=1
 fi
 
+# Metadata contract cases: one conformance elf each, differing only in what
+# count.txt says. Stub rvopt/muxleq replace the toolchain -- they lower nothing,
+# they only let the conformance loop count the elf and see PASS -- so these run
+# anywhere, unlike the cases above that need a built build/rv32i tree.
+cat >"$bin/rvopt-stub" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$#" -eq 2 ]
+[ "$1" = mux ]
+printf '0\n'
+EOF
+cat >"$bin/muxleq-stub" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'PASS\n'
+EOF
+chmod +x "$bin/rvopt-stub" "$bin/muxleq-stub"
+
+meta_case() { # name, count.txt body for printf %b ("-" stages no count.txt)
+    m="$work/meta-$1"
+    mkdir -p "$m/rv32i/riscv-tests"
+    : >"$m/rv32i/riscv-tests/add.elf"
+    [ "$2" = - ] || printf '%b' "$2" >"$m/rv32i/riscv-tests/count.txt"
+    tar -czf "$fix/$1.tgz" -C "$m" rv32i
+    sha_tool "$fix/$1.tgz" >"$fix/$1.sha"
+}
+meta_case valid-count '1\n'
+meta_case missing-count -
+meta_case empty-count ''
+meta_case zero-count '0\n'
+meta_case leading-zero-count '01\n'
+meta_case junk-count '1x\n'
+meta_case multiline-count '1\n\n'
+meta_case crlf-count '1\r\n'
+meta_case space-before-count ' 1\n'
+meta_case space-after-count '1 \n'
+meta_case huge-count '99999999999999999999999999\n'
+meta_case mismatched-count '2\n'
+
 # Pass cases need real elfs and a real rvopt/muxleq; run them only when present.
 RVOPT_BIN="${RVOPT:-$root/build/rvopt}"
 MUXLEQ_BIN="${MUXLEQ:-$root/build/muxleq}"
 have_elfs=0
+have_full=0
 have_trunc=0
 if [ -d "$root/build/rv32i/riscv-tests" ] && [ -x "$RVOPT_BIN" ] && [ -x "$MUXLEQ_BIN" ]; then
     tar -czf "$fix/full.tgz" -C "$root/build" rv32i
@@ -132,6 +177,16 @@ if [ -d "$root/build/rv32i/riscv-tests" ] && [ -x "$RVOPT_BIN" ] && [ -x "$MUXLE
         tar -czf "$fix/trunc.tgz" -C "$t" rv32i
         sha_tool "$fix/trunc.tgz" >"$fix/trunc.sha"
         have_trunc=1
+
+        # The full case asserts that a complete release runs green, so it needs
+        # a tree that is one: a count.txt the elfs beside it match. A partial or
+        # stale build/rv32i is not that release, and asserting 0 against it
+        # would redden the gate for the script skipping exactly as it should.
+        elfs=$(ls "$root"/build/rv32i/riscv-tests/*.elf 2>/dev/null | wc -l | tr -d ' ')
+        want=$(sh "$count_sh" "$root/build/rv32i/riscv-tests/count.txt" || true)
+        if [ "$elfs" = "$want" ]; then
+            have_full=1
+        fi
     fi
 fi
 
@@ -148,6 +203,22 @@ assert() { # scenario expected_rc
     else
         failn=$((failn + 1))
         printf '  FAIL  %-9s exit %s (want %s)\n' "$1" "$rc" "$2"
+    fi
+}
+
+# Read the helper directly. End to end a rejected count and a valid one that
+# simply does not match the elfs both skip with 77, so only this can show which
+# happened -- and that a decimal too wide for a shell integer survives verbatim
+# rather than folding into arithmetic.
+parse_case() { # name, count.txt body for printf %b, expected stdout ("-" fails)
+    printf '%b' "$2" >"$work/parse.count"
+    got=$(sh "$count_sh" "$work/parse.count" 2>/dev/null) || got=-
+    if [ "$got" = "$3" ]; then
+        pass=$((pass + 1))
+        printf '  ok    %-18s %s\n' "$1" "$got"
+    else
+        failn=$((failn + 1))
+        printf '  FAIL  %-18s %s (want %s)\n' "$1" "$got" "$3"
     fi
 }
 
@@ -181,17 +252,42 @@ if [ "$have_py" = 1 ]; then
 else
     echo "  skip  symlink/badpath (no python3 to craft archives)"
 fi
+if [ "$have_full" = 1 ]; then
+    assert full 0 # full tarball, all conformance PASS
+else
+    echo "  skip  full (build/rv32i has no count.txt matching its elfs)"
+fi
 if [ "$have_elfs" = 1 ]; then
-    assert full 0   # full tarball, all conformance PASS
     assert demos 77 # demos-only release -> skip, not a green pass
 else
-    echo "  skip  full/demos (no built rvopt/muxleq + build/rv32i tree)"
+    echo "  skip  demos (no built rvopt/muxleq + build/rv32i tree)"
 fi
 if [ "$have_trunc" = 1 ]; then
     assert trunc 77 # count.txt claims full suite, only one elf present -> skip
 else
     echo "  skip  trunc (no count.txt manifest to truncate)"
 fi
+
+# The metadata cases need a conformance loop that runs, not a real toolchain, so
+# the asserts below use the stubs.
+RVOPT_BIN="$bin/rvopt-stub"
+MUXLEQ_BIN="$bin/muxleq-stub"
+assert valid-count 0         # one line, one positive decimal -> the only pass
+assert missing-count 77      # no count.txt at all -> skip
+assert empty-count 77        # count.txt staged but empty -> skip
+assert zero-count 77         # a release carrying elfs never declares none
+assert leading-zero-count 77 # "01" is not what the producer writes
+assert junk-count 77         # "1x" must not read as 1
+assert multiline-count 77    # a trailing line is not a comment
+assert crlf-count 77         # a CR is not part of the number
+assert space-before-count 77 # padding fails the leading anchor
+assert space-after-count 77  # and the trailing one
+assert huge-count 77         # read as a string, so it mismatches, not errors
+assert mismatched-count 77   # declares 2, carries 1
+parse_case parse-plain '40\n' 40
+parse_case parse-huge '99999999999999999999999999\n' 99999999999999999999999999
+parse_case parse-crlf '1\r\n' -
+parse_case parse-junk '1x\n' -
 
 # Live smoke against the real published release (real curl, real assets), which
 # the mock cannot cover: it proves the URL, the asset names, the checksum asset,
@@ -218,8 +314,9 @@ if [ -x "$live_rvopt" ] && [ -x "$live_muxleq" ] &&
     live_list="$work/live.list"
     tar -tzf "$live_tgz" 2>/dev/null >"$live_list" || true
     live_elfs=$(grep -cE '^rv32i/riscv-tests/[^/]+\.elf$' "$live_list" || true)
-    live_count=$(tar -xzOf "$live_tgz" rv32i/riscv-tests/count.txt 2>/dev/null | tr -cd '0-9')
-    if [ -n "$live_count" ] && [ "$live_count" -gt 0 ] && [ "$live_elfs" = "$live_count" ]; then
+    tar -xzOf "$live_tgz" rv32i/riscv-tests/count.txt >"$work/live.count" 2>/dev/null || :
+    live_count=$(sh "$count_sh" "$work/live.count" || true)
+    if [ -n "$live_count" ] && [ "$live_elfs" = "$live_count" ]; then
         exp=0 # full conformance suite present -> the real run must pass
     else
         exp=77 # demos-only or truncated release -> the real run must skip
