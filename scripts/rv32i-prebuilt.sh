@@ -17,6 +17,10 @@ set -eu
 RVOPT="${RVOPT:?RVOPT must point at the built rvopt}"
 MUXLEQ="${MUXLEQ:?MUXLEQ must point at the built muxleq}"
 
+# rv32i-count.sh ships beside this script; resolve it from here so the caller's
+# working directory does not matter.
+here="$(CDPATH= cd "$(dirname "$0")" && pwd)"
+
 # sysprog21/muxleq publishes the rolling pre-release; override REPO to test a
 # fork.
 REPO="${REPO:-sysprog21/muxleq}"
@@ -207,13 +211,21 @@ fi
 # A real lowering/run failure (above) takes precedence: only a release that ran
 # cleanly but carries fewer conformance elfs than it declares (count.txt, staged
 # next to them) is a truncated release: skip, do not pass green on reduced
-# coverage. Digits only, so a stray newline/CRLF in count.txt cannot
-# mis-compare.
-if [ -f "$root/riscv-tests/count.txt" ]; then
-    expected="$(tr -cd '0-9' <"$root/riscv-tests/count.txt")"
-    if [ -n "$expected" ] && [ "$conformance" -ne "$expected" ]; then
-        echo "rv32i-prebuilt: ran $conformance of $expected conformance tests, truncated release [SKIP]"
-        exit 77
-    fi
+# coverage. count.txt is the only thing that sizes the suite, so it is required
+# once conformance elfs are present; rv32i-count.sh is the single place that
+# decides what reading it means, and comparing as strings keeps a value too wide
+# for a shell integer out of test(1) arithmetic.
+count_file="$root/riscv-tests/count.txt"
+if [ ! -f "$count_file" ]; then
+    echo "rv32i-prebuilt: release has no conformance count [SKIP]"
+    exit 77
+fi
+if ! expected="$("$here/rv32i-count.sh" "$count_file")"; then
+    echo "rv32i-prebuilt: invalid conformance count [SKIP]"
+    exit 77
+fi
+if [ "$conformance" != "$expected" ]; then
+    echo "rv32i-prebuilt: ran $conformance of $expected conformance tests, truncated release [SKIP]"
+    exit 77
 fi
 echo "rv32i-prebuilt: $ran prebuilt RV32I programs lowered native + ran ($conformance rv32ui)"
