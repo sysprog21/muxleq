@@ -321,11 +321,13 @@ static int addr2node(const struct graph *g, uint32_t pc)
     return (idx >= 1 && idx < g->count) ? idx : NONE;
 }
 
-/* A control transfer ends a basic block; its successor starts a new one. */
+/* A control transfer ends a basic block, and so does an illegal word (nothing
+ * runs past one); its successor starts a new one.
+ */
 static bool is_block_end(int kind)
 {
-    return kind == K_JAL || kind == K_JALR || kind == K_BRANCH ||
-           kind == K_SYSTEM;
+    return kind == K_ILL || kind == K_JAL || kind == K_JALR ||
+           kind == K_BRANCH || kind == K_SYSTEM;
 }
 
 /* Build the def-use lists from the vd1/vd2 producer edges: a flat pool indexed
@@ -813,7 +815,7 @@ static void resolve_jalr(struct graph *g)
  * terminates) plus a branch/jump target. Writes up to 2 node indexes into
  * succ[] and returns the count. Only 'jal ra' and resolved 'jalr ra,...' have a
  * return site (matching the ret model); 'j', 'jal x5', and runtime JALR do not
- * fall through; an ecall exit terminates.
+ * fall through; an ecall exit terminates, and so does an illegal word.
  */
 static int successors(const struct graph *g,
                       const struct sysinfo *sys,
@@ -826,7 +828,7 @@ static int successors(const struct graph *g,
     const int rd = (nd->word >> 7) & 31;
     const bool link = rd == 1 && (nd->kind == K_JAL ||
                                   (nd->kind == K_JALR && nd->target != NONE));
-    const bool terminates = (nd->kind == K_JAL && !link) ||
+    const bool terminates = nd->kind == K_ILL || (nd->kind == K_JAL && !link) ||
                             (nd->kind == K_JALR && !link) ||
                             (nd->kind == K_SYSTEM && sys[i].kind == SYS_EXIT);
     if (!terminates && fall != NONE)

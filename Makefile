@@ -67,11 +67,15 @@ RVOPT_BAD_ENC := \
 	ebreak:05d00893,00100073 \
 	ecall-with-rd:05d00893,000000f3 \
 	ecall-with-rs1:05d00893,00008073
+# The jump-over cases exercise reachability, not the decode gate: an illegal
+# word off the reachable path must not change what the reachable path lowers to.
 RVOPT_OK_ENC := \
 	JALR:00800093,00008067,05d00893,00000073 \
 	ret:00c000ef,05d00893,00000073,00008067 \
 	ecall-exit:05d00893,00000073 \
-	ecall-write:04000893,00000073
+	ecall-write:04000893,00000073 \
+	jump-over-reserved-JALR:0100006f,01400093,00009067,00008067,05d00893,00000073 \
+	jump-over-CSR:0100006f,01400093,00001073,00008067,05d00893,00000073
 PACK_WORDS = python3 -c 'import sys, struct; sys.stdout.buffer.write(b"".join(struct.pack("<I", int(w, 16)) for w in sys.argv[1].split(",")))'
 
 # Standalone native-image emission: run a hand-written smoke image (MOVE, SUBLEQ
@@ -110,13 +114,15 @@ verify-mux: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	else $(PRINTF) "verify-mux: FENCE reject/accept [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    for c in $(RVOPT_BAD_ENC); do \
-	        $(PACK_WORDS) "$${c#*:}" > $(TMPDIR)/rvopt-enc.bin; \
+	        $(PACK_WORDS) "$${c#*:}" > $(TMPDIR)/rvopt-enc.bin \
+	            || { echo "verify-mux: cannot encode $${c%%:*}"; exit 1; }; \
 	        ! $(RVOPT) mux $(TMPDIR)/rvopt-enc.bin >/dev/null 2>$(TMPDIR)/rvopt-enc.err \
 	            && grep -q 'unsupported op' $(TMPDIR)/rvopt-enc.err \
 	            || { echo "verify-mux: accepted $${c%%:*}"; exit 1; }; \
 	    done; \
 	    for c in $(RVOPT_OK_ENC); do \
-	        $(PACK_WORDS) "$${c#*:}" > $(TMPDIR)/rvopt-enc.bin; \
+	        $(PACK_WORDS) "$${c#*:}" > $(TMPDIR)/rvopt-enc.bin \
+	            || { echo "verify-mux: cannot encode $${c%%:*}"; exit 1; }; \
 	        $(RVOPT) mux $(TMPDIR)/rvopt-enc.bin >/dev/null 2>&1 \
 	            || { echo "verify-mux: rejected $${c%%:*}"; exit 1; }; \
 	    done; \
