@@ -84,11 +84,12 @@ Once defined, the word `hello` can be executed by typing its name.
   `riscv-none-elf-*` toolchain, such as the
   [xPack GNU RISC-V toolchain](https://xpack-dev-tools.github.io/riscv-none-elf-gcc-xpack/).
   CI builds and runs everything with the xPack toolchain on every push. On the
-  default branch it also packs `build/rv32i` into a compressed archive and
-  publishes it as a rolling `rv32i-latest` pre-release, replaced on every push;
-  every run additionally uploads the same tree as the `rv32i-binaries` workflow
-  artifact. Either lets you download prebuilt images without a cross toolchain
-  installed.
+  default branch it also stages just the files the release carries into
+  `build/rv32i-release`, records their digests in `rv32i/MANIFEST.sha256`, and
+  publishes that tree as a rolling `rv32i-latest` pre-release, replaced whenever
+  the staged payload changes; every run additionally uploads the build tree as
+  the `rv32i-binaries` workflow artifact. Either lets you download prebuilt
+  images without a cross toolchain installed.
 - [`docs/manual.md`](docs/manual.md) is the reference manual: the instruction set, memory image and
   self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, and the eForth
   environment.

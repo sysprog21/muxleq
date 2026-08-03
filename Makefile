@@ -21,7 +21,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order.
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check rv32i-prebuilt rv32i-auto verify-prebuilt bench bench-forth bench-rv32i
+.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check rv32i-prebuilt rv32i-auto verify-prebuilt bench bench-forth bench-rv32i rv32i-release
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -223,6 +223,12 @@ RV32I_OUT := $(abspath $(OUT)/rv32i)
 RV32I_DEMOS := $(RV32I_OUT)/demos
 RV32I_UNOPT := $(RV32I_OUT)/unopt
 RV32I_DUREMARK := $(RV32I_OUT)/duremark
+# The tarball is staged from a tree of its own. build/rv32i also holds the .o,
+# .dec and .out that building and running leave behind, and shipping those makes
+# an intermediate part of the release contract: the content manifest would then
+# turn over whenever a lowering output changed, republishing the same inputs.
+RV32I_RELEASE_DIR := $(abspath $(OUT)/rv32i-release)
+RV32I_RELEASE := $(RV32I_RELEASE_DIR)/rv32i
 
 rv32i: ## Cross-build the RV32I test programs into build/rv32i (needs riscv-none-elf-gcc).
 	$(Q)$(MAKE) -C tests/rv32i          OUT=$(RV32I_DEMOS)    CROSS=$(RVCROSS)
@@ -248,6 +254,22 @@ rv32i-check: $(BIN) $(RVOPT) rv32i ## Lower the RV32I programs and run the rv32u
 	$(Q)mkdir -p $(RV32I_OUT)/riscv-tests
 	$(Q)cp tests/rv32i/riscv-tests/*.elf $(RV32I_OUT)/riscv-tests/
 	$(Q)ls tests/rv32i/riscv-tests/*.elf | wc -l | tr -d ' ' > $(RV32I_OUT)/riscv-tests/count.txt
+
+# Copy just the files the release carries into a clean tree and record their
+# digests. Staging by hand, not by copying build/rv32i wholesale, is what keeps
+# the payload a stated set rather than whatever the build happened to leave.
+rv32i-release: rv32i-check ## Stage the release payload and its content manifest.
+	$(Q)rm -rf $(RV32I_RELEASE)
+	$(Q)mkdir -p $(RV32I_RELEASE)/demos $(RV32I_RELEASE)/unopt \
+	    $(RV32I_RELEASE)/duremark $(RV32I_RELEASE)/riscv-tests
+	$(Q)cp $(RV32I_DEMOS)/*.elf $(RV32I_DEMOS)/hello.bin $(RV32I_RELEASE)/demos/
+	$(Q)cp $(RV32I_UNOPT)/unopt.elf $(RV32I_RELEASE)/unopt/
+	$(Q)cp $(RV32I_DUREMARK)/duremark.elf $(RV32I_RELEASE)/duremark/
+	$(Q)cp $(RV32I_OUT)/riscv-tests/*.elf $(RV32I_OUT)/riscv-tests/count.txt \
+	    $(RV32I_RELEASE)/riscv-tests/
+	$(Q)scripts/rv32i-manifest.sh create $(RV32I_RELEASE)
+	$(Q)$(PRINTF) "rv32i-release: staged %s payload files\n" \
+	    "$$(wc -l < $(RV32I_RELEASE)/MANIFEST.sha256 | tr -d ' ')"
 
 # Toolchain-less RV32I coverage: fetch prebuilt .elf inputs from the rolling
 # pre-release and run the same rvopt-mux + muxleq gate over them. The script

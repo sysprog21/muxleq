@@ -144,8 +144,8 @@ jobs:
           key: xpack-riscv-none-elf-gcc-${{ hashFiles('.ci/install-riscv-toolchain.sh') }}
       - name: Install xPack RISC-V toolchain
         run: .ci/install-riscv-toolchain.sh
-      - name: Build and run the RV32I programs and rv32ui conformance
-        run: make rv32i-check
+      - name: Build and run the RV32I programs, then stage the release
+        run: make rv32i-release
       # Timing-only, informational: the eForth kernels and the rvopt-lowered
       # DureMark. This job is the only one with the cross toolchain, so it is the
       # only place bench-rv32i actually builds and runs (it skips elsewhere). The
@@ -153,8 +153,8 @@ jobs:
       # caught here, not just slowness.
       - name: Run benchmarks
         run: make bench
-      # This job is the only one with a populated build/rv32i tree, so it is the
-      # only place the prebuilt contract test's pass/demos/truncated-release
+      # This job is the only one with a staged release tree, so it is the only
+      # place the prebuilt contract test's pass/demos/truncated-release
       # assertions can run (the deep job exercises only the skip/refuse paths).
       # REPO points the live smoke at this repo's own release.
       - name: Contract-test the prebuilt-release script
@@ -169,15 +169,11 @@ jobs:
           path: build/rv32i
           if-no-files-found: error
       # The prebuilt release exists only to carry the RV32I .elf inputs to
-      # machines without the cross toolchain; those inputs change only when
-      # tests/rv32i changes. So republish only then, not on every push that
-      # merely touched rvopt/muxleq. Two self-heal valves keep the release
-      # correct regardless: publish when there is no usable baseline commit, and
-      # publish when the CURRENT release's tarball is missing or does not carry
-      # the rv32ui conformance elfs (a demos-only, partial, or absent publish).
-      # The content check, not mere release existence, is what activates the
-      # full suite on this very change, whose staging logic lives in the Makefile
-      # and so does not touch tests/rv32i.
+      # machines without the cross toolchain, so a push that touched only
+      # rvopt/muxleq need not republish. The tests/rv32i path filter is the cheap
+      # first answer; the manifest comparison below is the authoritative one,
+      # since a staging change or a toolchain bump alters the payload without
+      # touching tests/rv32i.
       - name: Decide whether the prebuilt release needs updating
         id: pub
         if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
@@ -193,38 +189,36 @@ jobs:
           elif ! git diff --quiet "$BEFORE" "$AFTER" -- tests/rv32i/; then
             echo "tests/rv32i changed -- publishing"; publish=true
           else
-            # Content self-heal: compare the conformance-elf COUNT in the current
-            # release against what this build just staged, and republish unless
-            # they match. Comparing counts (not mere presence) also covers stale
-            # releases from changes outside tests/rv32i -- a staging or suite-size
-            # change alters the count, so no separate path gate is needed; a
-            # toolchain-only rebuild keeps the count and is harmlessly skipped
-            # (the consumer re-lowers the elfs, so their bytes do not matter).
-            # Download to a file, not a pipe: with pipefail, grep -q short-
-            # circuiting would SIGPIPE tar and misreport. Use a fresh RUNNER_TEMP
-            # path since gh release download -O refuses to clobber.
+            # Content self-heal: compare the CURRENT release's manifest against
+            # the one this build just staged, and republish unless they are the
+            # same bytes. An elf can change without changing how many there are,
+            # so a count cannot show a release is current; the manifest can.
+            # Every step below that cannot produce a manifest to compare --
+            # missing release, drifted outer checksum, unreadable or unexpected
+            # archive, payload that no longer matches its own manifest -- also
+            # publishes, so a broken release heals rather than persists. Use a
+            # fresh RUNNER_TEMP path since gh release download -O refuses to
+            # clobber.
             cur="$RUNNER_TEMP/rv32i-cur-release.tgz"
-            rm -f "$cur" "$cur.list" "$cur.sha"
-            fresh=$(ls build/rv32i/riscv-tests/*.elf 2>/dev/null | wc -l | tr -d ' ')
-            if gh release download rv32i-latest -p rv32i-binaries.tar.gz -O "$cur" 2>/dev/null \
-              && tar -tzf "$cur" 2>/dev/null >"$cur.list"; then
-              rel=$(grep -cE '^rv32i/riscv-tests/[^/]+\.elf$' "$cur.list" || true)
-              # Also re-verify the published checksum still matches the tarball:
-              # an interrupted publish or a manual edit can drift the pair, and
-              # a drifted sha makes every consumer fail verification and skip.
-              want=""
-              gh release download rv32i-latest -p rv32i-binaries.tar.gz.sha256 -O "$cur.sha" 2>/dev/null \
-                && want=$(awk '{ print $1 }' "$cur.sha")
-              got=$(sha256sum "$cur" | awk '{ print $1 }')
-              if [ "$fresh" -gt 0 ] && [ "$rel" = "$fresh" ] && [ -n "$want" ] && [ "$want" = "$got" ]; then
-                echo "release carries the full rv32ui suite ($rel elfs) with a matching checksum -- skipping publish"
-              else
-                echo "release stale ($rel of $fresh elfs) or checksum drifted -- publishing to self-heal"
-                publish=true
-              fi
+            old="$RUNNER_TEMP/rv32i-cur-release"
+            rm -rf "$cur" "$cur.sha" "$old"
+            mkdir -p "$old"
+            fresh=build/rv32i-release/rv32i/MANIFEST.sha256
+            if ! gh release download rv32i-latest -p rv32i-binaries.tar.gz -O "$cur" 2>/dev/null; then
+              echo "no release tarball -- publishing to self-heal"; publish=true
+            elif ! gh release download rv32i-latest -p rv32i-binaries.tar.gz.sha256 -O "$cur.sha" 2>/dev/null \
+              || [ "$(awk '{ print $1 }' "$cur.sha")" != "$(sha256sum "$cur" | awk '{ print $1 }')" ]; then
+              echo "release checksum missing or drifted -- publishing to self-heal"; publish=true
+            elif ! tar -tzf "$cur" >"$cur.list" 2>/dev/null || grep -qvE '^rv32i/' "$cur.list"; then
+              echo "release unreadable or has unexpected members -- publishing to self-heal"; publish=true
+            elif ! tar -xzf "$cur" -C "$old" 2>/dev/null; then
+              echo "release cannot be extracted -- publishing to self-heal"; publish=true
+            elif ! scripts/rv32i-manifest.sh verify "$old/rv32i" 2>/dev/null; then
+              echo "release payload does not match its own manifest -- publishing to self-heal"; publish=true
+            elif ! cmp -s "$old/rv32i/MANIFEST.sha256" "$fresh"; then
+              echo "release payload differs from this build -- publishing"; publish=true
             else
-              echo "release missing or unreadable -- publishing to self-heal"
-              publish=true
+              echo "release payload matches this build -- skipping publish"
             fi
           fi
           echo "publish=$publish" >>"$GITHUB_OUTPUT"
@@ -234,7 +228,7 @@ jobs:
       - name: Package RV32I binaries
         if: steps.pub.outputs.publish == 'true'
         run: |
-          tar -czf rv32i-binaries.tar.gz -C build rv32i
+          tar -czf rv32i-binaries.tar.gz -C build/rv32i-release rv32i
           sha256sum rv32i-binaries.tar.gz > rv32i-binaries.tar.gz.sha256
       - name: Publish rolling pre-release
         if: steps.pub.outputs.publish == 'true'
@@ -245,5 +239,5 @@ jobs:
           gh release delete "$tag" --cleanup-tag --yes || true
           gh release create "$tag" --prerelease \
             --title "RV32I prebuilt binaries (latest)" \
-            --notes "Prebuilt RV32I test binaries lowered from ${GITHUB_SHA}. Rolling pre-release: replaced when tests/rv32i changes on the default branch." \
+            --notes "Prebuilt RV32I test binaries built from ${GITHUB_SHA}. Rolling pre-release: replaced when the staged payload changes on the default branch. rv32i/MANIFEST.sha256 lists every archive member with its SHA-256; scripts/rv32i-manifest.sh verify checks an extracted tree against it." \
             rv32i-binaries.tar.gz rv32i-binaries.tar.gz.sha256

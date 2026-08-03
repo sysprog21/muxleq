@@ -9,7 +9,7 @@
 # The skip (77) and refuse (1) cases exit before any lowering, so they need no
 # RISC-V toolchain, no network, and only a placeholder rvopt/muxleq. The pass
 # (0) cases lower real elfs, so they run only when a built rvopt/muxleq and a
-# populated build/rv32i tree are present (e.g. after rv32i-check). Malicious
+# staged release tree are present (e.g. after rv32i-release). Malicious
 # archives are crafted with python3 when available. A final network-gated case
 # runs the script against the REAL published release (real curl, real assets) to
 # validate the URL, asset names, and format that the mock cannot check.
@@ -112,7 +112,7 @@ fi
 # Metadata contract cases: one conformance elf each, differing only in what
 # count.txt says. Stub rvopt/muxleq replace the toolchain -- they lower nothing,
 # they only let the conformance loop count the elf and see PASS -- so these run
-# anywhere, unlike the cases above that need a built build/rv32i tree.
+# anywhere, unlike the pass cases below that need a staged release tree.
 cat >"$bin/rvopt-stub" <<'EOF'
 #!/bin/sh
 set -eu
@@ -127,11 +127,17 @@ printf 'PASS\n'
 EOF
 chmod +x "$bin/rvopt-stub" "$bin/muxleq-stub"
 
+manifest="$root/scripts/rv32i-manifest.sh"
+
+# Each case gets a manifest matching whatever it stages, so a count.txt case
+# fails on the count and nothing else: without that they would all trip the
+# consumer's manifest check first and pass for the wrong reason.
 meta_case() { # name, count.txt body for printf %b ("-" stages no count.txt)
     m="$work/meta-$1"
     mkdir -p "$m/rv32i/riscv-tests"
     : >"$m/rv32i/riscv-tests/add.elf"
     [ "$2" = - ] || printf '%b' "$2" >"$m/rv32i/riscv-tests/count.txt"
+    sh "$manifest" create "$m/rv32i"
     tar -czf "$fix/$1.tgz" -C "$m" rv32i
     sha_tool "$fix/$1.tgz" >"$fix/$1.sha"
 }
@@ -148,19 +154,49 @@ meta_case space-after-count '1 \n'
 meta_case huge-count '99999999999999999999999999\n'
 meta_case mismatched-count '2\n'
 
+# Manifest cases: a valid payload that the manifest no longer describes. Built
+# by damaging valid-count's tree after its manifest was written, so each one
+# differs from a passing release in exactly the way its name says.
+man_case() { # name, then the damage to apply to the staged rv32i tree
+    name=$1
+    m="$work/man-$name"
+    rm -rf "$m"
+    mkdir -p "$m"
+    cp -R "$work/meta-valid-count/rv32i" "$m/"
+    shift
+    "$@" "$m/rv32i"
+    tar -czf "$fix/$name.tgz" -C "$m" rv32i
+    sha_tool "$fix/$name.tgz" >"$fix/$name.sha"
+}
+drop_manifest() { rm -f "$1/MANIFEST.sha256"; }
+edit_payload() { printf 'drift' >"$1/riscv-tests/add.elf"; }
+# A stray .o, not another .elf: the conformance count must stay right, so the
+# manifest is the only thing this case breaks.
+add_payload() { : >"$1/riscv-tests/extra.o"; }
+man_case no-manifest drop_manifest
+man_case manifest-drift edit_payload
+man_case manifest-extra add_payload
+
 # Pass cases need real elfs and a real rvopt/muxleq; run them only when present.
+# They come from the staging tree "make rv32i-release" builds, not build/rv32i:
+# that tree is the release payload and the only one carrying a manifest, which
+# the consumer now checks before it lowers anything. Each fixture re-creates the
+# manifest after editing the tree, so a case fails on what its name says rather
+# than on a manifest it was never meant to test.
 RVOPT_BIN="${RVOPT:-$root/build/rvopt}"
 MUXLEQ_BIN="${MUXLEQ:-$root/build/muxleq}"
+staged="$root/build/rv32i-release/rv32i"
 have_elfs=0
 have_full=0
 have_trunc=0
-if [ -d "$root/build/rv32i/riscv-tests" ] && [ -x "$RVOPT_BIN" ] && [ -x "$MUXLEQ_BIN" ]; then
-    tar -czf "$fix/full.tgz" -C "$root/build" rv32i
+if [ -d "$staged/riscv-tests" ] && [ -x "$RVOPT_BIN" ] && [ -x "$MUXLEQ_BIN" ]; then
+    tar -czf "$fix/full.tgz" -C "$root/build/rv32i-release" rv32i
     sha_tool "$fix/full.tgz" >"$fix/full.sha"
     d="$work/demosonly"
     mkdir -p "$d"
-    cp -R "$root/build/rv32i" "$d/"
+    cp -R "$staged" "$d/"
     rm -rf "$d/rv32i/riscv-tests"
+    sh "$manifest" create "$d/rv32i"
     tar -czf "$fix/demos.tgz" -C "$d" rv32i
     sha_tool "$fix/demos.tgz" >"$fix/demos.sha"
     have_elfs=1
@@ -168,23 +204,27 @@ if [ -d "$root/build/rv32i/riscv-tests" ] && [ -x "$RVOPT_BIN" ] && [ -x "$MUXLE
     # Truncated release: keep count.txt (claims the full suite) but drop all but
     # one conformance elf, so the consumer must reject it rather than pass
     # green.
-    if [ -f "$root/build/rv32i/riscv-tests/count.txt" ]; then
+    if [ -f "$staged/riscv-tests/count.txt" ]; then
         t="$work/trunc"
         mkdir -p "$t"
-        cp -R "$root/build/rv32i" "$t/"
+        cp -R "$staged" "$t/"
         one="$(ls "$t"/rv32i/riscv-tests/*.elf | head -1)"
         find "$t/rv32i/riscv-tests" -name '*.elf' ! -path "$one" -delete
+        sh "$manifest" create "$t/rv32i"
         tar -czf "$fix/trunc.tgz" -C "$t" rv32i
         sha_tool "$fix/trunc.tgz" >"$fix/trunc.sha"
         have_trunc=1
 
         # The full case asserts that a complete release runs green, so it needs
-        # a tree that is one: a count.txt the elfs beside it match. A partial or
-        # stale build/rv32i is not that release, and asserting 0 against it
-        # would redden the gate for the script skipping exactly as it should.
-        elfs=$(ls "$root"/build/rv32i/riscv-tests/*.elf 2>/dev/null | wc -l | tr -d ' ')
-        want=$(sh "$count_sh" "$root/build/rv32i/riscv-tests/count.txt" || true)
-        if [ "$elfs" = "$want" ]; then
+        # a tree that is one: a count.txt the elfs beside it match, and a
+        # manifest describing what is there. A partial or stale staging tree is
+        # not that release, and asserting 0 against it would redden the gate for
+        # the script skipping exactly as it should. This case tars the tree as
+        # staged, so unlike demos and trunc it cannot re-create the manifest --
+        # it has to be handed one that already fits.
+        elfs=$(ls "$staged"/riscv-tests/*.elf 2>/dev/null | wc -l | tr -d ' ')
+        want=$(sh "$count_sh" "$staged/riscv-tests/count.txt" || true)
+        if [ "$elfs" = "$want" ] && sh "$manifest" verify "$staged" >/dev/null 2>&1; then
             have_full=1
         fi
     fi
@@ -255,12 +295,12 @@ fi
 if [ "$have_full" = 1 ]; then
     assert full 0 # full tarball, all conformance PASS
 else
-    echo "  skip  full (build/rv32i has no count.txt matching its elfs)"
+    echo "  skip  full (no staged tree that is a complete, manifested release)"
 fi
 if [ "$have_elfs" = 1 ]; then
     assert demos 77 # demos-only release -> skip, not a green pass
 else
-    echo "  skip  demos (no built rvopt/muxleq + build/rv32i tree)"
+    echo "  skip  demos (no built rvopt/muxleq + staged release tree)"
 fi
 if [ "$have_trunc" = 1 ]; then
     assert trunc 77 # count.txt claims full suite, only one elf present -> skip
@@ -284,6 +324,9 @@ assert space-before-count 77 # padding fails the leading anchor
 assert space-after-count 77  # and the trailing one
 assert huge-count 77         # read as a string, so it mismatches, not errors
 assert mismatched-count 77   # declares 2, carries 1
+assert no-manifest 77        # nothing describes the payload
+assert manifest-drift 77     # a listed file changed after staging
+assert manifest-extra 77     # a file the manifest never listed
 parse_case parse-plain '40\n' 40
 parse_case parse-huge '99999999999999999999999999\n' 99999999999999999999999999
 parse_case parse-crlf '1\r\n' -
@@ -316,10 +359,17 @@ if [ -x "$live_rvopt" ] && [ -x "$live_muxleq" ] &&
     live_elfs=$(grep -cE '^rv32i/riscv-tests/[^/]+\.elf$' "$live_list" || true)
     tar -xzOf "$live_tgz" rv32i/riscv-tests/count.txt >"$work/live.count" 2>/dev/null || :
     live_count=$(sh "$count_sh" "$work/live.count" || true)
-    if [ -n "$live_count" ] && [ "$live_elfs" = "$live_count" ]; then
-        exp=0 # full conformance suite present -> the real run must pass
+    # A release predating the manifest skips too, so extract and check that here
+    # as well: predicting 0 from the elf count alone would fail this test for
+    # the whole window between merging this and CI republishing.
+    live_tree="$work/live-tree"
+    mkdir -p "$live_tree"
+    tar -xzf "$live_tgz" -C "$live_tree" 2>/dev/null || true
+    if [ -n "$live_count" ] && [ "$live_elfs" = "$live_count" ] &&
+        sh "$manifest" verify "$live_tree/rv32i" >/dev/null 2>&1; then
+        exp=0 # full conformance suite, payload matches its manifest -> pass
     else
-        exp=77 # demos-only or truncated release -> the real run must skip
+        exp=77 # demos-only, truncated, or unmanifested release -> skip
     fi
     rc=0
     # No mock on PATH here: the real curl fetches the real assets.
