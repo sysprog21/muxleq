@@ -149,7 +149,7 @@ forth/*.fth  --cat-->  build/muxleq.fth  --gforth-->  build/stage0.dec
 
 ### Self-hosting invariant
 
-`make bootstrap` feeds `build/muxleq.fth` to the built VM and checks that the VM
+`make check-bootstrap` feeds `build/muxleq.fth` to the built VM and checks that the VM
 reproduces `build/stage0.dec` byte-for-byte:
 
 ```
@@ -161,7 +161,7 @@ cc -Ibuild -o build/muxleq muxleq.c               # stage0.c #included
 diff build/stage0.dec build/stage1.dec            # must be identical
 ```
 
-(`make bootstrap` runs exactly this.)
+(`make check-bootstrap` runs exactly this.)
 
 This is the project's strongest correctness test: the VM runs the entire
 meta-compiler under its own execution. Any change to the `forth/` modules or `muxleq.c`
@@ -278,15 +278,15 @@ whitespace-delimited words and crossing to the adjacent row at the 64-column edg
 
 ## 6. Testing
 
-`make check` is the pre-commit gate: `make golden` byte-compares a suite of
+`make check` is the pre-commit gate: `make check-golden` byte-compares a suite of
 deterministic programs against `tests/expected/*.out` (the VM must exit 0 and
 match, each run `timeout`-bounded so a mis-fused infinite loop fails rather than
-hangs), then the PTY editor golden, 32-bit eForth smokes, and `make bootstrap`.
+hangs), then the PTY editor golden, 32-bit eForth smokes, and `make check-bootstrap`.
 `make check-all` adds wide native-image fuzz, loader rejection, and ASan/UBSan.
 Regenerate an expected file manually after an intentional, reviewed behavior
 change. `tests/define.fth` is the runtime define-and-execute
 guard (colon defs, `execute`, `does>`, `create`). `mandel` does not self-halt, so
-its bounded prefix check is separate: `make golden-mandel`.
+its bounded prefix check is separate: `make check-golden-mandel`.
 
 ## 7. References
 

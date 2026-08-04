@@ -212,7 +212,7 @@ If a compiled system can recompile itself and produce a byte-for-byte identical 
 
 This validation can be run with a single command:
 ```shell
-$ make bootstrap
+$ make check-bootstrap
 ```
 
 This command performs the following steps, all under `build/`:
