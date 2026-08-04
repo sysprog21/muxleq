@@ -46,7 +46,7 @@ self-modifying code (detect_smc) rather than miscompile it (`mux` only lowers a
 JALR whose target cprop resolves statically -- a runtime-computed JALR is a clean
 hard error, not silent). A bounded randomized fuzzer (`scripts/rvopt-fuzz.py`)
 compares `rvopt mux | muxleq` against an independent Python RV32I model, and
-`make sanitize` runs the VM and emitter under ASan/UBSan.
+`make check-sanitize` runs the VM and emitter under ASan/UBSan.
 
 ## Goal and the one idea that makes it win
 
@@ -124,10 +124,10 @@ self-host bootstrap, so the self-host headroom does not constrain it.
 
 ## Validation
 
-- Correctness: `make verify-mux` checks the smoke image, a high-address fixture,
-  the rvopt image-size ceiling, and randomized `rvopt mux` fuzz against the
-  Python RV32I model.
-- `make sanitize` runs the VM and `rvopt mux` fuzz under ASan/UBSan.
+- Correctness: `make check-mux` checks the hand-written image, a high-address
+  fixture, the rvopt image-size ceiling, and randomized `rvopt mux` fuzz against
+  the Python RV32I model.
+- `make check-sanitize` runs the VM and `rvopt mux` fuzz under ASan/UBSan.
 
 ## Resolved decisions (how the open questions landed)
 
@@ -141,3 +141,120 @@ self-host bootstrap, so the self-host headroom does not constrain it.
   live; the emitter never bakes a patched operand. detect_smc additionally
   REJECTS a reachable constant-target store into re-executable code, closing the
   silent-miscompile hole.
+
+## Zicsr / machine CSRs (RV32I RTOS)
+
+Supported CSR ops (`K_CSR`, opcode 0x73, funct3 != 0): `CSRRW/CSRRS/CSRRC`
+(register) and `CSRRWI/CSRRSI/CSRRCI` (5-bit zimm). Privileged: `MRET`, `WFI`.
+`K_SYSTEM` still means `ecall`/`ebreak` only; any other privileged/reserved
+encoding (sret, funct3 4) stays `K_ILL`. An unsupported CSR *number* is rejected
+at emit with `rvopt mux: unsupported CSR 0x..`.
+
+CSR state lives in a dedicated data-cell block (`m.csr_base`, `CSR_COUNT` cells),
+plain operands the guest reads/writes live (never executed, never cached as an
+immediate), so a timer that patches them under the running guest is always seen
+fresh (satisfies the SMC re-entrancy invariant, TODO.md 26-28). Supported numbers:
+
+| CSR       | number | notes                                          |
+|-----------|--------|------------------------------------------------|
+| mstatus   | 0x300  | only MIE (bit 3) / MPIE (bit 7) are meaningful  |
+| mie       | 0x304  | only MTIE (bit 7)                               |
+| mtvec     | 0x305  | trap vector base (must be a compile-time addr)  |
+| mepc      | 0x341  | interrupted PC (a block-leader guest PC)        |
+| mcause    | 0x342  | timer interrupt = 0x80000007                    |
+| mip       | 0x344  | only MTIP (bit 7)                               |
+| mtime     | 0xB00  | reused mcycle number (no MMIO on this VM)       |
+| mtimecmp  | 0x7C0  | custom M-mode number (no MMIO on this VM)       |
+| mscratch  | 0x340  | trap-handler save-area pointer (context switch) |
+
+`emit_csr32` builds the new value in a scratch cell from the ORIGINAL csr/source
+(so `CSRRS/C` with `rd == rs1` is correct), then reads the old csr into `rd`; a
+set/clear with a zero mask (`rs1==x0` / `zimm==0`) is a pure read and does NOT
+write. Immediate set/clear applies each zimm bit via the 2^b mask pool, so no imm
+slot is consumed. Test: `tests/rv32i/rtos/test-csr.S` (via `make check-rtos`).
+
+## Indirect-jump entry dispatch (`rvopt mux --indirect`)
+
+rvopt keeps no runtime PC, so a `ret`/`jalr` to a runtime-computed address is
+normally a hard error. `--indirect` opts into dispatching a `ret` (`jalr x0,x1,0`)
+over a collected set of function-pointer / task-entry addresses (in addition to
+the usual `jal`-return sites): a task's first activation `ret`s to its entry, not
+a call-return site. `collect_entry_targets` gathers word-store (`sw`) values that
+are known constants landing on a real decoded instruction; the mechanism is
+opt-in because a code pointer and a data pointer written to memory are not
+distinguishable in a single RWX image (a stored `la sp, data` looks identical to
+a stored task entry), so enabling it unconditionally would try to emit data as
+code. Off by default: ordinary programs (the rv32ui conformance suite) are
+unaffected. Proven by the cooperative kernel (`make check-rtos`, transcript
+`ABABAB!`).
+
+## Timer interrupts and mret
+
+Design (block-boundary delivery, matches eternal's edge-trigger shape but with
+`mtvec`/`mepc` replacing the magic `mem[0]`/`mem[1]`):
+
+- Opt-in `--timer`. Register promotion and load-forwarding are disabled for
+  timer images so the regfile cells are canonical at every safepoint (a delivered
+  interrupt saves and later restores the guest registers straight from their
+  cells).
+- `mtime` ticks in RETIRED GUEST INSTRUCTIONS: each safepoint adds its own
+  block's guest-instruction count, independent of MUXLEQ fusion/lowering. Only
+  blocks that reach a safepoint contribute, so it is a "retired instructions in
+  safepoint blocks" clock rather than a whole-program cycle count. That is
+  self-consistent with `mtimecmp = mtime + QUANTUM` and bounds preemption
+  latency to one block, which is the intent.
+- Safepoints are backward-branch/jump-target leaders (loop headers): the natural
+  preemption points, far fewer than every leader. This covers the `wfi` wait-loop
+  idiom (`wfi; j wait`), where `wfi` itself is a nop and the loop header re-checks
+  the timer each pass; a bare non-looping `wfi` is not a real wait and is not a
+  safepoint. At a safepoint, if `mstatus.MIE` and `mie.MTIE` are set and
+  `mtime >= mtimecmp`, deliver: `mepc = <safepoint guest PC>`, `mcause =
+  0x80000007`, `mip |= MTIP`, save+clear `mstatus.MIE` into MPIE, jump to the
+  statically-resolved `mtvec` block. Because delivery happens at a block boundary
+  BEFORE the block body runs, `mepc` is the block start and resume re-runs the
+  block cleanly (no partial-instruction state).
+- `mret` restores `mstatus.MIE` from MPIE and dispatches `mepc` over the safepoint
+  set AND the `--indirect` entry-target set (a preempted task resumes at a
+  safepoint; a task's first launch resumes at its entry), the same compare-chain
+  shape as the entry dispatch.
+- The delivery preamble uses only rvopt's internal scratch cells, never the guest
+  regfile, so all guest registers are intact when the handler starts. A
+  preemptive kernel can therefore save and restore the full register context in
+  the handler with the standard `mscratch` save-area technique (`csrrw sp,
+  mscratch, sp`); no register-spill ABI in rvopt is needed.
+- `wfi` busy-waits (re-checks the timer) rather than halting while interrupts are
+  enabled.
+- `mip.MTIP` is an approximation, not a continuously-maintained CLINT bit: it is
+  set at a delivery-enabled safepoint and cleared when the guest writes
+  `mtimecmp` (matching the rearm-to-a-future-deadline idiom). Between those
+  points it is not recomputed, so a guest that polls `mip.MTIP` with interrupts
+  disabled, or after writing `mtimecmp <= mtime`, may read a stale value. Timer
+  delivery is unaffected (it is gated on `mtime >= mtimecmp`, never on `mip`).
+- `mtime` is a single 32-bit cell (real RISC-V is 64-bit) and the deadline test
+  is a plain unsigned `mtime >= mtimecmp`. It therefore has a wrap horizon at
+  2^32 retired guest instructions: once `mtime` nears `0xffffffff`, a rearm to
+  `mtime + QUANTUM` wraps `mtimecmp` below `mtime`, and the unsigned compare
+  reports "expired" for the roughly one-quantum window until `mtime` itself
+  wraps past it, delivering one spurious early tick. A normal handler self-heals
+  (the trap path retires enough instructions to carry `mtime` across the wrap
+  before it rearms `mtimecmp`), so the scheduler just sees a single slightly
+  early preemption per 2^32 instructions. A signed compare would only move the
+  window to the signed boundary, not remove it; the wrap-correct form is the
+  difference test `(int32_t)(mtime - mtimecmp) >= 0`, deliberately not spent
+  here since it would enlarge every safepoint for a benign, astronomically rare,
+  self-correcting event on a teaching substrate.
+- Tests (`make check-rtos`): `tests/rv32i/rtos/test-timer.S` (expected `TTR`; the
+  second interrupt observes the memory/CSR state the first one left), and
+  `tests/rv32i/rtos/`, a preemptive RTOS on this substrate: an asm trap
+  handler (`ktrap.S`) saves full register context via `mscratch` and calls a C
+  scheduler in the shared core `rtos.c` (priority scheduling, blocking counting
+  semaphores, a priority-inheritance mutex, and an idle task). Blocking needs no
+  synchronous switch: a blocked task parks itself (state BLOCKED) and spins at a
+  `wfi` safepoint while the scheduler skips non-READY tasks. The core drives two
+  scenarios. `test-rtos.c` runs the classic priority-inversion setup: a low task
+  holds the mutex, a high task blocks on it (lifting the holder to the high
+  priority so a middle task cannot preempt it and starve the high task), so the
+  high task runs before the middle one and the transcript is `LHM` (without
+  priority inheritance it would be `LMH`). `test-semaphore.c` covers the counting
+  path: a high-priority producer fills one semaphore to 3 before a low-priority
+  consumer drains it in order, transcript `ABC`.

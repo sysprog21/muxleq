@@ -19,6 +19,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -55,12 +56,15 @@ enum ins_kind {
     K_OP,
     K_FENCE,
     K_SYSTEM,
+    K_CSR,  /* Zicsr: CSRRW/S/C and CSRRWI/SI/CI */
+    K_MRET, /* privileged: return from trap (jump through mepc) */
+    K_WFI,  /* privileged: wait-for-interrupt (a yield/nop here) */
     K_KIND_COUNT
 };
 
 static const char *const kind_name[K_KIND_COUNT] = {
-    "ILL",  "LUI",   "AUIPC", "JAL", "JALR",  "BRANCH",
-    "LOAD", "STORE", "OPIMM", "OP",  "FENCE", "SYSTEM",
+    "ILL",   "LUI", "AUIPC", "JAL",    "JALR", "BRANCH", "LOAD", "STORE",
+    "OPIMM", "OP",  "FENCE", "SYSTEM", "CSR",  "MRET",   "WFI",
 };
 
 /* One graph node per decoded word. rd/rs1/rs2 are 0..31 (or NONE when the
@@ -294,12 +298,31 @@ static void decode_word(uint32_t pc, uint32_t w, struct node *nd)
             nd->kind = K_ILL;
         break;
 
-    /* SYSTEM: only the two base-ISA words. Every other encoding here is a CSR
-     * or privileged instruction, and admitting one would leave a7 alone to
-     * decide it is an ecall, so they stay illegal.
+    /* SYSTEM: base-ISA ecall/ebreak, the Zicsr CSR ops, and the two privileged
+     * words the RTOS kernel needs (mret, wfi). K_SYSTEM keeps meaning
+     * ecall/ebreak ONLY (its block-ending, syscall-emit role); a CSR op falls
+     * through like an ALU op, so it must NOT be K_SYSTEM. Every other
+     * privileged encoding (sret, sfence, reserved funct3 4) stays K_ILL and
+     * errors rather than silently vanishing. The CSR number is validated at
+     * emit time.
      */
     case 0x73:
-        nd->kind = (w == RV_ECALL || w == RV_EBREAK) ? K_SYSTEM : K_ILL;
+        if (w == RV_ECALL || w == RV_EBREAK) {
+            nd->kind = K_SYSTEM;
+        } else if (w == 0x30200073u) {
+            nd->kind = K_MRET;
+        } else if (w == 0x10500073u) {
+            nd->kind = K_WFI;
+        } else if (nd->funct3 == 0 || nd->funct3 == 4) {
+            nd->kind = K_ILL; /* other privileged / reserved */
+        } else {
+            nd->kind = K_CSR;
+            nd->imm = (int32_t) ((w >> 20) & 0xfff); /* CSR number */
+            nd->rd = rd;
+            if (nd->funct3 < 4)
+                nd->rs1 =
+                    rs1; /* CSRRW/S/C read a register; the *I forms a zimm */
+        }
         break;
     default:
         nd->kind = K_ILL;
@@ -327,14 +350,14 @@ static int addr2node(const struct graph *g, uint32_t pc)
 static bool is_block_end(int kind)
 {
     return kind == K_ILL || kind == K_JAL || kind == K_JALR ||
-           kind == K_BRANCH || kind == K_SYSTEM;
+           kind == K_BRANCH || kind == K_SYSTEM || kind == K_MRET;
 }
 
 /* Build the def-use lists from the vd1/vd2 producer edges: a flat pool indexed
  * per producer node, filled by the standard two-pass count-then-fill. Purely
- * derived from vd1/vd2, so emit is unaffected. A prerequisite for DCE/SCCP,
- * but note it is INTRA-BLOCK (see struct graph): 0 in-block users does NOT
- * imply globally dead.
+ * derived from vd1/vd2, so emit is unaffected. A prerequisite for DCE/SCCP, but
+ * note it is INTRA-BLOCK (see struct graph): 0 in-block users does NOT imply
+ * globally dead.
  */
 static void build_use_lists(struct graph *g)
 {
@@ -453,10 +476,10 @@ static void free_graph(struct graph *g)
 
 /* Which instructions fold to a direct constant effect instead of a runtime op.
  * Keyed on the RAW word: decode_word normalizes rd==0 to NONE, but folding
- * needs the real rd. Kept deliberately tiny; only encodings that are
- * trivially 32-bit-correct without add-with-carry: ADDI rd,x0,imm (load
- * immediate) and ADDI x0,rs,imm (the result is discarded, so a pure nop).
- * Everything else stays FOLD_NONE.
+ * needs the real rd. Kept deliberately tiny; only encodings that are trivially
+ * 32-bit-correct without add-with-carry: ADDI rd,x0,imm (load immediate) and
+ * ADDI x0,rs,imm (the result is discarded, so a pure nop). Everything else
+ * stays FOLD_NONE.
  */
 enum fold_kind { FOLD_NONE = 0, FOLD_LI12, FOLD_DEADI, FOLD_COUNT };
 static const char *const fold_name[FOLD_COUNT] = {"-", "li12", "deadi"};
@@ -717,6 +740,7 @@ static void cprop_update(struct cprop *c, const struct node *nd)
     case K_LOAD:
     case K_OP:
     case K_OPIMM:
+    case K_CSR: /* a CSR read yields a runtime value */
         c->known[rd] = false;
         break;
     default: /* BRANCH/STORE/FENCE/SYSTEM: no rd */
@@ -770,8 +794,8 @@ static void analyze_syscalls(const struct graph *g,
 /* Resolve computed/linking JALR targets. When rs1 is a compile-time constant
  * (an auipc/lui/li result in the same block), 'jalr rd, rs1, imm' jumps to a
  * STATIC guest address (rs1 + imm, low bit cleared); record its target NODE in
- * nd->target, exactly like a JAL, so the reachability walk follows it and
- * emit lowers a direct jump (+ a pc+4 link when rd != 0). A jalr whose rs1 is a
+ * nd->target, exactly like a JAL, so the reachability walk follows it and emit
+ * lowers a direct jump (+ a pc+4 link when rd != 0). A jalr whose rs1 is a
  * runtime value (notably 'ret', rs1 = ra, which cprop never knows since JAL
  * clears its rd) keeps target == NONE and falls back to the ra-checked ret
  * form. Same in-block cprop as analyze_syscalls. Only a JALR the reachability
@@ -809,8 +833,8 @@ static bool resolve_jalr(struct graph *g, const bool *reach)
             }
             if (nd->target != tgt) {
                 /* An edge into a node that is already a leader still changes
-                 * what the walk reaches, so report a moved target too, not
-                 * just a new leader.
+                 * what the walk reaches, so report a moved target too, not just
+                 * a new leader.
                  */
                 nd->target = tgt;
                 changed = true;
@@ -825,23 +849,23 @@ static bool resolve_jalr(struct graph *g, const bool *reach)
     return changed;
 }
 
-/* A call: a jump that links into ra, so control comes back to the next word.
- * A JAL always has its target from the immediate; a JALR only once resolve_jalr
- * proves one, and a runtime JALR is a hard error rather than a call. Every pass
- * that models the return has to use this, or promotion misses an entry the
- * emitter still branches to.
+/* A call: a jump that links into ra, so control comes back to the next word. A
+ * JAL always has its target from the immediate; a JALR with rd=ra is also a
+ * call, either to a resolved static target or, under --indirect, to the
+ * collected entry-target set. Every pass that models the return has to use
+ * this, or promotion misses an entry the emitter still branches to.
  */
 static bool is_link_call(const struct node *nd)
 {
     return ((nd->word >> 7) & 31) == 1 &&
-           (nd->kind == K_JAL || (nd->kind == K_JALR && nd->target != NONE));
+           (nd->kind == K_JAL || nd->kind == K_JALR);
 }
 
 /* Control-flow successors of node i: the fall-through (unless the node
  * terminates) plus a branch/jump target. Writes up to 2 node indexes into
- * succ[] and returns the count. Only 'jal ra' and resolved 'jalr ra,...' have a
- * return site (matching the ret model); 'j', 'jal x5', and runtime JALR do not
- * fall through; an ecall exit terminates, and so does an illegal word.
+ * succ[] and returns the count. 'jal ra' and 'jalr ra,...' have a return site
+ * (matching the ret model); 'j' and 'jal x5' do not fall through; an ecall exit
+ * terminates, and so does an illegal word.
  */
 static int successors(const struct graph *g,
                       const struct sysinfo *sys,
@@ -854,7 +878,8 @@ static int successors(const struct graph *g,
     const bool link = is_link_call(nd);
     const bool terminates = nd->kind == K_ILL || (nd->kind == K_JAL && !link) ||
                             (nd->kind == K_JALR && !link) ||
-                            (nd->kind == K_SYSTEM && sys[i].kind == SYS_EXIT);
+                            (nd->kind == K_SYSTEM && sys[i].kind == SYS_EXIT) ||
+                            nd->kind == K_MRET;
     if (!terminates && fall != NONE)
         succ[n++] = fall;
     if (nd->target != NONE)
@@ -864,23 +889,43 @@ static int successors(const struct graph *g,
 
 /* Reachable-node set: DFS from the entry over successors(). Skips trailing
  * .rodata that a linear decode turned into ILL nodes (no path reaches them).
+ * 'roots', when non-NULL, seeds extra entry points: indirect-jump targets
+ * (function-pointer / task entries) that no static transfer reaches but a
+ * runtime ret/jalr dispatch can land on. They grow monotonically across the
+ * settle loop, so this still terminates.
  */
 static void mark_reachable(const struct graph *g,
                            const struct sysinfo *sys,
-                           bool *reach)
+                           bool *reach,
+                           const bool *roots)
 {
     int *stack = xcalloc((size_t) g->count, sizeof *stack);
     int sp = 0;
-    stack[sp++] = g->entry;
+
+    /* Mark on push so every node is queued at most once: the stack then never
+     * exceeds g->count even with many seeded roots.
+     */
+    if (g->entry > 0 && g->entry < g->count && !reach[g->entry]) {
+        reach[g->entry] = true;
+        stack[sp++] = g->entry;
+    }
+    if (roots)
+        for (int i = 1; i < g->count; i++)
+            if (roots[i] && !reach[i]) {
+                reach[i] = true;
+                stack[sp++] = i;
+            }
     while (sp) {
         const int i = stack[--sp];
-        if (i == NONE || i <= 0 || i >= g->count || reach[i])
-            continue;
-        reach[i] = true;
         int succ[2];
         const int ns = successors(g, sys, i, succ);
-        for (int k = 0; k < ns; k++)
-            stack[sp++] = succ[k];
+        for (int k = 0; k < ns; k++) {
+            const int s = succ[k];
+            if (s > 0 && s < g->count && !reach[s]) {
+                reach[s] = true;
+                stack[sp++] = s;
+            }
+        }
     }
     free(stack);
 }
@@ -997,28 +1042,92 @@ static void detect_smc(const struct graph *g,
     }
 }
 
+/* Collect indirect-jump entry targets: code addresses a ret/jalr can land on (a
+ * task's first activation, a function-pointer call) that rvopt, keeping no
+ * runtime PC, must both make reachable and admit to the dispatch set. The
+ * signal is a WORD store (sw) of a known constant that lands on a real decoded
+ * instruction (see the inline comment); each new target is marked a leader and
+ * a reachability root, and the function returns whether the set grew so the
+ * settle loop reruns. Fills TWO sets: 'etarget' is the ret/mret dispatch set,
+ * and 'roots' seeds reachability. They differ because the timer's mtvec handler
+ * is a reachability root but must NOT be a dispatch target; keeping them
+ * separate stops the trap handler from leaking into the indirect-jump target
+ * set.
+ */
+static bool collect_entry_targets(struct graph *g,
+                                  const bool *reach,
+                                  bool *roots,
+                                  bool *etarget)
+{
+    bool changed = false;
+    struct cprop c;
+    cprop_clear(&c);
+    for (int i = 1; i < g->count; i++) {
+        struct node *nd = &g->n[i];
+        if (nd->leader)
+            cprop_clear(&c);
+
+        /* A function pointer is a code address written to memory as a WORD.
+         * Collect the store VALUE (rs2) when it is a known constant landing on
+         * a real decoded instruction. The word filter (funct3 == 2) skips SB/SH
+         * char/data writes; the K_ILL filter skips data addresses (bss/stack
+         * and most rodata decode to zero/garbage words). This is NOT exact: at
+         * low link addresses a task entry is a plain `li` (not an la), so
+         * address provenance cannot be required, and a stored integer that
+         * equals a real code PC would also be collected. That residual is why
+         * the whole mechanism is opt-in (--indirect): on an ordinary program it
+         * never runs, so it cannot turn data into code there; within an
+         * opted-in image an over-collected target only adds a dead dispatch
+         * compare (a live ra never equals it) unless the mistaken address
+         * decodes to an emit-time error, which surfaces loudly rather than
+         * miscompiling.
+         */
+        if (reach[i] && nd->kind == K_STORE && nd->funct3 == 2 &&
+            nd->rs2 >= 0 && c.known[nd->rs2]) {
+            const uint32_t a = c.val[nd->rs2] & ~1u;
+            const int tn = addr2node(g, a);
+
+            /* a != 0 excludes `sw x0` (store zero, which riscv-gcc emits for `x
+             * = 0;`): address 0 is the guest entry (_start), never a stored
+             * function pointer, and admitting it would let a ret/mret with a 0
+             * value restart the program instead of halting. Consequence: an
+             * indirect-jump target must not be linked at address 0.
+             */
+            if (a != 0 && tn != NONE && a == g->n[tn].pc &&
+                g->n[tn].kind != K_ILL && !etarget[tn]) {
+                etarget[tn] = true; /* ret/mret dispatch target */
+                roots[tn] = true;   /* and a reachability root */
+                g->n[tn].leader = 1;
+                changed = true;
+            }
+        }
+        cprop_update(&c, nd);
+    }
+    return changed;
+}
+
 /* Lower one guest instruction to native MUXLEQ (or, in the sizing pass, just
  * advance *p). *imm is the running immediate-pair index and *spool the running
  * write-byte index; na[] maps guest instructions to native cells; m holds the
  * layout addresses (all-0 dummies in the sizing pass, which prints nothing). An
  * unsupported instruction or an out-of-range branch target aborts.
  * Constant-folding pass (milestone 2a): a block-local const propagation
- * (independent of analyze_syscalls's cprop) that marks each reachable
- * non-shift OPIMM whose result is a compile-time constant (rs1 is a known
- * constant, so rd = rs1 op imm is known). A folded node is emitted as a plain
- * 'li' of the result from its OWN imm slot (foldval goes into that cell), so
- * num_imm is unchanged and the imm accounting stays in sync; just cheaper
- * than the full ALU macro, and byte-identical. Results propagate within the
- * block, so const chains fold (la = lui+addi, then an addi on that, ...). Shift
- * OPIMMs (funct3 1/5) have no imm slot and are left alone (they need a
- * pool-free materializer).
+ * (independent of analyze_syscalls's cprop) that marks each reachable non-shift
+ * OPIMM whose result is a compile-time constant (rs1 is a known constant, so rd
+ * = rs1 op imm is known). A folded node is emitted as a plain 'li' of the
+ * result from its OWN imm slot (foldval goes into that cell), so num_imm is
+ * unchanged and the imm accounting stays in sync; just cheaper than the full
+ * ALU macro, and byte-identical. Results propagate within the block, so const
+ * chains fold (la = lui+addi, then an addi on that, ...). Shift OPIMMs (funct3
+ * 1/5) have no imm slot and are left alone (they need a pool-free
+ * materializer).
  */
 
 /* 'mv rd, rs' == 'addi rd, rs, 0' with rs != x0: a pure register copy, not a
  * real ALU op. Emitted as two MOVEs (not the full add32), and it needs NO imm
- * slot, so it is excluded from the imm pool and from the const folder
- * (below), and handled directly when it is emitted. (addi rd, x0, 0 is
- * FOLD_LI12, a different case; addi rd, .., 0 with rd == x0 is FOLD_DEADI.)
+ * slot, so it is excluded from the imm pool and from the const folder (below),
+ * and handled directly when it is emitted. (addi rd, x0, 0 is FOLD_LI12, a
+ * different case; addi rd, .., 0 with rd == x0 is FOLD_DEADI.)
  */
 static bool is_mv(const struct node *nd)
 {
@@ -1209,9 +1318,9 @@ static int compute_promotions(const struct graph *g,
             /* Block ends carry no 'next', but two fall through to pc+4: a call
              * (JAL with link, rd==x1) via its return, and a non-exit ecall. A
              * such fall-through into the loop is an entry the raw next/target
-             * miss: count it, else it is an unseen second entry the
-             * pre-header on 'entry' would not dominate. (An exit ecall does NOT
-             * fall through, but lacking syscall analysis here, counting every
+             * miss: count it, else it is an unseen second entry the pre-header
+             * on 'entry' would not dominate. (An exit ecall does NOT fall
+             * through, but lacking syscall analysis here, counting every
              * K_SYSTEM only over-rejects, which is safe.)
              */
             if (is_link_call(nk) || nk->kind == K_SYSTEM) {
@@ -1236,8 +1345,8 @@ static int compute_promotions(const struct graph *g,
         if (has_sys)
             continue;
 
-        /* Collect slots. ALL loop memory ops must share ONE base register;
-         * two DIFFERENT registers can hold the SAME address, which per-register
+        /* Collect slots. ALL loop memory ops must share ONE base register; two
+         * DIFFERENT registers can hold the SAME address, which per-register
          * slot identity would treat as independent cells (a store to one
          * leaving the other's read stale); requiring a single base makes (base,
          * imm) an exact address. Accesses must be WORD width: the emit's
@@ -1331,6 +1440,15 @@ static int compute_promotions(const struct graph *g,
         if (g->n[entry].rd == loopbase || g->n[entry].kind == K_STORE)
             continue;
 
+        /* A call/ecall entry (the loop is reached by its pc+4 return) places
+         * the pre-header load BEFORE the transfer, so a callee that writes a
+         * promoted slot through an escaped &slot would be missed and the loop
+         * would read the pre-call value. Reject rather than risk it; the
+         * multi-entry variant is already caught by nentry != 1 above.
+         */
+        if (is_link_call(&g->n[entry]) || g->n[entry].kind == K_SYSTEM)
+            continue;
+
         out[nloops++] = lp;
     }
     return nloops;
@@ -1399,6 +1517,7 @@ struct m32 {
     int imm_base;       /* one cell per li / immediate-ALU / JAL-link value */
     int promo_imm_base; /* imm-pool index where promoted-slot offsets start */
     int ret_base;       /* one cell per known JAL-return address */
+    int entry_base;     /* one cell per indirect-jump entry-target address */
     int spool_base;     /* static write() source bytes */
     int reg_base;       /* 32-cell register file */
     int promo_base;     /* register-promotion dedicated word cells */
@@ -1410,14 +1529,110 @@ struct m32 {
     int winmask;        /* guest RAM window size - 1 (in-window address mask) */
     int rambc;          /* the ram_base value (added after the window mask) */
     int mask_base; /* 32 power-of-two cells 2^0..2^31 (shift bit extraction) */
-    int ram_base;  /* guest RAM window (one cell per byte), init from img */
+    int csr_base;  /* CSR_COUNT machine-CSR state cells (mstatus, mtvec, ...) */
+    int timer_base; /* timer consts: nsp safepoint PCs, nsp block counts, mcause
+                     */
+    int ram_base;   /* guest RAM window (one cell per byte), init from img */
 };
+
+/* Timer / interrupt lowering state (--timer). Safepoints are the reachable
+ * block leaders where a timer interrupt may be delivered (loop headers), each
+ * carrying its guest PC (saved into mepc) and its block's guest-instruction
+ * count (added to mtime). mret dispatches mepc back over this set.
+ */
+struct timer_info {
+    bool on;
+    int nsp;               /* number of safepoints */
+    const int *node_sp;    /* node index -> safepoint slot, or NONE */
+    const int *sp_node;    /* safepoint slot -> node index */
+    const uint32_t *sp_pc; /* safepoint slot -> guest PC (into mepc) */
+    const int *sp_cnt;     /* safepoint slot -> block guest-insn count */
+    int pc_base;           /* cell base: nsp guest-PC constants */
+    int cnt_base;          /* cell base: nsp block-count constants */
+    int mcause_cell;       /* cell holding the timer mcause 0x80000007 */
+    int mtvec_node;        /* resolved trap-vector target node */
+};
+
+/* MUXLEQ cells emitted by one safepoint preamble (fixed so two-pass sizing and
+ * the branch offsets below stay exact). See emit_safepoint32.
+ */
+#define SP_PREAMBLE_CELLS 141
+#define SP_DELIVER_OFF                                     \
+    84 /* offset of the delivery block within the preamble \
+        */
+
+/* Machine-CSR state cells, emitted as plain data the guest reads/writes live
+ * (never executed as code, never cached as an immediate by rvopt). The timer
+ * substrate drives mepc/mcause/mie/mip/mtime/mtimecmp; early boot uses only
+ * mstatus and mtvec, but the whole block is allocated up front so the layout is
+ * stable across phases.
+ */
+enum csr_idx {
+    CSR_MSTATUS,
+    CSR_MTVEC,
+    CSR_MEPC,
+    CSR_MCAUSE,
+    CSR_MIE,
+    CSR_MIP,
+    CSR_MTIME,
+    CSR_MTIMECMP,
+    CSR_MSCRATCH,
+    CSR_COUNT
+};
+
+/* Map a RISC-V CSR number to its state-cell index, or -1 if unsupported (emit
+ * rejects those with a clear error). mtime/mtimecmp have no CSR-number binding
+ * yet; the timer substrate assigns their access path.
+ */
+static int csr_index(uint32_t csr)
+{
+    switch (csr) {
+    case 0x300:
+        return CSR_MSTATUS;
+    case 0x304:
+        return CSR_MIE;
+    case 0x305:
+        return CSR_MTVEC;
+    case 0x341:
+        return CSR_MEPC;
+    case 0x342:
+        return CSR_MCAUSE;
+    case 0x344:
+        return CSR_MIP;
+
+    /* mtime/mtimecmp are memory-mapped (CLINT) on real hardware; this VM has no
+     * MMIO, so they are exposed as CSRs. mtime reuses mcycle's number (0xB00);
+     * mtimecmp takes a custom M-mode number (0x7C0, in the designated custom
+     * range). Both documented in docs/rvopt-native-muxleq.md.
+     */
+    case 0xB00:
+        return CSR_MTIME;
+    case 0x7C0:
+        return CSR_MTIMECMP;
+
+    /* mscratch: a per-hart scratch word the trap handler swaps with sp to
+     * bootstrap a register save area (the standard preemptive context-switch
+     * technique).
+     */
+    case 0x340:
+        return CSR_MSCRATCH;
+    default:
+        return -1;
+    }
+}
 
 struct ret_sites {
     int n;
     int *target;    /* resolved callee entry node */
     int *node;      /* native destination nodes for pc+4 after jal ra */
     uint32_t *addr; /* guest return addresses compared against x1 */
+    /* Indirect-jump entry targets (function pointers / task entries): a ret
+     * also compares x1 against these and jumps to na[enode]. Populated from the
+     * collect_entry_targets set.
+     */
+    int ne;
+    int *enode;
+    uint32_t *eaddr;
 };
 
 /* An ALU funct3 the wide emitter lowers natively: ADD/SUB(0), SLT(2), SLTU(3),
@@ -1429,8 +1644,8 @@ static bool alu_f3_ok32(int f3)
 }
 
 /* A node the wide ALU slice can lower. A K_OP must ALSO carry the base-ISA
- * funct7 (0x00, or 0x20 for SUB); else an RV32M or reserved encoding sharing
- * a funct3 (MUL as ADD, DIV as XOR, ...) would silently mislower; a K_OPIMM has
+ * funct7 (0x00, or 0x20 for SUB); else an RV32M or reserved encoding sharing a
+ * funct3 (MUL as ADD, DIV as XOR, ...) would silently mislower; a K_OPIMM has
  * no funct7 field (the immediate occupies it) so funct3 alone decides.
  */
 static bool op_ok32(const struct node *nd)
@@ -1471,16 +1686,16 @@ static bool imm_op32(const struct node *nd)
         return true; /* upper immediate: a compile-time constant */
     if (mem_ok32(nd))
         return true; /* a load/store's byte offset */
-    if (nd->kind == K_JALR && nd->target != NONE && ((nd->word >> 7) & 31))
-        return true; /* static-target JALR link: pc+4 */
+    if (nd->kind == K_JALR && ((nd->word >> 7) & 31))
+        return true; /* JALR link: pc+4 */
     return nd->kind == K_JAL &&
            ((nd->word >> 7) & 31); /* JAL-with-link: pc+4 */
 }
 
 /* Wide instruction shorthands. c = MOVE32 is a MOVE; c = *p+3 is a
- * non-branching SUBLEQ (b -= a, then fall through; the target is the next
- * cell, so it is taken or not with the same effect); c = (1<<31)|mask is a MUX
- * whose mask value is the cell at 'mask'.
+ * non-branching SUBLEQ (b -= a, then fall through; the target is the next cell,
+ * so it is taken or not with the same effect); c = (1<<31)|mask is a MUX whose
+ * mask value is the cell at 'mask'.
  */
 static void mov32(int *p, long long s, long long d)
 {
@@ -1988,7 +2203,7 @@ static bool ret_site_matches32(const struct graph *g,
                                int site,
                                int ret_node)
 {
-    return rets->target[site] == ret_node ||
+    return rets->target[site] == NONE || rets->target[site] == ret_node ||
            reaches_after(g, sys, rets->target[site], ret_node);
 }
 
@@ -2023,13 +2238,289 @@ static void emit_ret_dispatch32(const struct graph *g,
              m); /* ra != this return site */
         emit_i32(p, m->z, m->z, na[rets->node[i]]);
     }
-    emit_i32(p, m->z, m->z, IOMARK32); /* no known return address matched */
+
+    /* Also dispatch to indirect-jump entry targets (a task's first activation
+     * rets to its entry, not a call-return site). Every entry is a valid
+     * target, so no reaches-after filter; a live ra never equals a non-entry.
+     */
+    for (int t = 0; t < rets->ne; t++) {
+        const long long start = *p, nomatch = start + 15;
+        ne32(p, m->reg_base + 1, m->entry_base + t, nomatch, m);
+        emit_i32(p, m->z, m->z, na[rets->enode[t]]);
+    }
+    emit_i32(p, m->z, m->z, IOMARK32); /* no known target matched */
+}
+
+static void emit_jalr_entry_dispatch32(int *p,
+                                       const int *na,
+                                       const struct ret_sites *rets,
+                                       long long target,
+                                       const struct m32 *m)
+{
+    for (int t = 0; t < rets->ne; t++) {
+        const long long start = *p, nomatch = start + 15;
+        ne32(p, target, m->entry_base + t, nomatch, m);
+        emit_i32(p, m->z, m->z, na[rets->enode[t]]);
+    }
+    emit_i32(p, m->z, m->z, IOMARK32); /* no known target matched */
 }
 
 /* Emit one wide instruction: li, or the native single-cell ALU. Every ALU form
  * computes into a scratch cell (t0) then MOVEs to rd, so rd may alias rs1/rs2.
- * The second operand is rs2's cell (K_OP) or the imm cell (K_OPIMM).
+ * The second operand is rs2's cell (K_OP) or the imm cell (K_OPIMM). Lower one
+ * CSR op (K_CSR). The CSR lives in a data cell (m->csr_base + index),
+ * read/written live so a timer that patches it under the guest is always seen
+ * fresh. The new value is built in t0 from the ORIGINAL csr and source before
+ * rd is written, so a CSRRS/C whose rd == rs1 stays correct. The *I forms carry
+ * a 5-bit zimm; each set bit is applied with the mask-pool cell, so no imm slot
+ * is consumed (matching the count/size passes). csr_index() was validated >= 0.
  */
+static void emit_csr32(int *p, const struct node *nd, const struct m32 *m)
+{
+    const long long csr = m->csr_base + csr_index((uint32_t) nd->imm);
+    const int rd = (nd->word >> 7) & 31;
+    const int op = nd->funct3 & 3; /* 1 = write, 2 = set, 3 = clear */
+    const bool imm_form = nd->funct3 >= 5;
+    const uint32_t zimm = (nd->word >> 15) & 31;
+    const long long src = m->reg_base + nd->rs1;
+
+    /* CSRRW(I) always writes; a set/clear with a zero mask (rs1 == x0, or zimm
+     * == 0) is a pure read and must NOT write the CSR (matters once the timer
+     * substrate gives CSR writes real effects). Build the new value in t0 from
+     * the ORIGINAL csr/source, THEN read the old csr into rd, so a CSRRS/C
+     * whose rd == rs1 stays correct.
+     */
+    const bool writes = op == 1 || (imm_form ? zimm != 0 : nd->rs1 != 0);
+
+    if (writes) {
+        if (op == 1) { /* CSRRW / CSRRWI: new value = source */
+            if (imm_form) {
+                mov32(p, m->z, m->t0);
+                for (int b = 0; b < 5; b++)
+                    if (zimm & (1u << b))
+                        addcell32(p, m->t0, m->mask_base + b, m);
+            } else {
+                mov32(p, src, m->t0);
+            }
+        } else if (imm_form) { /* CSRRSI / CSRRCI: set/clear the zimm bits */
+            mov32(p, csr, m->t0);
+            for (int b = 0; b < 5; b++)
+                if (zimm & (1u << b)) {
+                    mov32(p, m->t0, m->t1);
+                    mux32op(p, m->z, m->t1,
+                            m->mask_base + b); /* t1 = t0 & 2^b */
+                    subnb32(p, m->t1, m->t0);  /* clear bit b */
+                    if (op == 2)
+                        addcell32(p, m->t0, m->mask_base + b,
+                                  m); /* set: re-add */
+                }
+        } else if (op == 2) { /* CSRRS: t0 = csr | rs1 */
+            mov32(p, src, m->t0);
+            mux32op(p, csr, m->t0, src);
+        } else { /* CSRRC: t0 = csr & ~rs1 */
+            mov32(p, m->z, m->t0);
+            mux32op(p, csr, m->t0, src);
+        }
+    }
+
+    if (rd) /* read the OLD csr into rd (before any commit) */
+        mov32(p, csr, m->reg_base + rd);
+    if (writes)
+        mov32(p, m->t0, csr); /* commit the new value */
+
+    /* CLINT semantics: mip.MTIP tracks (mtime >= mtimecmp) and is not
+     * independently writable, so writing mtimecmp clears the pending timer bit
+     * (the delivery set it). Without this a handler that rearms mtimecmp and
+     * then polls mip.MTIP would spin forever. The safepoint re-sets MTIP if the
+     * new deadline has already passed.
+     */
+    if (writes && csr_index((uint32_t) nd->imm) == CSR_MTIMECMP) {
+        const long long mip = m->csr_base + CSR_MIP;
+        mov32(p, mip, m->t1);
+        mux32op(p, m->z, m->t1, m->mask_base + 7); /* t1 = mip & MTIP */
+        subnb32(p, m->t1, mip);                    /* mip -= that bit (clear) */
+    }
+}
+
+/* Guest-instruction count of the basic block starting at leader i: from i up to
+ * (not including) the next leader or past a block-ending node. mtime ticks by
+ * this at the block's safepoint, so ticks track retired guest instructions
+ * independent of MUXLEQ lowering.
+ */
+static int block_insn_count(const struct graph *g, int i)
+{
+    int n = 0;
+    for (int j = i; j < g->count; j++) {
+        n++;
+        if (is_block_end(g->n[j].kind))
+            break;
+        if (j + 1 < g->count && g->n[j + 1].leader)
+            break;
+    }
+    return n;
+}
+
+/* Resolve the (single) compile-time constant written to mtvec (0x305) by a
+ * reachable `csrw mtvec, rs1` / `csrwi mtvec`, and return its target node. The
+ * RTOS kernel sets mtvec once to a constant `la trap_vector`; a runtime or
+ * multiple-valued mtvec returns NONE (the caller errors). Same block-local
+ * cprop as the other resolvers.
+ */
+static int resolve_mtvec(struct graph *g, const bool *reach)
+{
+    struct cprop c;
+    cprop_clear(&c);
+    int node = NONE;
+    bool conflict = false;
+    for (int i = 1; i < g->count; i++) {
+        struct node *nd = &g->n[i];
+        if (nd->leader)
+            cprop_clear(&c);
+        if (reach[i] && nd->kind == K_CSR && (uint32_t) nd->imm == 0x305) {
+            const int op = nd->funct3 & 3; /* 1 write, 2 set, 3 clear */
+            const bool imm_form = nd->funct3 >= 5;
+            const uint32_t zimm = (nd->word >> 15) & 31;
+
+            /* Does this op WRITE mtvec? CSRRW(I) always; set/clear only with a
+             * nonzero mask. A pure read (set/clear, zero mask) does not.
+             */
+            const bool writes =
+                op == 1 || (imm_form ? zimm != 0 : nd->rs1 != 0);
+            if (writes) {
+                /* Only a CSRRW/I of a single known constant address is a usable
+                 * trap vector; a runtime value, an unmapped address, or a
+                 * set/clear (which mutates the vector unpredictably) makes it
+                 * unresolvable, so reject rather than compile a stale vector.
+                 */
+                if (op == 1) {
+                    const bool known =
+                        imm_form || (nd->rs1 >= 0 && c.known[nd->rs1]);
+                    const uint32_t v = imm_form ? zimm : c.val[nd->rs1];
+                    const int tn = known ? addr2node(g, v & ~1u) : NONE;
+                    if (tn == NONE)
+                        conflict = true;
+                    else if (node != NONE && node != tn)
+                        conflict = true;
+                    else
+                        node = tn;
+                } else {
+                    conflict = true;
+                }
+            }
+        }
+        cprop_update(&c, nd);
+    }
+    return conflict ? NONE : node;
+}
+
+/* Emit one timer safepoint preamble at a block leader: tick mtime by the
+ * block's retired-guest-instruction count, then, when interrupts are enabled
+ * and the timer has expired, save the block PC to mepc, set mcause/mip, disable
+ * MIE (saving it in MPIE), and jump to the trap vector. Exactly
+ * SP_PREAMBLE_CELLS cells with the delivery block at SP_DELIVER_OFF, so the two
+ * forward branch targets (AFTER, DELIVER) are start-relative and exact in both
+ * passes.
+ */
+static void emit_safepoint32(int *p,
+                             int si,
+                             const struct timer_info *ti,
+                             const int *na,
+                             const struct m32 *m)
+{
+    const long long start = *p;
+    const long long AFTER = start + SP_PREAMBLE_CELLS;
+    const long long DELIVER = start + SP_DELIVER_OFF;
+    const long long mstatus = m->csr_base + CSR_MSTATUS;
+    const long long mie = m->csr_base + CSR_MIE;
+    const long long mip = m->csr_base + CSR_MIP;
+    const long long mepc = m->csr_base + CSR_MEPC;
+    const long long mcause = m->csr_base + CSR_MCAUSE;
+    const long long mtime = m->csr_base + CSR_MTIME;
+    const long long mtimecmp = m->csr_base + CSR_MTIMECMP;
+
+    addcell32(p, mtime, ti->cnt_base + si, m); /* mtime += block count (9) */
+
+    mov32(p, mstatus, m->t0);                  /* if !(mstatus.MIE) -> AFTER */
+    mux32op(p, m->z, m->t0, m->mask_base + 3); /* t0 = mstatus & (1<<3) */
+    eq32(p, m->t0, m->z, AFTER, m);            /* (3+3+15) */
+
+    mov32(p, mie, m->t0);                      /* if !(mie.MTIE) -> AFTER */
+    mux32op(p, m->z, m->t0, m->mask_base + 7); /* t0 = mie & (1<<7) */
+    eq32(p, m->t0, m->z, AFTER, m);            /* (3+3+15) */
+
+    ltu32(p, mtime, mtimecmp, AFTER, DELIVER,
+          m); /* mtime<mtimecmp?AFTER:deliver (33) */
+
+    /* DELIVER (start + SP_DELIVER_OFF): */
+    mov32(p, ti->pc_base + si, mepc);  /* mepc = block PC (3) */
+    mov32(p, ti->mcause_cell, mcause); /* mcause = 0x80000007 (3) */
+    /* mip |= MTIP (bit 7): isolate, clear, re-add (idempotent set) */
+    mov32(p, mip, m->t1);
+    mux32op(p, m->z, m->t1, m->mask_base + 7);
+    subnb32(p, m->t1, mip);
+    addcell32(p, mip, m->mask_base + 7, m); /* (3+3+3+9) */
+    /* mstatus: set MPIE (bit 7); MIE is 1 here, so MPIE := 1 */
+    mov32(p, mstatus, m->t1);
+    mux32op(p, m->z, m->t1, m->mask_base + 7);
+    subnb32(p, m->t1, mstatus);
+    addcell32(p, mstatus, m->mask_base + 7, m); /* (3+3+3+9) */
+    /* mstatus: clear MIE (bit 3) */
+    mov32(p, mstatus, m->t1);
+    mux32op(p, m->z, m->t1, m->mask_base + 3);
+    subnb32(p, m->t1, mstatus); /* (3+3+3) */
+    /* Un-tick this block: it has NOT retired (delivery is before the body, and
+     * mepc = its start, so mret re-runs the preamble and re-ticks). Keeps mtime
+     * an exact retired-instruction count and avoids a pre-charged retrap.
+     */
+    subnb32(p, ti->cnt_base + si, mtime);        /* mtime -= count (3) */
+    emit_i32(p, m->z, m->z, na[ti->mtvec_node]); /* jump to trap vector (3) */
+    /* AFTER (start + SP_PREAMBLE_CELLS): the block body follows. The fixed size
+     * is load-bearing (AFTER/DELIVER are start-relative); assert it rather than
+     * let a mis-hand-counted primitive silently corrupt branch targets.
+     */
+    assert(*p - start == SP_PREAMBLE_CELLS);
+}
+
+/* mret: restore mstatus.MIE from MPIE (copied, not assumed), then dispatch mepc
+ * back over the safepoint set (a preempted block PC) and the entry-target set
+ * (a task's first launch), the same compare-chain as the ret/entry dispatch.
+ */
+static void emit_mret32(int *p,
+                        const struct timer_info *ti,
+                        const struct ret_sites *rets,
+                        const int *na,
+                        const struct m32 *m)
+{
+    const long long mstatus = m->csr_base + CSR_MSTATUS;
+    const long long mepc = m->csr_base + CSR_MEPC;
+
+    /* mret: MIE := MPIE (bit 3 := bit 7), then MPIE := 1 (RISC-V trap return).
+     */
+    mov32(p, mstatus, m->t1); /* clear MIE (bit 3) */
+    mux32op(p, m->z, m->t1, m->mask_base + 3);
+    subnb32(p, m->t1, mstatus);
+    copybit32(p, mstatus, 7, mstatus, 3, m); /* MIE := MPIE */
+    mov32(p, mstatus, m->t1);                /* set MPIE (bit 7), idempotent */
+    mux32op(p, m->z, m->t1, m->mask_base + 7);
+    subnb32(p, m->t1, mstatus);
+    addcell32(p, mstatus, m->mask_base + 7, m);
+
+    /* Dispatch mepc: a preempted task resumes at a safepoint PC; a task's first
+     * launch resumes at its entry (a collected entry target).
+     */
+    for (int si = 0; si < ti->nsp; si++) {
+        const long long startc = *p, nomatch = startc + 15;
+        ne32(p, mepc, ti->pc_base + si, nomatch, m);
+        emit_i32(p, m->z, m->z, na[ti->sp_node[si]]);
+    }
+    for (int e = 0; e < rets->ne; e++) {
+        const long long startc = *p, nomatch = startc + 15;
+        ne32(p, mepc, m->entry_base + e, nomatch, m);
+        emit_i32(p, m->z, m->z, na[rets->enode[e]]);
+    }
+    emit_i32(p, m->z, m->z, IOMARK32); /* mepc matched nothing -> halt */
+}
+
 static void emit_one32(const struct graph *g,
                        int i,
                        const struct sysinfo *sys,
@@ -2039,6 +2530,7 @@ static void emit_one32(const struct graph *g,
                        const bool *folded,
                        const int *fwd,
                        const struct promo_emit *pe,
+                       const struct timer_info *ti,
                        int *p,
                        int *imm,
                        int *spool)
@@ -2047,9 +2539,17 @@ static void emit_one32(const struct graph *g,
     const int rd = (nd->word >> 7) & 31;
     const int fk = fold_kind(nd->word);
 
+    /* Timer safepoint: at a loop-header leader, tick mtime and possibly deliver
+     * a timer interrupt BEFORE the block body runs (so mepc is the block start
+     * and resume re-runs the block cleanly). na[i] points here, so a jump/mret
+     * to this block lands on the check.
+     */
+    if (ti->on && ti->node_sp[i] != NONE)
+        emit_safepoint32(p, ti->node_sp[i], ti, na, m);
+
     /* Promotion brackets a loop (see emit_one32): the pre-header loads and
      * post-loop stores prefix the sole entry/exit node so the cells are live
-     * across the loop and memory is current on exit.
+     * across the loop and memory is current on exit. (Disabled under --timer.)
      */
     if (pe->pre[i] != NONE)
         emit_promo_transfer32(p, &pe->loops[pe->pre[i]], m, true);
@@ -2184,6 +2684,22 @@ static void emit_one32(const struct graph *g,
         }
         return;
     }
+    if (nd->kind == K_CSR) {
+        emit_csr32(p, nd, m);
+        return;
+    }
+    if (nd->kind == K_WFI)
+        return; /* a nop: the loop-header safepoint re-checks the timer each
+                   pass
+                   */
+    if (nd->kind == K_MRET) {
+        if (!ti->on) {
+            fprintf(stderr, "rvopt mux: mret at pc %u needs --timer\n", nd->pc);
+            exit(1);
+        }
+        emit_mret32(p, ti, rets, na, m);
+        return;
+    }
     if (nd->kind == K_JALR) {
         /* Static-target JALR (resolve_jalr set nd->target from a compile-time
          * rs1): write the pc+4 link if rd != 0, then jump to the resolved cell.
@@ -2198,10 +2714,29 @@ static void emit_one32(const struct graph *g,
             emit_i32(p, m->z, m->z, na[nd->target]); /* jump to the target */
             return;
         }
-        /* Else 'jalr x0, x1, 0' (= ret) through known call-site returns. */
+
+        /* Else 'jalr x0, x1, 0' (= ret) through known return sites and/or
+         * indirect-jump entry targets (task first activations).
+         */
         if (rd == 0 && nd->rs1 == 1 && nd->imm == 0 &&
-            ret_site_count32(g, sys, rets, i) > 0) {
+            (ret_site_count32(g, sys, rets, i) > 0 || rets->ne > 0)) {
             emit_ret_dispatch32(g, sys, p, na, rets, i, m);
+            return;
+        }
+        if (rets->ne > 0) {
+            mov32(p, m->reg_base + nd->rs1, m->t0);
+            if (nd->imm != 0) {
+                addcell32(p, m->t0, m->imm_base + *imm, m);
+                (*imm)++;
+            }
+            mov32(p, m->t0, m->t1);
+            mux32op(p, m->z, m->t1, m->one); /* t1 = target & 1 */
+            subnb32(p, m->t1, m->t0);        /* target &= ~1 */
+            if (rd) {
+                mov32(p, m->imm_base + *imm, m->reg_base + rd);
+                (*imm)++;
+            }
+            emit_jalr_entry_dispatch32(p, na, rets, m->t0, m);
             return;
         }
         fprintf(stderr, "rvopt mux: unsupported JALR at pc %u\n", nd->pc);
@@ -2299,10 +2834,15 @@ static void emit_one32(const struct graph *g,
  * shifts, memory, FENCE (a nop here), and ecalls. Arbitrary runtime JALR stays
  * a hard error. The epilogue PUTs each defined register's low byte then halts.
  */
-static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
+static void emit_mux(struct graph *g,
+                     const unsigned char *img,
+                     size_t used,
+                     bool indirect,
+                     bool timer)
 {
     struct sysinfo *sys = xcalloc((size_t) g->count, sizeof *sys);
     bool *reach = xcalloc((size_t) g->count, sizeof *reach);
+
     /* Which transfers may mark a leader, and which JALRs may resolve, both
      * depend on reachability; reachability depends on sys[], which cprop reads
      * off the leaders. Break the cycle with a walk over a zeroed sys[], where
@@ -2311,27 +2851,71 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
      * Then classify the syscalls, walk for real, and resolve the JALRs that
      * walk reached. Leaders only grow, so this settles. reach[] doubles as
      * mark_reachable's visited set, so clear it before each walk. The vd and
-     * use-list edges decode built against the leader set discarded here are
-     * not rebuilt; only dump and the IR check read those, and neither runs
-     * this path.
+     * use-list edges decode built against the leader set discarded here are not
+     * rebuilt; only dump and the IR check read those, and neither runs this
+     * path.
      */
     for (int i = 1; i < g->count; i++)
         g->n[i].leader = 0;
     g->n[g->entry].leader = 1;
+
+    /* Indirect-jump entry targets grow monotonically across the settle loop as
+     * reachable code exposes more function-pointer constants; seeding them as
+     * reachability roots pulls their (otherwise statically-unreached) blocks
+     * in.
+     */
+    bool *roots = xcalloc((size_t) g->count, sizeof *roots);
+    bool *etarget = xcalloc((size_t) g->count, sizeof *etarget);
     bool changed;
     do {
         memset(sys, 0, (size_t) g->count * sizeof *sys);
         memset(reach, 0, (size_t) g->count * sizeof *reach);
-        mark_reachable(g, sys, reach);
+        mark_reachable(g, sys, reach, roots);
         changed = mark_leaders(g, reach);
         analyze_syscalls(g, used, sys);
         memset(reach, 0, (size_t) g->count * sizeof *reach);
-        mark_reachable(g, sys, reach);
+        mark_reachable(g, sys, reach, roots);
         if (resolve_jalr(g, reach))
             changed = true;
+
+        /* Indirect-jump entry dispatch is opt-in (--indirect): distinguishing a
+         * code pointer from a data pointer written to memory is not reliable in
+         * a single RWX image (a `la sp, data; sw sp, ...` looks identical to a
+         * stored task entry), so enabling it unconditionally would make rvopt
+         * try to emit data as code. Programs that use function pointers / task
+         * entries (an RTOS kernel) opt in; everything else is unaffected.
+         */
+        if (indirect && collect_entry_targets(g, reach, roots, etarget))
+            changed = true;
+
+        /* The trap handler (mtvec target) is reached only by the timer-delivery
+         * jump the safepoints emit, which reachability cannot see; seed it as a
+         * reachability root so its block is emitted. It is NOT added to
+         * etarget: the handler must not become a ret/mret dispatch target.
+         */
+        if (timer) {
+            const int mv = resolve_mtvec(g, reach);
+            if (mv != NONE && !roots[mv]) {
+                roots[mv] = true;
+                g->n[mv].leader = 1;
+                changed = true;
+            }
+        }
     } while (changed);
     /* refuse self-modifying code, never miscompile it */
     detect_smc(g, sys, reach);
+
+    /* Reject unsupported CSR numbers up front (before layout allocations) so
+     * the error names the guest pc. Only reachable CSR ops matter; a CSR word
+     * in dead .rodata must not fail the build.
+     */
+    for (int i = 1; i < g->count; i++)
+        if (reach[i] && g->n[i].kind == K_CSR &&
+            csr_index((uint32_t) g->n[i].imm) < 0) {
+            fprintf(stderr, "rvopt mux: unsupported CSR 0x%X at pc %u\n",
+                    (unsigned) g->n[i].imm, g->n[i].pc);
+            exit(1);
+        }
 
     bool *folded = xcalloc((size_t) g->count, sizeof *folded);
     int32_t *foldval = xcalloc((size_t) g->count, sizeof *foldval);
@@ -2339,8 +2923,27 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     int *fwd = xcalloc((size_t) g->count, sizeof *fwd);
     compute_forwards(g, reach, fwd);
 
+    /* Under --timer an interrupt is delivered at any safepoint, so every guest
+     * register must be canonical in its regfile cell there: disable load
+     * forwarding and register promotion (correctness over loop perf; the
+     * handler saves/restores registers straight from the cells).
+     */
+    if (timer)
+        for (int i = 0; i < g->count; i++)
+            fwd[i] = NONE;
+
     struct promo_loop *loops = xcalloc((size_t) PROMO_MAX_LOOPS, sizeof *loops);
-    const int nloops = compute_promotions(g, reach, loops);
+
+    /* --indirect disables promotion too (not just --timer): a ret/mret can
+     * dispatch to a collected code address that lands inside a loop body, an
+     * entry the static single-entry analysis in compute_promotions cannot see,
+     * so the pre-header load would be bypassed and the loop would read stale
+     * promoted cells. Forwarding is unaffected: indirect targets are block
+     * leaders, so an indirect entry still runs a block's stores before its
+     * loads. A finer check could keep promotion for loops no etarget reaches.
+     */
+    const int nloops =
+        (timer || indirect) ? 0 : compute_promotions(g, reach, loops);
     int *pro_pre = xcalloc((size_t) g->count, sizeof *pro_pre);
     int *pro_post = xcalloc((size_t) g->count, sizeof *pro_post);
     int *pro_cell = xcalloc((size_t) g->count, sizeof *pro_cell);
@@ -2369,9 +2972,12 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
         xcalloc((size_t) g->count, sizeof *rets.target),
         xcalloc((size_t) g->count, sizeof *rets.node),
         xcalloc((size_t) g->count, sizeof *rets.addr),
+        0,
+        xcalloc((size_t) g->count, sizeof *rets.enode),
+        xcalloc((size_t) g->count, sizeof *rets.eaddr),
     };
     for (int i = 1; i < g->count; i++) {
-        if (reach[i] && is_link_call(&g->n[i]) && g->n[i].target != NONE) {
+        if (reach[i] && is_link_call(&g->n[i])) {
             const uint32_t addr = g->n[i].pc + 4;
             const int node = addr2node(g, addr);
             if (node != NONE) {
@@ -2379,6 +2985,53 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
                 rets.addr[rets.n] = addr;
                 rets.node[rets.n] = node;
                 rets.n++;
+            }
+        }
+    }
+
+    /* Indirect-jump entry targets discovered by the settle loop (the dispatch
+     * set only; the mtvec reachability root is deliberately excluded).
+     */
+    for (int i = 1; i < g->count; i++)
+        if (etarget[i]) {
+            rets.enode[rets.ne] = i;
+            rets.eaddr[rets.ne] = g->n[i].pc;
+            rets.ne++;
+        }
+    free(roots);
+    free(etarget);
+
+    /* Timer safepoints (--timer): the loop-header leaders (backward branch/jump
+     * targets) where a timer interrupt may be delivered. Each carries its block
+     * PC (saved to mepc) and guest-instruction count (added to mtime).
+     */
+    struct timer_info ti = {0};
+    ti.on = timer;
+    int *node_sp = xcalloc((size_t) g->count, sizeof *node_sp);
+    int *sp_node = xcalloc((size_t) g->count, sizeof *sp_node);
+    uint32_t *sp_pc = xcalloc((size_t) g->count, sizeof *sp_pc);
+    int *sp_cnt = xcalloc((size_t) g->count, sizeof *sp_cnt);
+    for (int i = 0; i < g->count; i++)
+        node_sp[i] = NONE;
+    ti.node_sp = node_sp;
+    ti.sp_node = sp_node;
+    ti.sp_pc = sp_pc;
+    ti.sp_cnt = sp_cnt;
+    if (timer) {
+        ti.mtvec_node = resolve_mtvec(g, reach);
+        if (ti.mtvec_node == NONE)
+            die("--timer needs a single compile-time mtvec "
+                "(csrw mtvec, la <handler>)",
+                NULL);
+        for (int i = 1; i < g->count; i++) {
+            const int t = g->n[i].target;
+            if (reach[i] && t != NONE && reach[t] && g->n[i].pc >= g->n[t].pc &&
+                node_sp[t] == NONE) {
+                node_sp[t] = ti.nsp;
+                sp_node[ti.nsp] = t;
+                sp_pc[ti.nsp] = g->n[t].pc;
+                sp_cnt[ti.nsp] = block_insn_count(g, t);
+                ti.nsp++;
             }
         }
     }
@@ -2435,31 +3088,38 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
             continue; /* ecall: exit/write, no imm cell, no def */
         }
         if (nd->kind == K_JALR && nd->target != NONE) {
-            if (rd) { /* static-target JALR: pc+4 link into rd */
+            if (rd) { /* JALR link: pc+4 into rd */
                 nimm++;
                 def[rd] = true;
             }
             continue;
         }
         if (nd->kind == K_JALR && rd == 0 && nd->rs1 == 1 && nd->imm == 0 &&
-            ret_site_count32(g, sys, &rets, i) > 0)
-            continue; /* ret: no imm cell, no def */
+            (ret_site_count32(g, sys, &rets, i) > 0 || rets.ne > 0))
+            continue; /* ret: dispatch over return sites and/or entry targets */
+        if (nd->kind == K_JALR && rets.ne > 0) {
+            if (nd->imm != 0)
+                nimm++;
+            if (rd) { /* JALR link: pc+4 into rd */
+                nimm++;
+                def[rd] = true;
+            }
+            continue;
+        }
+        if (nd->kind == K_CSR) {
+            if (rd) /* a CSR read defines rd; the CSR cell is not an imm slot */
+                def[rd] = true;
+            continue;
+        }
+        if (nd->kind == K_WFI || nd->kind == K_MRET)
+            continue; /* WFI: nop/yield; MRET: control transfer (no def/imm) */
+        /* Process death reclaims the working allocations, as with every other
+         * fatal path in this file (die()); do not hand-free a long list here.
+         */
         fprintf(stderr,
                 "rvopt mux: unsupported op at pc %u (no computed JALR / "
-                "unresolved ecall yet)\n",
+                "unresolved ecall)\n",
                 nd->pc);
-        free(rets.target);
-        free(rets.node);
-        free(rets.addr);
-        free(pro_cell);
-        free(pro_post);
-        free(pro_pre);
-        free(loops);
-        free(fwd);
-        free(folded);
-        free(foldval);
-        free(sys);
-        free(reach);
         exit(1);
     }
     int ndef = 0;
@@ -2469,9 +3129,9 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     const int nimm_prog = nimm;
     nimm += npromo;
 
-    /* Sizing pass: variable-size ops mean the code length is not a formula;
-     * run the emitter with output suppressed to fill na[] (branch/jump targets)
-     * and measure the op length. A forward branch reads a not-yet-set na entry
+    /* Sizing pass: variable-size ops mean the code length is not a formula; run
+     * the emitter with output suppressed to fill na[] (branch/jump targets) and
+     * measure the op length. A forward branch reads a not-yet-set na entry
      * here, but output is suppressed and every block is fixed-size, so the
      * count is exact; the real pass sees the fully-filled na[].
      */
@@ -2482,8 +3142,8 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     for (int i = 1; i < g->count; i++) {
         na[i] = p;
         if (reach[i])
-            emit_one32(g, i, sys, &rets, &m, na, folded, fwd, &pe, &p, &imm,
-                       &spool);
+            emit_one32(g, i, sys, &rets, &m, na, folded, fwd, &pe, &ti, &p,
+                       &imm, &spool);
     }
     g_sizing = false;
     na[g->count] = p;                    /* a jump past the end lands here */
@@ -2497,7 +3157,8 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     m.imm_base = code;
     m.promo_imm_base = nimm_prog;
     m.ret_base = m.imm_base + nimm;
-    m.spool_base = m.ret_base + nret_pool;
+    m.entry_base = m.ret_base + nret_pool;
+    m.spool_base = m.entry_base + rets.ne;
     m.reg_base = m.spool_base + nspool;
     m.promo_base = m.reg_base + 32;
     m.z = m.promo_base + npromo;
@@ -2514,35 +3175,29 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     m.winmask = m.mff + 1;
     m.rambc = m.winmask + 1;
     m.mask_base = m.rambc + 1;
-    m.ram_base = m.mask_base + 32;
+    m.csr_base = m.mask_base + 32;
+    m.timer_base = m.csr_base + CSR_COUNT;
+    /* timer consts: nsp safepoint PCs, nsp block counts, one mcause cell */
+    ti.pc_base = m.timer_base;
+    ti.cnt_base = m.timer_base + ti.nsp;
+    ti.mcause_cell = m.timer_base + 2 * ti.nsp;
+    m.ram_base = m.timer_base + (timer ? 2 * ti.nsp + 1 : 0);
     /* smallest power of two covering the touched guest bytes */
     int winsize = 1;
     while (winsize < (int) used)
         winsize <<= 1;
     if (m.ram_base + winsize > MUX_MAX_CELLS) {
+        /* Fatal: let process death reclaim, as die() does elsewhere. */
         fprintf(stderr, "rvopt mux: image needs %d cells (> %d)\n",
                 m.ram_base + winsize, MUX_MAX_CELLS);
-        free(na);
-        free(rets.target);
-        free(rets.node);
-        free(rets.addr);
-        free(pro_cell);
-        free(pro_post);
-        free(pro_pre);
-        free(loops);
-        free(fwd);
-        free(folded);
-        free(foldval);
-        free(sys);
-        free(reach);
         exit(1);
     }
 
     p = imm = spool = 0;
     for (int i = 1; i < g->count; i++)
         if (reach[i])
-            emit_one32(g, i, sys, &rets, &m, na, folded, fwd, &pe, &p, &imm,
-                       &spool);
+            emit_one32(g, i, sys, &rets, &m, na, folded, fwd, &pe, &ti, &p,
+                       &imm, &spool);
     for (int r = 0; r < 32; r++)
         if (def[r])
             emit_i32(&p, m.reg_base + r, IOMARK32, 0); /* PUT rd's low byte */
@@ -2553,15 +3208,33 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
      * t0/t1/t2/sh1/sh2, 0x1F/0xFF, winmask/rambc, the 2^0..2^31 mask pool, and
      * the guest RAM window.
      */
-    for (int i = 1; i < g->count; i++)
+    for (int i = 1; i < g->count; i++) {
+        if (reach[i] && g->n[i].kind == K_JALR) {
+            const int rd = (g->n[i].word >> 7) & 31;
+            if (g->n[i].target == NONE && rets.ne > 0 &&
+                !(rd == 0 && g->n[i].rs1 == 1 && g->n[i].imm == 0 &&
+                  (ret_site_count32(g, sys, &rets, i) > 0 || rets.ne > 0))) {
+                if (g->n[i].imm != 0)
+                    printf("%d\n", g->n[i].imm);
+                if (rd)
+                    printf("%u\n", g->n[i].pc + 4);
+            } else if (rd && g->n[i].target != NONE) {
+                printf("%u\n", g->n[i].pc + 4);
+            }
+            continue;
+        }
         if (reach[i] && imm_op32(&g->n[i]))
             printf("%lld\n",
                    folded[i] ? (long long) foldval[i] : imm_value32(&g->n[i]));
+    }
     for (int l = 0; l < nloops; l++)
         for (int s = 0; s < loops[l].nslot; s++)
             printf("%d\n", loops[l].slot[s].imm);
     for (int i = 0; i < nret_pool; i++)
         printf("%u\n", rets.addr[i]);
+    for (int i = 0; i < rets.ne; i++)
+        printf("%u\n",
+               rets.eaddr[i]); /* indirect-jump entry-target addresses */
     for (int i = 1; i < g->count; i++)
         if (reach[i] && g->n[i].kind == K_SYSTEM && sys[i].kind == SYS_WRITE)
             for (uint32_t k = 0; k < sys[i].len; k++)
@@ -2575,9 +3248,21 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     printf("%d\n%d\n", winsize - 1, m.ram_base); /* winmask, rambc */
     for (int b = 0; b < 32; b++)
         printf("%lld\n", 1LL << b); /* mask pool 2^0 .. 2^31 */
+    for (int c = 0; c < CSR_COUNT; c++)
+        printf("0\n"); /* machine-CSR state cells, all reset to 0 */
+    for (int s = 0; s < ti.nsp; s++)
+        printf("%u\n", ti.sp_pc[s]); /* safepoint guest PCs (into mepc) */
+    for (int s = 0; s < ti.nsp; s++)
+        printf("%d\n", ti.sp_cnt[s]); /* safepoint block guest-insn counts */
+    if (timer)
+        printf("%lld\n", 0x80000007LL); /* mcause: machine timer interrupt */
     for (int k = 0; k < winsize; k++)
         printf("%u\n",
                k < (int) used ? img[k] : 0); /* guest RAM, init from img */
+    free(node_sp);
+    free(sp_node);
+    free(sp_pc);
+    free(sp_cnt);
     free(na);
     free(pro_cell);
     free(pro_post);
@@ -2589,6 +3274,8 @@ static void emit_mux(struct graph *g, const unsigned char *img, size_t used)
     free(rets.target);
     free(rets.node);
     free(rets.addr);
+    free(rets.enode);
+    free(rets.eaddr);
     free(sys);
     free(reach);
 }
@@ -2608,7 +3295,7 @@ int main(int argc, char **argv)
         struct sysinfo *sys = xcalloc((size_t) g.count, sizeof *sys);
         analyze_syscalls(&g, used, sys);
         bool *reach = xcalloc((size_t) g.count, sizeof *reach);
-        mark_reachable(&g, sys, reach);
+        mark_reachable(&g, sys, reach, NULL);
         struct promo_loop loops[PROMO_MAX_LOOPS];
         const int nl = compute_promotions(&g, reach, loops);
         printf("; promotions: %d loop(s)\n", nl);
@@ -2630,12 +3317,37 @@ int main(int argc, char **argv)
         return check_ir(argv[2]);
 
     /* The emit pipeline: load guest image, decode to the graph, emit, free.
+     * `mux [--indirect] FILE`: --indirect enables indirect-jump entry dispatch
+     * for images that ret/jump through function pointers or task entries (the
+     * RTOS kernel). Off by default (see collect_entry_targets).
      */
-    if (argc == 3 && !strcmp(argv[1], "mux")) {
+    if (argc >= 3 && !strcmp(argv[1], "mux")) {
+        bool indirect = false, timer = false;
+        int a = 2;
+        for (; a < argc - 1; a++) {
+            if (!strcmp(argv[a], "--indirect"))
+                indirect = true;
+            else if (!strcmp(argv[a], "--timer"))
+                timer =
+                    true; /* timer preemption needs the entry dispatch too */
+            else
+                die("unknown mux option", argv[a]);
+        }
+        if (timer)
+            indirect =
+                true; /* mret dispatch reuses the entry-dispatch machinery */
+        const char *path = argv[argc - 1];
+
+        /* With no FILE (e.g. `rvopt mux --timer`) the sole trailing arg is a
+         * flag, not a path; the loop above skipped it. Say so plainly instead
+         * of failing later with a confusing open error on "--timer".
+         */
+        if (!strcmp(path, "--indirect") || !strcmp(path, "--timer"))
+            die("missing mux input FILE", NULL);
         size_t used;
-        unsigned char *img = load_guest(argv[2], &used);
+        unsigned char *img = load_guest(path, &used);
         struct graph g = decode_graph(img, used);
-        emit_mux(&g, img, used);
+        emit_mux(&g, img, used, indirect, timer);
         free_graph(&g);
         free(img);
         return 0;

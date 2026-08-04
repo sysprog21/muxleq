@@ -5,9 +5,9 @@
 #   check    : make check, including RV32I coverage; with no cross toolchain
 #              installed (as here) it fetches the prebuilt .elf inputs from the
 #              rv32i-latest pre-release and runs them through rvopt+muxleq
-#   sanitize : make sanitize (ASan/UBSan over the interpreter and emitters)
+#   sanitize : make check-sanitize (ASan/UBSan over the interpreter and emitters)
 #   deep     : wide native-image validation, multi-seed rvopt differential
-#              fuzz (make fuzz-rvopt), loader rejection, and the offline
+#              fuzz (make check-fuzz-rvopt), loader rejection, and the offline
 #              prebuilt-script contract test
 #   rv32i    : cross-build the tests/rv32i programs with the xPack RISC-V
 #              toolchain, run them + the rv32ui conformance suite through
@@ -90,7 +90,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang gforth
       - name: ASan and UBSan validation
-        run: make sanitize
+        run: make check-sanitize
 
   deep:
     runs-on: ubuntu-24.04
@@ -107,8 +107,8 @@ jobs:
         env:
           REPO: ${{ github.repository }}
         run: |
-          make verify-mux verify-loader-rejects verify-prebuilt
-          make fuzz-rvopt
+          make check-mux check-loader-rejects check-prebuilt
+          make check-fuzz-rvopt
 
   rv32i:
     runs-on: ubuntu-24.04
@@ -146,6 +146,10 @@ jobs:
         run: .ci/install-riscv-toolchain.sh
       - name: Build and run the RV32I programs, then stage the release
         run: make rv32i-release
+      # This job is the only one with the RISC-V toolchain, so it is the only
+      # place the RTOS checks actually build and run (they skip elsewhere).
+      - name: Run the RV32I RTOS checks
+        run: make check-rtos
       # Timing-only, informational: the eForth kernels and the rvopt-lowered
       # DureMark. This job is the only one with the cross toolchain, so it is the
       # only place bench-rv32i actually builds and runs (it skips elsewhere). The
@@ -160,7 +164,7 @@ jobs:
       - name: Contract-test the prebuilt-release script
         env:
           REPO: ${{ github.repository }}
-        run: make verify-prebuilt
+        run: make check-prebuilt
       # Per-run copy for PR/branch runs (expires, needs login to fetch).
       - name: Upload built RV32I binaries
         uses: actions/upload-artifact@v7

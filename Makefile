@@ -21,7 +21,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order.
 .NOTPARALLEL:
-.PHONY: FORCE help run bootstrap clean distclean check check-all golden golden-see golden-pty golden-mandel golden-raytracer verify-loader-rejects verify-mux verify-eforth-stage0 verify-eforth-repl fuzz-rvopt sanitize indent check-format rv32i rv32i-check rv32i-prebuilt rv32i-auto verify-prebuilt bench bench-forth bench-rv32i rv32i-release
+.PHONY: FORCE help run check-bootstrap clean distclean check check-all check-golden check-golden-see check-golden-pty check-golden-mandel check-golden-raytracer check-loader-rejects check-mux check-eforth-stage0 check-eforth-repl check-fuzz-rvopt check-sanitize indent check-format rv32i rv32i-check rv32i-prebuilt check-rv32i check-prebuilt bench bench-forth bench-rv32i rv32i-release check-rtos
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -65,8 +65,6 @@ RVOPT_BAD_ENC := \
 	reserved-JALR-funct3-7:00800093,0000f067,05d00893,00000073 \
 	reserved-JALR-link-funct3-2:00800093,0000a0e7,05d00893,00000073 \
 	reserved-ret-funct3-1:00c000ef,05d00893,00000073,00009067 \
-	CSR-funct3-1:05d00893,00001073 \
-	CSR-funct3-5:05d00893,00005073 \
 	ebreak:05d00893,00100073 \
 	ecall-with-rd:05d00893,000000f3 \
 	ecall-with-rs1:05d00893,00008073 \
@@ -111,146 +109,177 @@ RVOPT_LOOPCALL_ENC := \
 	fe0398e3,00100513,05400593,00100613, \
 	04000893,00000073,05d00893,00000073, \
 	00008067,00000041
+# Store a function entry, reload it so jalr is runtime-indirect, call through
+# it, write one byte, ret via ra, then exit at the call site's fall-through.
+RVOPT_INDIRECT_CALL_ENC := \
+	01800293,02502a23,03402303,000300e7, \
+	05d00893,00000073,03000593,00100613, \
+	04000893,00000073,00008067,00000013, \
+	00000043,00000000
+RVOPT_INDIRECT_CALL_IMM_ENC := \
+	01c00293,02502e23,03c02303,ffc30313, \
+	004300e7,05d00893,00000073,00100513, \
+	03800593,00100613,04000893,00000073, \
+	00008067,00000013,00000043,00000000
 PACK_WORDS = python3 -c 'import sys, struct; sys.stdout.buffer.write(b"".join(struct.pack("<I", int(w, 16)) for w in sys.argv[1].split(",")))'
 
 # Standalone native-image emission: run a hand-written smoke image (MOVE, SUBLEQ
 # arithmetic + branch-to-halt, PUT at the 32-bit encoding), a high-address
 # image, and wide differential fuzz.
-verify-mux: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
+check-mux: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
 	$(Q)$(RUN) ./$(BIN) tests/mux-smoke.dec > $(TMPDIR)/mux-smoke.out 2>&1 \
 	    && cmp -s tests/expected/mux-smoke.out $(TMPDIR)/mux-smoke.out \
-	    || { echo "verify-mux: wide-VM smoke output mismatch"; exit 1; }
+	    || { echo "check-mux: wide-VM smoke output mismatch"; exit 1; }
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 scripts/gen-mux-high-image.py > $(TMPDIR)/mux-high.dec \
 	        && $(RUN) ./$(BIN) $(TMPDIR)/mux-high.dec > $(TMPDIR)/mux-high.out 2>&1 \
 	        && printf K | cmp -s - $(TMPDIR)/mux-high.out \
-	        || { echo "verify-mux: high-address image failed"; exit 1; }; \
-	else $(PRINTF) "verify-mux: high-address image [SKIP: no python3]\n"; fi
+	        || { echo "check-mux: high-address image failed"; exit 1; }; \
+	else $(PRINTF) "check-mux: high-address image [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    $(CC) $(CFLAGS) -DMUX_MAX_CELLS=2048 -DMUX_ALLOW_SMALL_CAP \
 	        -o $(TMPDIR)/rvopt-small rvopt.c \
 	        && python3 -c 'import sys; sys.stdout.buffer.write(b"\x13\0\0\0" * 1024)' > $(TMPDIR)/rvopt-nops.bin \
 	        && ! $(TMPDIR)/rvopt-small mux $(TMPDIR)/rvopt-nops.bin >/dev/null 2>$(TMPDIR)/rvopt-small.err \
 	        && grep -q 'image needs' $(TMPDIR)/rvopt-small.err \
-	        || { echo "verify-mux: rvopt mux ceiling guard failed"; exit 1; }; \
-	else $(PRINTF) "verify-mux: rvopt ceiling guard [SKIP: no python3]\n"; fi
+	        || { echo "check-mux: rvopt mux ceiling guard failed"; exit 1; }; \
+	else $(PRINTF) "check-mux: rvopt ceiling guard [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 -c 'import sys; sys.stdout.buffer.write((0xfff0000f).to_bytes(4, "little"))' > $(TMPDIR)/rvopt-bad-fence.bin \
 	        && ! $(RVOPT) mux $(TMPDIR)/rvopt-bad-fence.bin >/dev/null 2>$(TMPDIR)/rvopt-bad-fence.err \
 	        && grep -q 'unsupported op' $(TMPDIR)/rvopt-bad-fence.err \
-	        || { echo "verify-mux: reserved FENCE was accepted"; exit 1; }; \
+	        || { echo "check-mux: reserved FENCE was accepted"; exit 1; }; \
 	    python3 -c 'import sys; sys.stdout.buffer.write((0x8000000f).to_bytes(4, "little"))' > $(TMPDIR)/rvopt-resv-tso.bin \
 	        && ! $(RVOPT) mux $(TMPDIR)/rvopt-resv-tso.bin >/dev/null 2>$(TMPDIR)/rvopt-resv-tso.err \
 	        && grep -q 'unsupported op' $(TMPDIR)/rvopt-resv-tso.err \
-	        || { echo "verify-mux: reserved fm=8 (non-RW) FENCE was accepted"; exit 1; }; \
+	        || { echo "check-mux: reserved fm=8 (non-RW) FENCE was accepted"; exit 1; }; \
 	    python3 -c 'import sys; sys.stdout.buffer.write((0x8330000f).to_bytes(4, "little"))' > $(TMPDIR)/rvopt-tso.bin \
 	        && $(RVOPT) mux $(TMPDIR)/rvopt-tso.bin >/dev/null 2>&1 \
-	        || { echo "verify-mux: FENCE.TSO (a nop here) was rejected"; exit 1; }; \
-	else $(PRINTF) "verify-mux: FENCE reject/accept [SKIP: no python3]\n"; fi
+	        || { echo "check-mux: FENCE.TSO (a nop here) was rejected"; exit 1; }; \
+	else $(PRINTF) "check-mux: FENCE reject/accept [SKIP: no python3]\n"; fi
+	$(Q)if command -v python3 >/dev/null 2>&1; then \
+	    $(PACK_WORDS) "05d00893,00001073" > $(TMPDIR)/rvopt-csr-bad.bin \
+	        && ! $(RVOPT) mux $(TMPDIR)/rvopt-csr-bad.bin >/dev/null 2>$(TMPDIR)/rvopt-csr-bad.err \
+	        && grep -q 'unsupported CSR' $(TMPDIR)/rvopt-csr-bad.err \
+	        || { echo "check-mux: unsupported CSR number was accepted"; exit 1; }; \
+	    $(PACK_WORDS) "05d00893,30509073" > $(TMPDIR)/rvopt-csr-ok.bin \
+	        && $(RVOPT) mux $(TMPDIR)/rvopt-csr-ok.bin >/dev/null 2>&1 \
+	        || { echo "check-mux: csrw mtvec (a supported CSR) was rejected"; exit 1; }; \
+	else $(PRINTF) "check-mux: CSR reject/accept [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    for c in $(RVOPT_BAD_ENC); do \
 	        $(PACK_WORDS) "$${c#*:}" > $(TMPDIR)/rvopt-enc.bin \
-	            || { echo "verify-mux: cannot encode $${c%%:*}"; exit 1; }; \
+	            || { echo "check-mux: cannot encode $${c%%:*}"; exit 1; }; \
 	        ! $(RVOPT) mux $(TMPDIR)/rvopt-enc.bin >/dev/null 2>$(TMPDIR)/rvopt-enc.err \
 	            && grep -q 'unsupported op' $(TMPDIR)/rvopt-enc.err \
-	            || { echo "verify-mux: accepted $${c%%:*}"; exit 1; }; \
+	            || { echo "check-mux: accepted $${c%%:*}"; exit 1; }; \
 	    done; \
 	    for c in $(RVOPT_OK_ENC); do \
 	        $(PACK_WORDS) "$${c#*:}" > $(TMPDIR)/rvopt-enc.bin \
-	            || { echo "verify-mux: cannot encode $${c%%:*}"; exit 1; }; \
+	            || { echo "check-mux: cannot encode $${c%%:*}"; exit 1; }; \
 	        $(RVOPT) mux $(TMPDIR)/rvopt-enc.bin >/dev/null 2>&1 \
-	            || { echo "verify-mux: rejected $${c%%:*}"; exit 1; }; \
+	            || { echo "check-mux: rejected $${c%%:*}"; exit 1; }; \
 	    done; \
 	    $(PACK_WORDS) "$(RVOPT_CHAIN_ENC)" > $(TMPDIR)/rvopt-chain.bin \
 	        && $(RVOPT) mux $(TMPDIR)/rvopt-chain.bin > $(TMPDIR)/rvopt-chain.dec 2>&1 \
 	        && $(RUN) ./$(BIN) $(TMPDIR)/rvopt-chain.dec > $(TMPDIR)/rvopt-chain.out 2>&1 \
 	        && printf AB | cmp -s - $(TMPDIR)/rvopt-chain.out \
-	        || { echo "verify-mux: static JALR chain lost its second target"; exit 1; }; \
+	        || { echo "check-mux: static JALR chain lost its second target"; exit 1; }; \
 	    $(PACK_WORDS) "$(RVOPT_LOOPCALL_ENC)" > $(TMPDIR)/rvopt-loopcall.bin \
 	        && $(RVOPT) mux $(TMPDIR)/rvopt-loopcall.bin > $(TMPDIR)/rvopt-loopcall.dec 2>&1 \
 	        && $(RUN) ./$(BIN) $(TMPDIR)/rvopt-loopcall.dec > $(TMPDIR)/rvopt-loopcall.out 2>&1 \
 	        && printf B | cmp -s - $(TMPDIR)/rvopt-loopcall.out \
-	        || { echo "verify-mux: promoted loop bypassed its preload"; exit 1; }; \
-	else $(PRINTF) "verify-mux: JALR/SYSTEM encoding gate [SKIP: no python3]\n"; fi
+	        || { echo "check-mux: promoted loop bypassed its preload"; exit 1; }; \
+	    $(PACK_WORDS) "$(RVOPT_INDIRECT_CALL_ENC)" > $(TMPDIR)/rvopt-indirect-call.bin \
+	        && $(RVOPT) mux --indirect $(TMPDIR)/rvopt-indirect-call.bin > $(TMPDIR)/rvopt-indirect-call.dec 2>&1 \
+	        && $(RUN) ./$(BIN) $(TMPDIR)/rvopt-indirect-call.dec > $(TMPDIR)/rvopt-indirect-call.out 2>&1 \
+	        && printf C | cmp -s - $(TMPDIR)/rvopt-indirect-call.out \
+	        || { echo "check-mux: indirect jalr call failed"; exit 1; }; \
+	    $(PACK_WORDS) "$(RVOPT_INDIRECT_CALL_IMM_ENC)" > $(TMPDIR)/rvopt-indirect-call-imm.bin \
+	        && $(RVOPT) mux --indirect $(TMPDIR)/rvopt-indirect-call-imm.bin > $(TMPDIR)/rvopt-indirect-call-imm.dec 2>&1 \
+	        && $(RUN) ./$(BIN) $(TMPDIR)/rvopt-indirect-call-imm.dec > $(TMPDIR)/rvopt-indirect-call-imm.out 2>&1 \
+	        && printf C | cmp -s - $(TMPDIR)/rvopt-indirect-call-imm.out \
+	        || { echo "check-mux: indirect jalr call with offset failed"; exit 1; }; \
+	else $(PRINTF) "check-mux: JALR/SYSTEM encoding gate [SKIP: no python3]\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 scripts/rv32i-conformance.py >/dev/null \
-	        || { echo "verify-mux: RV32I reference-model self-check FAILED"; exit 1; }; \
+	        || { echo "check-mux: RV32I reference-model self-check FAILED"; exit 1; }; \
 	    python3 scripts/rvopt-fuzz.py --wide --n 18 --body 20 --seed 1 >/dev/null \
-	        || { echo "verify-mux: mux differential fuzz FAILED (see stderr above)"; exit 1; }; \
-	else $(PRINTF) "verify-mux: python3 absent, skipping mux differential fuzz\n"; fi
-	$(Q)$(PRINTF) "verify-mux: smoke + high-address + rvopt ceiling + wide differential fuzz\n"
+	        || { echo "check-mux: mux differential fuzz FAILED (see stderr above)"; exit 1; }; \
+	else $(PRINTF) "check-mux: python3 absent, skipping mux differential fuzz\n"; fi
+	$(Q)$(PRINTF) "check-mux: smoke + high-address + rvopt ceiling + wide differential fuzz\n"
 
-verify-eforth-stage0: $(STAGE0_DEC) ## Verify gforth can emit the 32-bit-cell eForth image.
+check-eforth-stage0: $(STAGE0_DEC) ## Verify gforth can emit the 32-bit-cell eForth image.
 	$(Q)awk '{ for (i = 1; i <= NF; i++) if (++n == 10) \
 	        rc = ($$i == 32 || $$i == "0x20" || $$i == "0x00000020") ? 0 : 1 } \
 	    END { exit (n >= 10 ? rc : 1) }' $(STAGE0_DEC) \
-	    || { echo "verify-eforth-stage0: bwidth cell (10th token) is not 32"; exit 1; }
+	    || { echo "check-eforth-stage0: bwidth cell (10th token) is not 32"; exit 1; }
 	$(Q)grep -Eq -- '(^|[[:space:]])(-2147483642|-0x7FFFFFFA|0x80000006)([[:space:]]|$$)' $(STAGE0_DEC) \
-	    || { echo "verify-eforth-stage0: missing 0x80000006 MUX/MOVE marker"; exit 1; }
-	$(Q)$(PRINTF) "verify-eforth-stage0: gforth 32-bit target image "; $(call notice, [OK])
+	    || { echo "check-eforth-stage0: missing 0x80000006 MUX/MOVE marker"; exit 1; }
+	$(Q)$(PRINTF) "check-eforth-stage0: gforth 32-bit target image "; $(call notice, [OK])
 
-verify-eforth-repl: $(BIN) ## Smoke-test the 32-bit-cell eForth REPL.
+check-eforth-repl: $(BIN) ## Smoke-test the 32-bit-cell eForth REPL.
 	$(Q)printf 'bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-bye.out 2>&1 \
 	    && test ! -s $(TMPDIR)/eforth-bye.out \
-	    || { echo "verify-eforth-repl: bye did not exit cleanly"; exit 1; }
+	    || { echo "check-eforth-repl: bye did not exit cleanly"; exit 1; }
 	$(Q)printf '1 2 + . bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-plus.out 2>&1 \
 	    && printf ' 3' | cmp -s - $(TMPDIR)/eforth-plus.out \
-	    || { echo "verify-eforth-repl: arithmetic smoke failed"; exit 1; }
+	    || { echo "check-eforth-repl: arithmetic smoke failed"; exit 1; }
 	$(Q)printf 'hex cell . decimal bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-cell.out 2>&1 \
 	    && printf ' 4' | cmp -s - $(TMPDIR)/eforth-cell.out \
-	    || { echo "verify-eforth-repl: cell-size smoke failed"; exit 1; }
+	    || { echo "check-eforth-repl: cell-size smoke failed"; exit 1; }
 	$(Q)printf ': maker create , does> @ . ; 9 maker x x bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-does.out 2>&1 \
 	    && printf ' 9' | cmp -s - $(TMPDIR)/eforth-does.out \
-	    || { echo "verify-eforth-repl: does> smoke failed"; exit 1; }
+	    || { echo "check-eforth-repl: does> smoke failed"; exit 1; }
 	$(Q)printf ': foo 0 do i . loop ; 3 foo bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-loop.out 2>&1 \
 	    && printf ' 0 1 2' | cmp -s - $(TMPDIR)/eforth-loop.out \
-	    || { echo "verify-eforth-repl: do/loop smoke failed"; exit 1; }
+	    || { echo "check-eforth-repl: do/loop smoke failed"; exit 1; }
 	$(Q)printf '9 . 10 . 11 . 99 . 100 . bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-number.out 2>&1 \
 	    && printf ' 9 10 11 99 100' | cmp -s - $(TMPDIR)/eforth-number.out \
-	    || { echo "verify-eforth-repl: multi-digit number smoke failed"; exit 1; }
+	    || { echo "check-eforth-repl: multi-digit number smoke failed"; exit 1; }
 	$(Q)printf '100 constant x x . bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-constant.out 2>&1 \
 	    && printf ' 100' | cmp -s - $(TMPDIR)/eforth-constant.out \
-	    || { echo "verify-eforth-repl: constant number smoke failed"; exit 1; }
+	    || { echo "check-eforth-repl: constant number smoke failed"; exit 1; }
 	$(Q)printf 'here 100 , here swap - . here cell- @ . bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-store.out 2>&1 \
 	    && printf ' 4 100' | cmp -s - $(TMPDIR)/eforth-store.out \
-	    || { echo "verify-eforth-repl: cell store smoke failed"; exit 1; }
+	    || { echo "check-eforth-repl: cell store smoke failed"; exit 1; }
 	$(Q)printf 'forth-wordlist forth-wordlist forth-wordlist forth-wordlist forth-wordlist forth-wordlist forth-wordlist forth-wordlist 8 set-order definitions : z 1 ; z . bye\n' | $(RUN) ./$(BIN) > $(TMPDIR)/eforth-order.out 2>&1 \
 	    && printf ' 1' | cmp -s - $(TMPDIR)/eforth-order.out \
-	    || { echo "verify-eforth-repl: max search-order smoke failed"; exit 1; }
-	$(Q)$(PRINTF) "verify-eforth-repl: 32-bit eForth REPL smokes "; $(call notice, [OK])
+	    || { echo "check-eforth-repl: max search-order smoke failed"; exit 1; }
+	$(Q)$(PRINTF) "check-eforth-repl: 32-bit eForth REPL smokes "; $(call notice, [OK])
 
-verify-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-range.dec ## Verify malformed image rejection.
+check-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-range.dec ## Verify malformed image rejection.
 	$(Q)for flag in -r -x -s -p; do \
 	    ! ./$(BIN) $$flag >/dev/null 2>$(TMPDIR)/loader.err \
 	        && grep -q 'unknown option' $(TMPDIR)/loader.err \
-	        || { echo "verify-loader-rejects: $$flag did not report unknown option"; exit 1; }; \
+	        || { echo "check-loader-rejects: $$flag did not report unknown option"; exit 1; }; \
 	done
 	$(Q)for f in tests/loader-bad-token.dec tests/loader-out-of-range.dec; do \
 	    ! ./$(BIN) $$f >/dev/null 2>$(TMPDIR)/loader.err \
 	        && grep -q 'bad cell' $(TMPDIR)/loader.err \
-	        || { echo "verify-loader-rejects: accepted $$f"; exit 1; }; \
+	        || { echo "check-loader-rejects: accepted $$f"; exit 1; }; \
 	done
 	$(Q)printf '6 4294967295 0 4 4 4294967295 010\n' > $(TMPDIR)/loader-dec010.dec; \
 	    ./$(BIN) $(TMPDIR)/loader-dec010.dec > $(TMPDIR)/loader.out \
 	        && printf '\n' | cmp -s - $(TMPDIR)/loader.out \
-	        || { echo "verify-loader-rejects: parsed leading-zero decimal as non-decimal"; exit 1; }
+	        || { echo "check-loader-rejects: parsed leading-zero decimal as non-decimal"; exit 1; }
 	$(Q)printf '6 4294967295 0 4 4 4294967295 0x0A\n' > $(TMPDIR)/loader-hex.dec; \
 	    ./$(BIN) $(TMPDIR)/loader-hex.dec > $(TMPDIR)/loader.out \
 	        && printf '\n' | cmp -s - $(TMPDIR)/loader.out \
-	        || { echo "verify-loader-rejects: rejected 0x-prefixed cell"; exit 1; }
+	        || { echo "check-loader-rejects: rejected 0x-prefixed cell"; exit 1; }
 	$(Q)$(MUXLEQ_CC) $(CFLAGS) -DMUX_MAX_CELLS=131072 -I$(OUT) \
 	        -o $(TMPDIR)/muxleq-small muxleq.c
 	$(Q)yes 0 | head -n 131073 > $(TMPDIR)/loader-oversized.dec; \
 	    ! $(TMPDIR)/muxleq-small $(TMPDIR)/loader-oversized.dec >/dev/null 2>$(TMPDIR)/loader.err \
 	        && grep -q 'exceeds' $(TMPDIR)/loader.err \
-	        || { echo "verify-loader-rejects: accepted oversized image"; exit 1; }
-	$(Q)$(PRINTF) "verify-loader-rejects: malformed images rejected "; $(call notice, [OK])
+	        || { echo "check-loader-rejects: accepted oversized image"; exit 1; }
+	$(Q)$(PRINTF) "check-loader-rejects: malformed images rejected "; $(call notice, [OK])
 
 # Deep on-demand wide differential fuzz for the standalone 32-bit emitter.
 # Sweeps many seeds (not just seed 1) across cycled image sizes; ~2 min. On a
 # failure it prints the exact single-program reproduce command; scale coverage
 # vs time via SEEDS/N/BODY (e.g. SEEDS=300 ~4 min, SEEDS=40 ~30 s).
-fuzz-rvopt: $(BIN) $(RVOPT) ## Differential-fuzz rvopt mux across many seeds (~2 min).
+check-fuzz-rvopt: $(BIN) $(RVOPT) ## Differential-fuzz rvopt mux across many seeds (~2 min).
 	$(Q)python3 scripts/rvopt-fuzz.py --wide --seeds $(if $(SEEDS),$(SEEDS),120) \
 	    --n $(if $(N),$(N),64) --body $(if $(BODY),$(BODY),24) --seed $(if $(SEED),$(SEED),1)
 
@@ -258,7 +287,7 @@ fuzz-rvopt: $(BIN) $(RVOPT) ## Differential-fuzz rvopt mux across many seeds (~2
 # RISC-V toolchain (riscv-none-elf-* by default; CI installs the xPack build), but
 # rvopt and muxleq build from plain C, so the toolchain is only ever needed to
 # produce the .elf inputs, never to lower or run them. "make check" therefore
-# covers RV32I either way (rv32i-auto): with the toolchain it builds from source,
+# covers RV32I either way (check-rv32i): with the toolchain it builds from source,
 # without it it fetches prebuilt .elf inputs from the rolling pre-release. Each
 # group builds into its own build/rv32i subdir so the intermediate crt0.o that
 # unopt and duremark share never collides.
@@ -335,13 +364,13 @@ rv32i-prebuilt: $(BIN) $(RVOPT) ## Run RV32I tests from the prebuilt release (no
 # Offline contract test for the prebuilt-release script: mock curl, crafted
 # tarballs, asserts the 0/1/77 exit contract. Needs no toolchain or network; the
 # pass cases additionally run when rv32i-check has populated build/rv32i.
-verify-prebuilt: $(BIN) $(RVOPT) ## Contract-test scripts/rv32i-prebuilt.sh offline.
+check-prebuilt: $(BIN) $(RVOPT) ## Contract-test scripts/rv32i-prebuilt.sh offline.
 	$(Q)RVOPT=$(abspath $(RVOPT)) MUXLEQ=$(abspath $(BIN)) tests/rv32i-prebuilt-test.sh
 
 # What "make check" uses: build+run from source when the cross toolchain is
 # present, else fall back to the prebuilt release. A machine with neither the
 # toolchain nor network skips rather than failing the gate.
-rv32i-auto: $(BIN) $(RVOPT) ## RV32I coverage: from source if toolchain present, else prebuilt.
+check-rv32i: $(BIN) $(RVOPT) ## RV32I coverage: from source if toolchain present, else prebuilt.
 	$(Q)if [ -n "$(RVCROSS)" ] && command -v $(RVCROSS)gcc >/dev/null 2>&1 \
 	    && command -v $(RVCROSS)objcopy >/dev/null 2>&1 \
 	    && command -v $(RVCROSS)as >/dev/null 2>&1 \
@@ -349,12 +378,19 @@ rv32i-auto: $(BIN) $(RVOPT) ## RV32I coverage: from source if toolchain present,
 	    if $(MAKE) -C tests/rv32i/riscv-tests upstream/.rev >/dev/null 2>&1; then \
 	        $(MAKE) rv32i-check; \
 	    else \
-	        $(PRINTF) "rv32i-auto: "; $(call notice, [SKIP: cannot fetch the riscv-tests conformance suite (offline?)]); \
+	        $(PRINTF) "check-rv32i: "; $(call notice, [SKIP: cannot fetch the riscv-tests conformance suite (offline?)]); \
 	    fi; \
 	else \
-	    $(PRINTF) "rv32i-auto: no complete $(RVCROSS) toolchain -- running the prebuilt release\n"; \
+	    $(PRINTF) "check-rv32i: no complete $(RVCROSS) toolchain -- running the prebuilt release\n"; \
 	    $(MAKE) rv32i-prebuilt; \
 	fi
+
+# RV32I RTOS-on-muxleq smokes: freestanding demos, CSR/timer tests, and the
+# cooperative kernel. SKIPs cleanly without the cross toolchain (rvopt/muxleq
+# build from C; only the .elf inputs need the assembler), so it is safe in check.
+check-rtos: $(BIN) $(RVOPT) ## RV32I RTOS checks (CSR, timer, cooperative + preemptive kernel).
+	$(Q)CROSS=$(RVCROSS) RVOPT=$(abspath $(RVOPT)) MUXLEQ=$(abspath $(BIN)) \
+	    scripts/rtos-check.sh
 
 # Benchmarks. "bench-*" targets are benchmark actions: they measure wall-clock
 # throughput and are deliberately NOT part of "make check" (which gates
@@ -367,7 +403,7 @@ TIME_P := $(shell command -v /usr/bin/time >/dev/null 2>&1 && echo "/usr/bin/tim
 # kernel types: prng (16-bit xorshift PRNG), sieve (Sieve of Eratosthenes),
 # fibonacci (recursion), sqrt (integer square root), crc (CRC-16), chacha20
 # (stream cipher), multiply (um* multiplication). Correctness is pinned by
-# "make golden"; here they are only timed, so stdout is discarded and just the
+# "make check-golden"; here they are only timed, so stdout is discarded and just the
 # per-kernel real/user/sys (from /usr/bin/time -p, on stderr) shows.
 BENCH_FORTH_FILES := prng sieve fibonacci sqrt crc chacha20 multiply
 bench-forth: $(BIN) ## Benchmark the eForth compute kernels (timed).
@@ -477,11 +513,11 @@ RUN_TIMEOUT ?= 60
 RUN = $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT))
 GOLDEN_RUN = $(RUN) ./$(BIN)
 
-golden: $(BIN) ## Run byte-exact 32-bit golden output tests.
+check-golden: $(BIN) ## Run byte-exact 32-bit golden output tests.
 	$(Q)test -n "$(TIMEOUT)" || $(PRINTF) \
-	    "golden: WARNING: no timeout(1)/gtimeout; a hung test will not be bounded\n"
+	    "check-golden: WARNING: no timeout(1)/gtimeout; a hung test will not be bounded\n"
 	$(Q)$(foreach t,$(GOLDEN_FILES),\
-	    $(PRINTF) "golden $(t) ... "; \
+	    $(PRINTF) "check-golden $(t) ... "; \
 	    if $(GOLDEN_RUN) < tests/$(t).fth > $(TMPDIR)/golden.out 2>/dev/null \
 	        && cmp -s tests/expected/$(t).out $(TMPDIR)/golden.out; \
 	    then $(call notice, [OK]); \
@@ -489,15 +525,15 @@ golden: $(BIN) ## Run byte-exact 32-bit golden output tests.
 	    fi; \
 	)
 
-golden-see: $(BIN) tests/expected/see.out ## Check the address-normalized `see` decompiler output.
+check-golden-see: $(BIN) tests/expected/see.out ## Check the address-normalized `see` decompiler output.
 	$(Q)if $(GOLDEN_RUN) < tests/see.fth > $(TMPDIR)/see.raw 2>/dev/null \
 	    && sed -E 's/^ *[0-9]+ [|]/# |/; s/[0-9]+/#/g' $(TMPDIR)/see.raw > $(TMPDIR)/see.out \
 	    && cmp -s tests/expected/see.out $(TMPDIR)/see.out; \
 	then :; \
 	else \
-	    echo "golden-see: decompiler output drift or VM error (see tests/see.fth)"; exit 1; \
+	    echo "check-golden-see: decompiler output drift or VM error (see tests/see.fth)"; exit 1; \
 	fi
-	$(Q)$(PRINTF) "golden-see: normalized decompiler output "; $(call notice, [OK])
+	$(Q)$(PRINTF) "check-golden-see: normalized decompiler output "; $(call notice, [OK])
 
 # Keystrokes for the pty editor tests: go to block 5, blank it, arrow-down one
 # row (this is the only path that drives the normal-mode ESC/arrow timed-peek --
@@ -506,27 +542,27 @@ golden-see: $(BIN) tests/expected/see.out ## Check the address-normalized `see` 
 # recipe line only exits that line's subshell, so the whole target is one shell.
 EDITOR_KEYS := editor\r:5\r:z\033[BiHELLO ED\033:5\r
 
-golden-pty: $(BIN) tests/expected/editor-pty.out ## PTY-driven modal editor screen golden.
+check-golden-pty: $(BIN) tests/expected/editor-pty.out ## PTY-driven modal editor screen golden.
 	$(Q)if ! command -v python3 >/dev/null 2>&1; then \
-	    $(PRINTF) "golden-pty: python3 absent, skipping\n"; \
+	    $(PRINTF) "check-golden-pty: python3 absent, skipping\n"; \
 	else \
 	    printf '$(EDITOR_KEYS)' | python3 scripts/pty-run.py ./$(BIN) > $(TMPDIR)/editor-pty.out; rc=$$?; \
-	    if [ $$rc -eq 77 ]; then $(PRINTF) "golden-pty: no pty available, skipping\n"; \
-	    elif [ $$rc -ne 0 ]; then echo "golden-pty: harness failed (rc=$$rc)"; exit 1; \
+	    if [ $$rc -eq 77 ]; then $(PRINTF) "check-golden-pty: no pty available, skipping\n"; \
+	    elif [ $$rc -ne 0 ]; then echo "check-golden-pty: harness failed (rc=$$rc)"; exit 1; \
 	    elif cmp -s tests/expected/editor-pty.out $(TMPDIR)/editor-pty.out; then \
-	        $(PRINTF) "golden-pty: modal editor screen "; $(call notice, [OK]); \
-	    else echo "golden-pty: modal editor screen drift (see scripts/pty-run.py)"; exit 1; fi; \
+	        $(PRINTF) "check-golden-pty: modal editor screen "; $(call notice, [OK]); \
+	    else echo "check-golden-pty: modal editor screen drift (see scripts/pty-run.py)"; exit 1; fi; \
 	fi
 
-golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mandelbrot prefix.
-	$(Q)test -n "$(TIMEOUT)" || { echo "golden-mandel: timeout(1)/gtimeout required"; exit 1; }
-	$(Q)command -v stdbuf >/dev/null 2>&1 || { echo "golden-mandel: stdbuf required for killed-run stdout"; exit 1; }
+check-golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mandelbrot prefix.
+	$(Q)test -n "$(TIMEOUT)" || { echo "check-golden-mandel: timeout(1)/gtimeout required"; exit 1; }
+	$(Q)command -v stdbuf >/dev/null 2>&1 || { echo "check-golden-mandel: stdbuf required for killed-run stdout"; exit 1; }
 	$(Q)bytes=$$(wc -c < tests/expected/mandel-prefix.out); \
 	    $(TIMEOUT) $(if $(TIMEOUT),$(RUN_TIMEOUT)) stdbuf -o0 ./$(BIN) < tests/mandel.fth 2>/dev/null \
 	        | tr -d '\r' | head -c $$bytes > $(TMPDIR)/mandel-prefix.out; \
 	    cmp -s tests/expected/mandel-prefix.out $(TMPDIR)/mandel-prefix.out \
-	        || { echo "golden-mandel: prefix drift"; exit 1; }
-	$(Q)$(PRINTF) "golden-mandel: bounded mandel prefix "; $(call notice, [OK])
+	        || { echo "check-golden-mandel: prefix drift"; exit 1; }
+	$(Q)$(PRINTF) "check-golden-mandel: bounded mandel prefix "; $(call notice, [OK])
 
 # Showcase: the baked eForth interprets a raytracer that streams one
 # deterministic 64x32 frame to a real RGB888 PNG on stdout (svpng stored-block
@@ -534,28 +570,28 @@ golden-mandel: $(BIN) tests/expected/mandel-prefix.out ## Check the bounded Mand
 # runs and machines. Standalone, not in `check`: one frame is a few minutes of
 # pure-eForth interpretation. Binary compare with no tr/head filtering.
 RAYTRACE_TIMEOUT ?= 600
-golden-raytracer: $(BIN) tests/expected/raytracer.png ## Byte-exact 64x32 eForth raytracer PNG.
+check-golden-raytracer: $(BIN) tests/expected/raytracer.png ## Byte-exact 64x32 eForth raytracer PNG.
 	$(Q)test -n "$(TIMEOUT)" || $(PRINTF) \
-	    "golden-raytracer: WARNING: no timeout(1)/gtimeout; a hung render will not be bounded\n"
+	    "check-golden-raytracer: WARNING: no timeout(1)/gtimeout; a hung render will not be bounded\n"
 	$(Q)if $(TIMEOUT) $(if $(TIMEOUT),$(RAYTRACE_TIMEOUT)) ./$(BIN) < tests/raytracer.fth \
 	        > $(TMPDIR)/raytracer.png 2>/dev/null \
 	        && cmp -s tests/expected/raytracer.png $(TMPDIR)/raytracer.png; \
-	    then :; else echo "golden-raytracer: PNG drift or VM error (see tests/raytracer.fth)"; exit 1; fi
-	$(Q)$(PRINTF) "golden-raytracer: 64x32 RGB888 PNG "; $(call notice, [OK])
+	    then :; else echo "check-golden-raytracer: PNG drift or VM error (see tests/raytracer.fth)"; exit 1; fi
+	$(Q)$(PRINTF) "check-golden-raytracer: 64x32 RGB888 PNG "; $(call notice, [OK])
 # The pre-commit gate: byte-exact 32-bit golden diff, pty editor screen, 32-bit
-# image sanity smokes, and the 32-bit self-hosting proof.
-check: golden golden-see golden-pty verify-eforth-stage0 verify-eforth-repl bootstrap rv32i-auto ## Run the fast pre-commit gate.
+# image sanity smokes, the 32-bit self-hosting proof, and RV32I coverage.
+check: check-golden check-golden-see check-golden-pty check-eforth-stage0 check-eforth-repl check-bootstrap check-rv32i check-rtos ## Run the fast pre-commit gate.
 
 # Deep pre-release gate: the standard check plus wide native-image fuzz,
 # loader rejection, the prebuilt-script contract test, and ASan+UBSan.
-check-all: check verify-mux verify-loader-rejects verify-prebuilt sanitize ## Run deep validation.
+check-all: check check-mux check-loader-rejects check-prebuilt check-fuzz-rvopt check-sanitize ## Run deep validation.
 
 # bootstrapping
-bootstrap: $(STAGE0_DEC) $(STAGE1_DEC) ## Prove self-host bootstrap is byte-exact.
+check-bootstrap: $(STAGE0_DEC) $(STAGE1_DEC) ## Prove self-host bootstrap is byte-exact.
 	$(Q)if diff $(STAGE0_DEC) $(STAGE1_DEC); then \
-	    $(PRINTF) "bootstrap: self-host image byte-exact "; $(call notice, [OK]); \
+	    $(PRINTF) "check-bootstrap: self-host image byte-exact "; $(call notice, [OK]); \
 	else \
-	    $(PRINTF) "bootstrap: self-host image NOT byte-exact -- aborting\n"; \
+	    $(PRINTF) "check-bootstrap: self-host image NOT byte-exact -- aborting\n"; \
 	    exit 1; \
 	fi
 
@@ -571,9 +607,9 @@ TMPDIR := $(shell mktemp -d)
 SANFLAGS := -O2 -std=c99 -fsanitize=address,undefined -fno-sanitize-recover=all -g
 SAN_RUN = ASAN_OPTIONS=detect_leaks=0 $(TIMEOUT) $(if $(TIMEOUT),120) $(TMPDIR)/muxleq.san
 SANITIZE_FILES := tasker sieve collatz does eof recurse
-sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec ## Run ASan/UBSan validation.
+check-sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec ## Run ASan/UBSan validation.
 	$(Q)$(MUXLEQ_CC) $(SANFLAGS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
-	$(Q)$(PRINTF) "sanitize editor (pty) ... "; \
+	$(Q)$(PRINTF) "check-sanitize editor (pty) ... "; \
 	    if ! command -v python3 >/dev/null 2>&1; then $(PRINTF) "[SKIP: no python3]\n"; \
 	    else \
 	        printf '$(EDITOR_KEYS)' | PTY_RUN_STDERR=1 ASAN_OPTIONS=detect_leaks=0 \
@@ -583,13 +619,13 @@ sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-ou
 	        else $(PRINTF) "SANITIZER ERROR or harness failure\n"; cat $(TMPDIR)/san.err; exit 1; fi; \
 	    fi
 	$(Q)$(foreach t,$(SANITIZE_FILES),\
-	    $(PRINTF) "sanitize $(t) ... "; \
+	    $(PRINTF) "check-sanitize $(t) ... "; \
 	    if $(SAN_RUN) < tests/$(t).fth >/dev/null 2>$(TMPDIR)/san.err; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "SANITIZER ERROR or timeout\n"; cat $(TMPDIR)/san.err; exit 1; \
 	    fi; \
 	)
-	$(Q)$(PRINTF) "sanitize loader rejects ... "; \
+	$(Q)$(PRINTF) "check-sanitize loader rejects ... "; \
 	    ! $(SAN_RUN) tests/loader-bad-token.dec >/dev/null 2>$(TMPDIR)/san.err \
 	        && grep -q 'bad cell' $(TMPDIR)/san.err \
 	        && ! grep -Eq 'ERROR: AddressSanitizer|runtime error:' $(TMPDIR)/san.err \
@@ -599,15 +635,15 @@ sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-ou
 	        || { $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; }; \
 	    $(call notice, [OK])
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
-	    $(PRINTF) "sanitize high-address image ... "; \
+	    $(PRINTF) "check-sanitize high-address image ... "; \
 	    if python3 scripts/gen-mux-high-image.py > $(TMPDIR)/mux-high.dec \
 	        && $(SAN_RUN) $(TMPDIR)/mux-high.dec > $(TMPDIR)/mux-high.out 2>$(TMPDIR)/san.err \
 	        && printf K | cmp -s - $(TMPDIR)/mux-high.out; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; fi; \
-	else $(PRINTF) "sanitize high-address image ... [SKIP: no python3]\n"; fi
+	else $(PRINTF) "check-sanitize high-address image ... [SKIP: no python3]\n"; fi
 	$(Q)$(CC) $(SANFLAGS) -o $(TMPDIR)/rvopt.san rvopt.c
-	$(Q)$(PRINTF) "sanitize rvopt dump|check IR round-trip ... "; \
+	$(Q)$(PRINTF) "check-sanitize rvopt dump|check IR round-trip ... "; \
 	    printf '\023\000\000\000\023\000\000\000\023\000\000\000\163\000\000\000' > $(TMPDIR)/rt.bin; \
 	    if $(TMPDIR)/rvopt.san dump $(TMPDIR)/rt.bin > $(TMPDIR)/rt.ir 2>$(TMPDIR)/san.err \
 	        && $(TMPDIR)/rvopt.san check - < $(TMPDIR)/rt.ir >/dev/null 2>>$(TMPDIR)/san.err \
@@ -615,13 +651,13 @@ sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-ou
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "SANITIZER ERROR or dump|check round-trip failed\n"; cat $(TMPDIR)/san.err; exit 1; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
-	    $(PRINTF) "sanitize rvopt mux emit fuzz (wide backend: SMC patch, write loop, shift loops) ... "; \
+	    $(PRINTF) "check-sanitize rvopt mux emit fuzz (wide backend: SMC patch, write loop, shift loops) ... "; \
 	    if python3 scripts/rvopt-fuzz.py --wide --rvopt $(TMPDIR)/rvopt.san --n 25 --body 14 --seed 1 \
 	        >/dev/null 2>$(TMPDIR)/san.err; \
 	    then $(call notice, [OK]); \
 	    else $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; \
 	    fi; \
-	else $(PRINTF) "sanitize rvopt emit fuzz: python3 absent, skipping\n"; fi
+	else $(PRINTF) "check-sanitize rvopt emit fuzz: python3 absent, skipping\n"; fi
 
 clean: ## Remove built binaries.
 	$(RM) $(BIN) $(RVOPT)
