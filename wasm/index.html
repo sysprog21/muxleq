@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eForth on MUXLEQ</title>
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<div class="wrapper">
+
+<header>
+  <h1>eForth on MUXLEQ</h1>
+  <p>A Forth tutorial you can type into, running a real eForth on a
+     two-instruction virtual machine compiled to WebAssembly.</p>
+  <p>Adapted from <a href="https://github.com/ruv/easyforth">Easy Forth</a> by
+     Nick Morgan, with fixes by ruv.</p>
+</header>
+
+<div class="toc">
+  <ol>
+    <li><a href="#intro">What you are looking at</a></li>
+    <li><a href="#stack">The stack</a></li>
+    <li><a href="#shuffling">Shuffling the stack</a></li>
+    <li><a href="#words">Defining words</a></li>
+    <li><a href="#printing">Printing</a></li>
+    <li><a href="#conditionals">Conditionals</a></li>
+    <li><a href="#loops">Loops</a></li>
+    <li><a href="#memory">Variables and memory</a></li>
+    <li><a href="#graphics">Drawing</a></li>
+    <li><a href="#snake">A game</a></li>
+    <li><a href="#underneath">Underneath: two instructions</a></li>
+  </ol>
+</div>
+
+<h2 id="intro">What you are looking at</h2>
+
+<p>Forth is a language with almost no syntax. There are no expressions, no
+operator precedence, and barely any keywords. There is a stack, and there are
+words that do things to it. That is nearly the whole language, which is why it
+fits on machines that have no business running a language at all.</p>
+
+<p>The machine underneath this page is one of those. MUXLEQ is a
+one-instruction computer: memory is an array of 32-bit cells, and the only thing
+it can do is subtract one cell from another and branch if the result went
+non-positive. A second form of the same instruction copies bits through a mask.
+That is the entire instruction set, and an eForth system is built on top of
+it.</p>
+
+<p>The interpreter you are about to type into is the same C program that runs
+from a terminal, compiled to WebAssembly, running the same eForth image. It is
+about 27 KB of WebAssembly and it imports nothing from the browser. This is not a
+Forth-flavoured toy written in JavaScript: when a word misbehaves here it
+misbehaves the same way on the command line.</p>
+
+<p>Every editor on this page gets its own machine. A word you define in one does
+not exist in the next, so you can experiment freely. The <code>reset</code>
+button gives you a fresh machine if you get one wedged.</p>
+
+<p>The row of boxes across the top of each editor is the data stack, one box per
+cell, bottom of the stack on the left and the top marked. Three things about it
+are worth knowing before you start:</p>
+
+<ul>
+<li>Whatever your last line pushed comes up highlighted, so you can see what a
+    word did rather than work it out.</li>
+<li>To the right, that change is reported as a stack effect:
+    <code>( 3 4 -- 7 )</code>. It is computed from the before and after states
+    rather than written by anyone, so it is the real effect of what you ran.</li>
+<li>Click any box to see the other readings of those 32 bits: signed, unsigned,
+    hex, binary, and the character if it is one. This is the quickest way to see
+    why true is <code>-1</code> here.</li>
+</ul>
+
+<p>There is also a <code>step</code> tickbox. With it on, a line is fed to the
+interpreter one word at a time, with a pause between, so the stack walks through
+its intermediate states instead of jumping to the answer. It is the paper
+illustration from
+<a href="https://www.forth.com/starting-forth/1-forth-stacks-dictionary/">Starting
+Forth</a>, run live on your own code. Lines containing a string, a comment, or a
+definition are run whole, because feeding those a word at a time would change
+what they mean.</p>
+
+<h2 id="stack">The stack</h2>
+
+<p>Anything you type that looks like a number gets pushed onto the stack.
+Type these three lines into the editor below, pressing Enter after each one.
+(Type them, do not paste them; the point is to watch the stack.)</p>
+
+<pre><code>1
+2
+3</code></pre>
+
+<div class="editor"></div>
+
+<p>The stack viewer at the top should now read:</p>
+
+<div class="stack">1 2 3</div>
+
+<p>Now type a single <code>+</code> and press Enter. The top two values, 2 and 3,
+are replaced by 5, and the viewer reports the effect as
+<code>( 2 3 -- 5 )</code>:</p>
+
+<div class="stack">1 5</div>
+
+<p>Type <code>+</code> again and you get 6. Type it a third time and there is
+only one value left for a word that wants two, so eForth complains:</p>
+
+<div class="transcript-preview">+  <span class="output"> -4?</span></div>
+
+<p>That <code>-4</code> is a throw code, and <code>-4</code> means stack
+underflow. Real Forth systems report errors as numbers, not sentences. Four of
+them account for almost everything you will hit:</p>
+
+<table>
+<tr><th>Code</th><th>Means</th></tr>
+<tr><td><code>-4</code></td><td>stack underflow: a word wanted more than was there</td></tr>
+<tr><td><code>-10</code></td><td>division by zero</td></tr>
+<tr><td><code>-13</code></td><td>undefined word</td></tr>
+<tr><td><code>-14</code></td><td>a compile-only word used outside a definition</td></tr>
+</table>
+
+<p>The two you will see most are worth telling apart at a glance.
+<code>-13</code> prints the word it could not find first, as in
+<code>zzz? -13?</code>, so a typo names itself. <code>-14</code> prints no word,
+because the word exists and was simply used in the wrong place.</p>
+
+<p>Worth noticing: after an underflow the stack viewer shows values you never
+put there. eForth does not clear the stack when a word fails, so what you see is
+the memory the stack pointer is now sitting over. This is not the tutorial being
+sloppy, it is what the system actually does. Press <code>reset</code> when you
+want a clean one.</p>
+
+<p>You do not have to type one thing per line. Try this:</p>
+
+<pre><code>123 456 +</code></pre>
+
+<div class="editor" data-size="small"></div>
+
+<p>The operator comes after its operands, which is called reverse Polish
+notation. It means the order you write things in is the order they happen, so
+there is nothing for parentheses to disambiguate. To compute
+<code>10 * (5 + 2)</code>:</p>
+
+<pre><code>5 2 + 10 *</code></pre>
+
+<div class="editor" data-size="small"></div>
+
+<p><code>.</code> (pronounced "dot") pops the top value and prints it. Try
+<code>5 2 + 10 * .</code> and watch the stack end up empty.</p>
+
+<h3>Stack effects</h3>
+
+<p>Forth code is commented with stack effect diagrams of the form
+<code>( before -- after )</code>, with the top of the stack on the right. This
+is the same notation the viewer uses to report what your line did, and the same
+order the boxes are drawn in. Here is <code>+</code>, whose effect is
+<code>( n1 n2 -- sum )</code>, applied to a stack of three:</p>
+
+<figure class="effect">
+  <div class="effect-row">
+    <div class="effect-side">
+      <div class="effect-label">before</div>
+      <div class="stack">1 2 3</div>
+    </div>
+    <div class="effect-arrow"><code>+</code></div>
+    <div class="effect-side">
+      <div class="effect-label">after</div>
+      <div class="stack" data-same="1">1 5</div>
+    </div>
+  </div>
+  <figcaption>The two boxes the notation names are the two on the right. The
+  highlighted box is what the word produced, the same highlight the live viewer
+  uses when you run a line.</figcaption>
+</figure>
+
+<p>Two things are worth reading off that picture. The rightmost name in the
+notation is the top of the stack, so <code>n2</code> is 3, not 1. And the
+notation mentions only what the word touches: the 1 at the bottom is absent
+from <code>( n1 n2 -- sum )</code> because <code>+</code> never sees it. A word
+with a two-item effect behaves the same whether the stack is two deep or two
+hundred.</p>
+
+<p>The arithmetic words all follow this pattern:</p>
+
+<table>
+<tr><th>Word</th><th>Effect</th><th>Does</th></tr>
+<tr><td><code>+</code></td><td><code>( n1 n2 -- sum )</code></td><td>adds</td></tr>
+<tr><td><code>-</code></td><td><code>( n1 n2 -- diff )</code></td><td>subtracts n2 from n1</td></tr>
+<tr><td><code>*</code></td><td><code>( n1 n2 -- prod )</code></td><td>multiplies</td></tr>
+<tr><td><code>/</code></td><td><code>( n1 n2 -- quot )</code></td><td>divides n1 by n2</td></tr>
+<tr><td><code>mod</code></td><td><code>( n1 n2 -- rem )</code></td><td>remainder</td></tr>
+<tr><td><code>/mod</code></td><td><code>( n1 n2 -- rem quot )</code></td><td>both at once</td></tr>
+<tr><td><code>abs</code></td><td><code>( n -- u )</code></td><td>absolute value</td></tr>
+<tr><td><code>min</code></td><td><code>( n1 n2 -- n )</code></td><td>smaller of the two</td></tr>
+<tr><td><code>max</code></td><td><code>( n1 n2 -- n )</code></td><td>larger of the two</td></tr>
+</table>
+
+<p>Anything in parentheses is a comment, and so is everything after
+<code>\</code> to the end of the line. Note that <code>(</code> is a word like
+any other, so it needs a space after it.</p>
+
+<p><code>/mod</code> is the row to look at twice. It takes two and leaves two,
+and which one ends up on top is the part everybody misremembers.
+<code>17 5 /mod</code> gives a remainder of 2 and a quotient of 3, remainder
+underneath:</p>
+
+<figure class="effect">
+  <div class="effect-row">
+    <div class="effect-side">
+      <div class="effect-label">before</div>
+      <div class="stack">17 5</div>
+    </div>
+    <div class="effect-arrow"><code>/mod</code></div>
+    <div class="effect-side">
+      <div class="effect-label">after</div>
+      <div class="stack" data-same="0">2 3</div>
+    </div>
+  </div>
+  <figcaption><code>( n1 n2 -- rem quot )</code>. Both boxes are new, so both
+  are highlighted, and the quotient is the one marked <em>top</em>.</figcaption>
+</figure>
+
+<p>One thing the table cannot say in a single word: division here is
+<em>floored</em>, not truncated toward zero, and the sign of <code>mod</code>
+follows the divisor rather than the dividend. Coming from C that is a genuine
+trap. <code>-7 2 /</code> is <code>-4</code>, not the <code>-3</code> you may be
+expecting, and <code>-7 2 mod</code> is <code>1</code>, not <code>-1</code>.
+Dividing by zero throws <code>-10</code>.</p>
+
+<p>Type these and watch the viewer report each effect back to you:</p>
+
+<pre><code>17 5 /mod
+-7 2 /
+-7 2 mod</code></pre>
+
+<div class="editor" data-size="small"></div>
+
+<h2 id="shuffling">Shuffling the stack</h2>
+
+<p>Since the stack is the only place to put things, Forth has words whose whole
+job is rearranging it.</p>
+
+<table>
+<tr><th>Word</th><th>Effect</th></tr>
+<tr><td><code>dup</code></td><td><code>( n -- n n )</code></td></tr>
+<tr><td><code>drop</code></td><td><code>( n -- )</code></td></tr>
+<tr><td><code>swap</code></td><td><code>( n1 n2 -- n2 n1 )</code></td></tr>
+<tr><td><code>over</code></td><td><code>( n1 n2 -- n1 n2 n1 )</code></td></tr>
+<tr><td><code>rot</code></td><td><code>( n1 n2 n3 -- n2 n3 n1 )</code></td></tr>
+<tr><td><code>nip</code></td><td><code>( n1 n2 -- n2 )</code></td></tr>
+<tr><td><code>tuck</code></td><td><code>( n1 n2 -- n2 n1 n2 )</code></td></tr>
+<tr><td><code>2dup</code></td><td><code>( n1 n2 -- n1 n2 n1 n2 )</code></td></tr>
+<tr><td><code>?dup</code></td><td><code>( n -- n n | 0 )</code> duplicates unless zero</td></tr>
+<tr><td><code>depth</code></td><td><code>( -- n )</code> how many items are on the stack</td></tr>
+</table>
+
+<p>Try each of them and watch the viewer. <code>1 2 3 rot</code> is a good one
+to stare at, and a good one to turn <code>step</code> on for: fed a word at a
+time you see the three values go on before <code>rot</code> moves them.</p>
+
+<div class="editor" data-size="small"></div>
+
+<p><code>.s</code> prints the whole stack without disturbing it, which is what
+the viewer at the top of each editor is quietly calling for you.</p>
+
+<h2 id="words">Defining words</h2>
+
+<p>A new word is defined with <code>:</code>, a name, a body, and
+<code>;</code>. This is the entire mechanism; there are no functions,
+procedures, or methods, only words.</p>
+
+<pre><code>: square dup * ;
+5 square .</code></pre>
+
+<div class="editor"></div>
+
+<p>Definitions can use words you defined a moment ago, which is how Forth
+programs are usually built: a lot of very small words, each doing one thing,
+stacked into slightly larger ones.</p>
+
+<pre><code>: cube dup square * ;
+3 cube .</code></pre>
+
+<p>A definition can span several lines. Nothing happens until you type the
+closing <code>;</code>, and you will notice the stack viewer stays quiet in the
+meantime, because the words are being compiled rather than run:</p>
+
+<pre><code>: average
+  + 2 /
+;
+10 20 average .</code></pre>
+
+<div class="editor"></div>
+
+<p>Redefining a name is allowed. The old definition is not deleted, and anything
+already compiled against it keeps using the old one; new code picks up the new
+one. Try defining <code>square</code> twice and calling <code>cube</code>.</p>
+
+<p>Type <code>words</code> in any editor to see everything the system knows.
+There are several hundred, all of them built out of the same two machine
+instructions.</p>
+
+<h2 id="printing">Printing</h2>
+
+<p>Printing a string uses <code>."</code>, which reads up to the closing quote.
+Note the space after <code>."</code>: it is a word, not punctuation.</p>
+
+<pre><code>: hello ." Hello, world!" cr ;
+hello</code></pre>
+
+<div class="editor" data-size="small"></div>
+
+<p><code>."</code> only works inside a definition. If you want to print
+something right now, at the interpreter, use <code>.(</code> instead:</p>
+
+<pre><code>.( printed immediately) cr</code></pre>
+
+<p>This split catches people out, so it is worth knowing the general rule:
+words that need to compile something into a definition are marked compile-only,
+and using one at the interpreter gets you throw code <code>-14</code>. The loop
+words in the next section are the same.</p>
+
+<table>
+<tr><th>Word</th><th>Does</th></tr>
+<tr><td><code>cr</code></td><td>start a new line</td></tr>
+<tr><td><code>space</code></td><td>print one space</td></tr>
+<tr><td><code>spaces</code></td><td><code>( n -- )</code> print n spaces</td></tr>
+<tr><td><code>emit</code></td><td><code>( c -- )</code> print one character by code</td></tr>
+<tr><td><code>.</code></td><td><code>( n -- )</code> print a number</td></tr>
+<tr><td><code>.s</code></td><td>print the stack</td></tr>
+</table>
+
+<pre><code>: shout 33 emit 33 emit 33 emit cr ;
+shout</code></pre>
+
+<div class="editor" data-size="small"></div>
+
+<h2 id="conditionals">Conditionals</h2>
+
+<p>A conditional pops a flag and runs one branch or the other. The shape is
+<code>if ... then</code>, or <code>if ... else ... then</code>. Read
+<code>then</code> as "and then continue", not as the <code>then</code> of other
+languages; it marks the end of the conditional.</p>
+
+<p>Zero is false and any non-zero value is true. The comparison words leave
+<code>0</code> or <code>-1</code>:</p>
+
+<table>
+<tr><th>Word</th><th>Effect</th></tr>
+<tr><td><code>=</code> <code>&lt;&gt;</code></td><td><code>( n1 n2 -- flag )</code> equal, not equal</td></tr>
+<tr><td><code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code></td><td><code>( n1 n2 -- flag )</code> signed comparison</td></tr>
+<tr><td><code>0=</code> <code>0&lt;</code> <code>0&gt;</code></td><td><code>( n -- flag )</code> compare against zero</td></tr>
+<tr><td><code>and</code> <code>or</code> <code>xor</code> <code>invert</code></td><td>bitwise, which on <code>0</code>/<code>-1</code> flags is also logical</td></tr>
+</table>
+
+<pre><code>: sign ( n -- )
+  dup 0&lt; if ." negative" else
+  0&gt; if ." positive" else
+  ." zero" then then cr ;
+-3 sign
+7 sign
+0 sign</code></pre>
+
+<div class="editor"></div>
+
+<p>Note that <code>-1</code> is used for true rather than <code>1</code>,
+because <code>-1</code> is all bits set, which makes <code>and</code> and
+<code>or</code> work as logical operators without any conversion.</p>
+
+<h2 id="loops">Loops</h2>
+
+<p>All of these are compile-only, so they must live inside a definition.</p>
+
+<h3>Counted loops</h3>
+
+<p><code>do ... loop</code> takes a limit and a starting index, and
+<code>i</code> gives the current index:</p>
+
+<pre><code>: count-up 10 0 do i . loop cr ;
+count-up</code></pre>
+
+<div class="editor" data-size="small"></div>
+
+<p>The limit is exclusive, so <code>10 0 do</code> runs with <code>i</code> from
+0 to 9. <code>+loop</code> takes a step off the stack instead of adding one, and
+<code>j</code> gives the index of the enclosing loop:</p>
+
+<pre><code>: evens 10 0 do i . 2 +loop cr ;
+evens
+: times-table
+  4 1 do
+    4 1 do j i * . loop
+    cr
+  loop ;
+times-table</code></pre>
+
+<div class="editor"></div>
+
+<h3>Counting down</h3>
+
+<p>eForth also has <code>for ... next</code>, which is cheaper and counts down.
+<code>n for</code> runs the body n+1 times with <code>r@</code> going from n
+down to 0:</p>
+
+<pre><code>: countdown 5 for r@ . next cr ;
+countdown</code></pre>
+
+<h3>Conditional loops</h3>
+
+<p><code>begin ... until</code> repeats until the flag on top is true, and
+<code>begin ... while ... repeat</code> tests before each pass:</p>
+
+<pre><code>: double-up 1 begin 2* dup . dup 1000 &gt; until drop cr ;
+double-up</code></pre>
+
+<div class="editor" data-size="small"></div>
+
+<h2 id="memory">Variables and memory</h2>
+
+<p><code>variable</code> creates a name that pushes an address.
+<code>!</code> stores, <code>@</code> fetches, and <code>+!</code> adds in
+place.</p>
+
+<pre><code>variable total
+0 total !
+5 total +!
+7 total +!
+total @ .</code></pre>
+
+<div class="editor"></div>
+
+<p><code>constant</code> makes a name that pushes a fixed value, with no address
+involved:</p>
+
+<pre><code>42 constant answer
+answer .</code></pre>
+
+<p>For a block of memory, <code>create</code> names an address and
+<code>allot</code> reserves space after it. Here is where the machine shows
+through: eForth counts addresses in bytes, but every cell is 32 bits wide, so
+<code>cells</code> converts a count of cells into the byte offset you need.</p>
+
+<pre><code>create scores 10 cells allot
+100 scores !
+200 scores 1 cells + !
+scores @ .
+scores 1 cells + @ .</code></pre>
+
+<div class="editor"></div>
+
+<p><code>here</code> pushes the address of the next free byte, so
+<code>here .</code> tells you how much of the image the dictionary has used so
+far. Watch it move as you define words.</p>
+
+<h2 id="graphics">Drawing</h2>
+
+<p>The editor below has a 24 by 24 display next to it. The display is not a
+device: it is 576 consecutive cells of ordinary Forth memory, and this page
+paints whatever colour numbers it finds in them. <code>graphics</code> pushes
+the address of the first cell. Cell 0 is the top left corner, and the rows run
+left to right.</p>
+
+<p>Colour 0 is the background and 1 through 15 are colours. Storing into a cell
+is all it takes:</p>
+
+<pre><code>: plot ( colour x y -- ) 24 * + cells graphics + ! ;
+3 5 5 plot</code></pre>
+
+<div class="editor" data-canvas></div>
+
+<p>Everything else is ordinary Forth. A horizontal line is a loop over
+<code>plot</code>, filling the screen is a loop over that, and a colour ramp is
+two nested loops:</p>
+
+<pre><code>: hline ( colour y -- ) 24 0 do 2dup i swap plot loop 2drop ;
+: flood ( colour -- ) 24 0 do dup i hline loop drop ;
+4 flood
+: ramp 24 0 do 24 0 do j i + 15 and i j plot loop loop ;
+ramp</code></pre>
+
+<p>Two extra words are set up for you in every editor, because a drawing
+program wants them and stock eForth has neither. <code>random</code> takes a
+limit and leaves a value below it, and <code>ekey</code> reads a keystroke
+without waiting: it gives you the character code, or <code>0</code> if nobody
+has pressed anything.</p>
+
+<pre><code>: sprinkle 200 0 do 15 random 1+ 24 random 24 random plot loop ;
+sprinkle</code></pre>
+
+<p>While a program of yours is running, everything you type goes to it rather
+than to the interpreter. The arrow keys arrive as codes
+<code>$80</code> through <code>$83</code>, left, up, right, down.</p>
+
+<blockquote>Numbers in hexadecimal are written with a <code>$</code> prefix, and
+the digits above 9 must be capitals: <code>$FF</code> works,
+<code>$ff</code> does not.</blockquote>
+
+<h2 id="snake">A game</h2>
+
+<p>Everything above is enough to write a game. The editor below has already
+loaded <a href="snake.fth">snake.fth</a>: type <code>play</code> and steer with
+the arrow keys.</p>
+
+<div class="editor" data-canvas data-src="snake.fth"></div>
+
+<p>The whole game is stores into that block of memory. There is no drawing API,
+no event loop, and no frame callback. <code>play</code> is a
+<code>begin ... until</code> loop that redraws, waits with <code>ms</code>,
+checks <code>ekey</code>, moves the snake, and asks whether the cell the head
+just moved into was already occupied:</p>
+
+<pre class="pseudo"><code>: play ( -- )
+  setup
+  begin
+    show-snake show-apple
+    30 ms
+    ekey ?dup if turn then
+    shift-body move-head
+    eat?
+    crashed?
+  until
+  ." game over" cr ;</code></pre>
+
+<p>Read the rest of <a href="snake.fth">snake.fth</a>, then change it. The
+snake's body is two parallel arrays of coordinates, so making the board wrap
+around instead of killing you is a change to one word. So is making the apple
+worth more than one segment.</p>
+
+<h2 id="underneath">Underneath: two instructions</h2>
+
+<p>Everything on this page, the interpreter, the compiler, the decompiler, the
+number formatter, runs on a machine with one instruction and one addressing
+mode.</p>
+
+<p>Memory is an array of 32-bit cells, addressed by cell number. An instruction
+is three consecutive cells, <code>a</code>, <code>b</code> and <code>c</code>,
+and executing it means:</p>
+
+<pre class="pseudo"><code>Mem[b] = Mem[b] - Mem[a]
+if Mem[b] &lt;= 0 then pc = c else pc = pc + 3</code></pre>
+
+<p>That is SUBLEQ, and it is enough to compute anything, slowly. MUXLEQ adds one
+thing: if <code>c</code> has its top bit set, and is not the all-ones value that
+spells halt below, the instruction is instead a bitwise multiplex through a mask
+held at the address in the low bits of <code>c</code>:</p>
+
+<pre class="pseudo"><code>Mem[b] = (Mem[a] &amp; ~m) | (Mem[b] &amp; m)</code></pre>
+
+<p>Two mask addresses are special. Cell 6 always holds zero, so a mask fetched
+from it selects all of <code>Mem[a]</code>, making the instruction a plain
+move, which is the single most common operation in the image. The reserved
+address <code>$7FFFFFFE</code> means shift right by one, so shifting costs one
+instruction per bit instead of a loop. Input, output and halt are spelled with
+<code>-1</code> in the <code>a</code>, <code>b</code> and <code>c</code> field
+respectively.</p>
+
+<p>There is no indirect addressing, so a Forth built on this cannot fetch
+through a pointer the way you would expect. It gets there by writing the address
+into the operand field of the next instruction and then running it. The image
+modifies itself constantly, and that is the normal case rather than a trick.</p>
+
+<p>You can see the result. <code>see</code> decompiles a word back into the
+words it was built from:</p>
+
+<pre><code>: square dup * ;
+: cube dup square * ;
+see cube</code></pre>
+
+<div class="editor"></div>
+
+<p>which prints the address of each compiled cell alongside the word it calls:</p>
+
+<div class="transcript-preview">: cube
+29012 |  dup
+29016 |  square
+29020 |  *
+ ;</div>
+
+<p>The entire eForth image is about 6,600 cells, or 26 KB, and it contains its
+own cross compiler: the system can rebuild itself from the Forth sources in
+<code>forth/</code>. The WebAssembly module that runs it is 27 KB and imports
+nothing at all from the browser, because a machine this simple needs nothing
+from its host except a byte in and a byte out.</p>
+
+<p>Try <code>here .</code> to see how much of it you have used, and
+<code>words</code> to see what you got for it.</p>
+
+<footer>
+  <p style="color:var(--muted);font-size:14px;margin-top:48px">
+    eForth and the MUXLEQ VM are from the
+    <a href="https://github.com/sysprog21/muxleq">muxleq</a> project.
+    Tutorial text adapted from Easy Forth by Nick Morgan (MIT). The stack
+    visualization follows the diagrams and the <code>( before -- after )</code>
+    notation of Leo Brodie's
+    <a href="https://www.forth.com/starting-forth/1-forth-stacks-dictionary/">Starting
+    Forth</a>.
+  </p>
+</footer>
+
+</div>
+<script type="module" src="editor.js"></script>
+</body>
+</html>

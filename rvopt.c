@@ -26,8 +26,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The cells emitted below have to be exactly what the VM decodes, so take that
+ * definition from the VM rather than restating it. Included without MUX_GETC or
+ * MUX_PUTC, which yields the encoding without the interpreter: rvopt writes
+ * images, it does not run them.
+ */
+#include "muxleq-core.h"
+
 /* Guest RAM window for the lowered RV32I program. */
 #define RV_RAM_BYTES 32768
+
+/* Ceiling on an input file, enforced while reading it. See slurp(). */
+#define SLURP_MAX (64u * 1024u * 1024u)
 #define MUX_OLD_MAX_CELLS (1 << 21)
 #ifndef MUX_MAX_CELLS
 #define MUX_MAX_CELLS (1 << 26)
@@ -102,7 +112,7 @@ struct graph {
     int *use_off, *use_cnt, *use_edges;
 };
 
-static void die(const char *msg, const char *arg)
+MUX_NORETURN static void die(const char *msg, const char *arg)
 {
     if (arg)
         fprintf(stderr, "rvopt: %s '%s'\n", msg, arg);
@@ -139,10 +149,17 @@ static uint16_t rd16(const unsigned char *p)
     return (uint16_t) (p[0] | p[1] << 8);
 }
 
-/* Open FILE for reading in binary mode, or stdin for "-"; die on failure. */
-static FILE *open_input(const char *path)
+/* Open FILE for reading in binary mode, or stdin for "-"; die on failure.
+ *
+ * *owned says whether the caller has to close the result. Callers used to ask
+ * "is this stdin?" instead, which is the same test at runtime but not one a
+ * reader or a checker can discharge: nothing says fopen() cannot hand back
+ * stdin, so the close looked skippable on a path that had really opened a file.
+ */
+static FILE *open_input(const char *path, bool *owned)
 {
-    FILE *f = !strcmp(path, "-") ? stdin : fopen(path, "rb");
+    *owned = strcmp(path, "-") != 0;
+    FILE *f = *owned ? fopen(path, "rb") : stdin;
     if (!f)
         die("cannot open", path);
     return f;
@@ -153,16 +170,37 @@ static FILE *open_input(const char *path)
  */
 static unsigned char *slurp(const char *path, size_t *len)
 {
-    FILE *f = open_input(path);
+    bool owned;
+    FILE *f = open_input(path, &owned);
     unsigned char *b = NULL;
     size_t cap = 0, n = 0;
     for (int c; (c = fgetc(f)) != EOF;) {
+        /* Refuse absurd input rather than buffering it. The whole file is read
+         * before anything can judge its size, so without a ceiling here
+         * "rvopt mux -" fed from an endless stream grows until the allocator
+         * gives up. The cap sits about four orders of magnitude above the
+         * largest real input (the rv32ui elfs are ~10 KB, and the guest RAM
+         * window is 32 KB), so it can only fire on something that was never
+         * going to lower. Spelled >= rather than ==, so it still holds if this
+         * loop ever appends more than one byte at a time.
+         */
+        if (n >= SLURP_MAX)
+            die("input too large", path);
         if (n == cap)
             b = xrealloc(b, cap = cap ? cap * 2 : 256);
         b[n++] = (unsigned char) c;
     }
-    if (f != stdin)
+
+    /* fgetc reports end-of-input and a read error the same way, so without this
+     * a truncated read would be lowered as if it were the whole program: a
+     * silently wrong image rather than a diagnostic. Checked before the close,
+     * which clears the indicator.
+     */
+    const bool io_err = ferror(f);
+    if (owned)
         fclose(f);
+    if (io_err)
+        die("read error on", path);
     *len = n;
     return b;
 }
@@ -573,7 +611,8 @@ static bool token_int(const char *line, const char *key, long *out, bool *bad)
  */
 static int check_ir(const char *path)
 {
-    FILE *f = open_input(path);
+    bool owned;
+    FILE *f = open_input(path, &owned);
 
     static const char *const edge_key[] = {"next", "target", "mem", "vd1",
                                            "vd2"};
@@ -620,7 +659,7 @@ static int check_ir(const char *path)
         }
         seen++;
     }
-    if (f != stdin)
+    if (owned)
         fclose(f);
 
     if (declared < 0)
@@ -654,8 +693,14 @@ static bool g_sizing = false;
  * uint32 on load. MOVE32 is a MUX with mask-address 6 (hardwired 0); IOMARK32
  * (-1 == 0xFFFFFFFF) is the I/O / halt marker.
  */
-#define MOVE32 2147483654LL /* 0x80000006 = (1<<31) | 6 */
-#define IOMARK32 (-1LL)     /* 0xFFFFFFFF */
+#define MOVE32 ((long long) MUX_MOVE_C) /* 0x80000006 = (1<<31) | 6 */
+
+/* Spelled signed because that is how it is printed, and the loader accepts
+ * either spelling of the cell. The check keeps the two from drifting apart:
+ * this must stay the same cell the interpreter tests for.
+ */
+#define IOMARK32 (-1LL)
+MUX_STATIC_ASSERT(iomark_matches_vm, (uint32_t) IOMARK32 == IO_MARKER32);
 
 static void emit_i32(int *p, long long a, long long b, long long c)
 {
@@ -972,7 +1017,13 @@ static bool reaches_after(const struct graph *g,
                           int to)
 {
     bool *seen = xcalloc((size_t) g->count, sizeof *seen);
-    int *stack = xcalloc((size_t) g->count, sizeof *stack);
+    /* Each iteration pops one entry and pushes up to two, so the stack grows by
+     * one per expansion. Only an unseen node expands, so there are at most
+     * count-1 expansions, and starting from the two seeded successors the depth
+     * reaches count+1: one past an array of exactly count. Size it for the real
+     * bound rather than the node count it superficially resembles.
+     */
+    int *stack = xcalloc((size_t) g->count * 2 + 2, sizeof *stack);
     int sp = 0, succ[2];
     for (int k = 0, ns = successors(g, sys, from, succ); k < ns; k++)
         stack[sp++] = succ[k];
@@ -1063,7 +1114,7 @@ static bool collect_entry_targets(struct graph *g,
     struct cprop c;
     cprop_clear(&c);
     for (int i = 1; i < g->count; i++) {
-        struct node *nd = &g->n[i];
+        const struct node *nd = &g->n[i];
         if (nd->leader)
             cprop_clear(&c);
 
@@ -2219,6 +2270,36 @@ static int ret_site_count32(const struct graph *g,
     return n;
 }
 
+/* Does this JALR lower to a 'ret' dispatch over known return sites and/or
+ * indirect-jump entry targets, and so emit no data cells of its own?
+ *
+ * Three places have to answer identically: emit_one32 acts on it, the counting
+ * pass in emit_mux sizes the data section by it, and the fill pass fills that
+ * section by it. A count and a fill that disagree by one cell corrupt the
+ * image, which is why this is one function rather than three copies of an
+ * expression kept in step by hand.
+ *
+ * Precondition: node i is a K_JALR. All three callers have already established
+ * that, so the test is not repeated here; repeating it would make the caller's
+ * own check redundant, which is a warning waiting to happen. A fourth caller
+ * that has not filtered by kind must do so before asking.
+ */
+static bool jalr_is_ret_dispatch(const struct graph *g,
+                                 const struct sysinfo *sys,
+                                 const struct ret_sites *rets,
+                                 int i)
+{
+    const struct node *nd = &g->n[i];
+    /* rets->ne first: both operands are pure, and the count runs a reachability
+     * DFS per return site, which the || would then throw away. At the fill site
+     * ne > 0 is already known true from the enclosing guard, so this turns the
+     * whole scan into a load on exactly the images that have the most of it to
+     * do. The three original copies tested count first; the result is the same.
+     */
+    return ((nd->word >> 7) & 31) == 0 && nd->rs1 == 1 && nd->imm == 0 &&
+           (rets->ne > 0 || ret_site_count32(g, sys, rets, i) > 0);
+}
+
 /* 'ret' (jalr x0,x1,0): jump to a matching call site's return address, but only
  * when ra actually equals it. Unknown ra halts rather than misjump.
  */
@@ -2373,7 +2454,7 @@ static int resolve_mtvec(struct graph *g, const bool *reach)
     int node = NONE;
     bool conflict = false;
     for (int i = 1; i < g->count; i++) {
-        struct node *nd = &g->n[i];
+        const struct node *nd = &g->n[i];
         if (nd->leader)
             cprop_clear(&c);
         if (reach[i] && nd->kind == K_CSR && (uint32_t) nd->imm == 0x305) {
@@ -2718,8 +2799,7 @@ static void emit_one32(const struct graph *g,
         /* Else 'jalr x0, x1, 0' (= ret) through known return sites and/or
          * indirect-jump entry targets (task first activations).
          */
-        if (rd == 0 && nd->rs1 == 1 && nd->imm == 0 &&
-            (ret_site_count32(g, sys, rets, i) > 0 || rets->ne > 0)) {
+        if (jalr_is_ret_dispatch(g, sys, rets, i)) {
             emit_ret_dispatch32(g, sys, p, na, rets, i, m);
             return;
         }
@@ -3094,8 +3174,7 @@ static void emit_mux(struct graph *g,
             }
             continue;
         }
-        if (nd->kind == K_JALR && rd == 0 && nd->rs1 == 1 && nd->imm == 0 &&
-            (ret_site_count32(g, sys, &rets, i) > 0 || rets.ne > 0))
+        if (nd->kind == K_JALR && jalr_is_ret_dispatch(g, sys, &rets, i))
             continue; /* ret: dispatch over return sites and/or entry targets */
         if (nd->kind == K_JALR && rets.ne > 0) {
             if (nd->imm != 0)
@@ -3211,9 +3290,14 @@ static void emit_mux(struct graph *g,
     for (int i = 1; i < g->count; i++) {
         if (reach[i] && g->n[i].kind == K_JALR) {
             const int rd = (g->n[i].word >> 7) & 31;
+
+            /* Same predicate the counting pass used to decide this JALR emits
+             * no data. The count sizes this section and this loop fills it, so
+             * asking the same function is what keeps them from disagreeing by a
+             * cell and corrupting the image.
+             */
             if (g->n[i].target == NONE && rets.ne > 0 &&
-                !(rd == 0 && g->n[i].rs1 == 1 && g->n[i].imm == 0 &&
-                  (ret_site_count32(g, sys, &rets, i) > 0 || rets.ne > 0))) {
+                !jalr_is_ret_dispatch(g, sys, &rets, i)) {
                 if (g->n[i].imm != 0)
                     printf("%d\n", g->n[i].imm);
                 if (rd)
@@ -3257,8 +3341,8 @@ static void emit_mux(struct graph *g,
     if (timer)
         printf("%lld\n", 0x80000007LL); /* mcause: machine timer interrupt */
     for (int k = 0; k < winsize; k++)
-        printf("%u\n",
-               k < (int) used ? img[k] : 0); /* guest RAM, init from img */
+        printf("%u\n", k < (int) used ? (unsigned) img[k]
+                                      : 0u); /* guest RAM, init from img */
     free(node_sp);
     free(sp_node);
     free(sp_pc);

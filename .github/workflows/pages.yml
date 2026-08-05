@@ -1,0 +1,180 @@
+# Publish the browser tutorial (wasm/) to the gh-pages branch.
+#
+# Separate from ci.yml on purpose: a path filter on `on:` gates the whole
+# workflow, so putting this in ci.yml would gate the compiler and RV32I jobs on
+# the same paths too. Here the filter is exactly right and ci.yml keeps running
+# on everything.
+#
+# What can change the published page, and therefore what the filter lists:
+#   wasm/**        the page itself: the host C, the JS, the HTML/CSS, snake.fth
+#   muxleq-core.h  the interpreter compiled into the module
+#   forth/**       the eForth sources, which gforth turns into build/stage0.dec
+#                  and the Makefile bakes into the module as the image
+#   Makefile       the wasm and check-wasm rules, including what gets staged
+#   scripts/update-muxleq-fth.sh  concatenates forth/*.fth into build/muxleq.fth,
+#                  which gforth turns into the image, so it changes the module
+#                  without any forth/ file changing
+#   .ci/install-emsdk.sh, this file
+# A change to rvopt.c or the RV32I tests cannot alter the page, so it does not
+# rebuild it.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wasm/**'
+      - 'muxleq-core.h'
+      - 'forth/**'
+      - 'Makefile'
+      - 'scripts/update-muxleq-fth.sh'
+      - '.ci/install-emsdk.sh'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    paths:
+      - 'wasm/**'
+      - 'muxleq-core.h'
+      - 'forth/**'
+      - 'Makefile'
+      - 'scripts/update-muxleq-fth.sh'
+      - '.ci/install-emsdk.sh'
+      - '.github/workflows/pages.yml'
+
+# Builds are per-ref and supersede themselves. The deploy job takes a second,
+# repo-wide lock of its own, below.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # Generous because the first run has a cold emsdk cache: ~1 GB to fetch and
+    # unpack before anything is built. Warm runs finish in a fraction of this,
+    # and a timeout is a ceiling rather than a reservation.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # gforth turns forth/*.fth into the eForth image baked into the module;
+      # build-essential/clang build the native VM and the host build of
+      # wasm/muxleq-wasm.c that check-wasm diffs against it. node runs the two
+      # headless suites and is preinstalled on the runner.
+      - name: Install dependencies
+        uses: ./.github/actions/setup-build
+
+      # ~1 GB of SDK, restored across runs. Keyed on the install script's hash so
+      # a version bump busts the cache and nothing else does; the version is
+      # single-sourced in the script, exactly as for the RISC-V toolchain. Same
+      # trust boundary as that one: on a cache hit the restored SDK runs without
+      # re-verification, which is sound because Actions caches are branch-scoped,
+      # so writing this key already needs repo write access.
+      - name: Cache emsdk
+        uses: actions/cache@v6
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ hashFiles('.ci/install-emsdk.sh') }}
+
+      - name: Install emsdk
+        run: .ci/install-emsdk.sh
+
+      # emsdk_env.sh has to be sourced per shell and each `run:` is its own
+      # shell, so the steps needing emcc source it themselves rather than
+      # smuggling a whole PATH through GITHUB_PATH.
+      - name: Build the module and stage the page
+        run: |
+          . "$HOME/emsdk/emsdk_env.sh" >/dev/null
+          make wasm
+
+      # Never publish a page that does not work. Same gate the local tree runs:
+      # the resumable host diffed against the reference VM, then the browser
+      # runtime and every runnable example in the tutorial under node. The
+      # headless-Chrome stage skips when no Chrome is present, which is that
+      # target's documented behaviour, so the job does not hinge on it.
+      - name: Verify the page before publishing
+        run: |
+          . "$HOME/emsdk/emsdk_env.sh" >/dev/null
+          make check-wasm
+
+      # Assembled from the sources plus the built module rather than by globbing
+      # build/: check-wasm writes its diff transcripts as build/<test>.wasm, so a
+      # *.wasm glob there would publish text files named like modules.
+      - name: Assemble the site
+        run: |
+          rm -rf site && mkdir -p site
+          cp wasm/*.html wasm/*.css wasm/*.js wasm/*.fth site/
+          cp build/muxleq.wasm site/
+          ls -la site
+
+      - name: Upload the site
+        uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: site
+          if-no-files-found: error
+          # Only a hand-off to the deploy job seconds later, and Actions
+          # artifacts bill against the same storage quota, so it does not
+          # outlive its one consumer. On a pull request, where nothing deploys,
+          # this is the only copy, and one day is still long enough to download
+          # it if a build looks wrong.
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Pull requests build and verify the site above, but only merged default-
+    # branch pushes publish to the production gh-pages branch.
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    # Only this job writes, and permissions are per-job, so the build above keeps
+    # the workflow-default contents:read.
+    permissions:
+      contents: write
+    # A second lock, deliberately not keyed on the ref: the workflow-level group
+    # only serialises a single ref against itself, and two refs force-pushing the
+    # same branch at once is the one race that matters here. cancel-in-progress
+    # is false so a queued deploy waits its turn rather than being dropped.
+    concurrency:
+      group: gh-pages-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Download the site
+        uses: actions/download-artifact@v7
+        with:
+          name: site
+          path: site
+
+      # Always a force-push of a fresh orphan commit, to keep the repository
+      # small. `git init` in the downloaded tree means the commit has no parent,
+      # so gh-pages carries exactly one commit no matter how many times this
+      # runs, and each push makes the previous one unreachable for GitHub to
+      # reclaim. Every byte here is regenerated from sources on every run, so
+      # its history has no value that the source branch does not already hold;
+      # keeping it would grow the repository forever in exchange for nothing.
+      #
+      # Do not "improve" this by fetching gh-pages and committing on top. That
+      # is the usual shape, and it accumulates one commit plus a fresh copy of
+      # any changed blob per deploy, permanently.
+      - name: Deploy to gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd site
+          # Written here rather than carried through the artifact: upload-artifact
+          # v4 and later exclude dotfiles unless include-hidden-files is set, so a
+          # .nojekyll packed upstream would silently vanish in transit. Without it
+          # Pages runs Jekyll and drops anything beginning with an underscore.
+          touch .nojekyll
+          git init -q
+          git checkout -qb gh-pages
+          git add -A
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -qm "Deploy tutorial from ${GITHUB_SHA}"
+          git push -q --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            gh-pages
+          echo "Published ${GITHUB_SHA} to gh-pages"

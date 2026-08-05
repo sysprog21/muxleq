@@ -64,12 +64,42 @@ then 21, adds them, prints the result, and adds a carriage return.
 New words are defined with `: <name> <definition> ;`.
 Once defined, the word `hello` can be executed by typing its name.
 
+### The browser tutorial
+
+`wasm/` holds an interactive Forth tutorial that runs the same VM and the same
+eForth image in a browser, with a live stack viewer, a 24x24 display mapped onto
+Forth memory, and a playable snake:
+
+```shell
+$ make wasm-serve      # needs emcc; then open http://localhost:8000/
+```
+
+The module is about 27 KB and imports nothing from the host, because the
+interpreter is shared verbatim with the native VM through
+[`muxleq-core.h`](muxleq-core.h). The only difference is the host: a browser tab
+cannot block on a keystroke, so the WebAssembly build interprets a bounded slice
+and returns, resuming where it left off. `make check-wasm` proves that
+rewrite changed nothing, by building the same host natively and diffing its
+output against the reference VM, and then checks the page itself: the runtime,
+every runnable example in the tutorial, and the editor widget driven by
+synthetic keystrokes in headless Chrome.
+
+The text is adapted from [Easy Forth](https://github.com/ruv/easyforth) by Nick
+Morgan, rewritten for a real eForth: it teaches the words this system actually
+has, reports errors as the throw codes it actually produces, and ends with a
+chapter on the two instructions everything above it is built from.
+
 ### Testing, benchmarking, and internals
 
 - `make check` runs the pre-commit gate: byte-exact 32-bit golden-output tests,
   the PTY editor golden, 32-bit eForth smokes, and the self-hosting bootstrap.
 - `make check-all` runs `make check` plus wide native-image fuzz, loader rejection,
   and ASan/UBSan validation.
+- `make check-wasm` validates the WebAssembly build and the browser tutorial. It
+  skips whatever is missing (emcc, node, headless Chrome) rather than failing.
+- `make check-analyze` runs clang `--analyze`, cppcheck, and shellcheck over the C
+  and shell sources, all of which are clean. Deliberate exceptions carry inline
+  suppressions with a reason. Part of `check-all`; skips absent tools.
 - `rvopt` is a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat binary to a native
   MUXLEQ image running on the two ops directly, with no interpreter layer:
   `rvopt mux prog > prog.dec` then `./build/muxleq prog.dec`.

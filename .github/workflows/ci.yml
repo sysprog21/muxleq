@@ -25,9 +25,26 @@ on:
   push:
   pull_request:
 
-# Supersede in-flight runs of the same ref instead of piling them up.
+# Supersede in-flight runs instead of piling them up, and collapse the duplicate
+# that every branch with an open PR would otherwise produce: a push fires the
+# push event AND the pull_request event, so keying on github.ref would give
+# refs/heads/<branch> and refs/pull/N/merge, two different groups, and both runs
+# would go to completion. head_ref (the PR's source branch) and ref_name (the
+# pushed branch) are the same string for that pair, so they share a group and the
+# later run cancels the earlier. Every push still gets CI, including on branches
+# with no PR, which is what keeps the RV32I validation and the binaries artifact
+# from going missing on such branches.
+#
+# The head repository is part of the key because a branch name alone is not
+# unique across the world: two forks both offering "patch-1", or a fork whose
+# branch is called "main", would otherwise share a group with each other or with
+# this repo's own main and cancel runs that have nothing to do with each other.
+# Residual and accepted: a tag and a branch with the same short name still
+# collide, which needs someone to push both at once to matter.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name
+    || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 # Least privilege: nothing here writes to the repository.
@@ -69,9 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang gforth
+        uses: ./.github/actions/setup-build
       # No cross toolchain here, so make check's RV32I step fetches the prebuilt
       # release. Point it at THIS repo so a fork tests its own artifacts (and
       # cleanly skips if it has none) instead of pulling upstream's.
@@ -86,9 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang gforth
+        uses: ./.github/actions/setup-build
       - name: ASan and UBSan validation
         run: make check-sanitize
 
@@ -98,9 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang gforth
+        uses: ./.github/actions/setup-build
       - name: Wide native-image validation
         # REPO points the prebuilt-script live smoke at this repo's own release,
         # so a fork tests its own artifacts (or skips) rather than upstream's.
@@ -124,11 +135,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          # 'time' is GNU /usr/bin/time, used by 'make bench' below; without it the
-          # bench targets still run (and gate on the DureMark checksum) but untimed.
-          sudo apt-get install -y build-essential clang gforth time
+        uses: ./.github/actions/setup-build
+        with:
+          gnu-time: 'true'
       # The ~150 MB toolchain is cached across runs; the install script skips the
       # download when the cache already holds the pinned version (which lives in
       # the script). Keying on the script's hash busts the cache on a version

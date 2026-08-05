@@ -21,7 +21,7 @@ endif
 # Run serially: this build has no parallel steps to gain from "-j", and serial execution guarantees
 # the "check"/"check-all" prerequisite order.
 .NOTPARALLEL:
-.PHONY: FORCE help run check-bootstrap clean distclean check check-all check-golden check-golden-see check-golden-pty check-golden-mandel check-golden-raytracer check-loader-rejects check-mux check-eforth-stage0 check-eforth-repl check-fuzz-rvopt check-sanitize indent check-format rv32i rv32i-check rv32i-prebuilt check-rv32i check-prebuilt bench bench-forth bench-rv32i rv32i-release check-rtos
+.PHONY: FORCE help run check-bootstrap clean distclean check check-all check-golden check-golden-see check-golden-pty check-golden-mandel check-golden-raytracer check-loader-rejects check-mux check-csr-timer check-eforth-stage0 check-eforth-repl check-fuzz-rvopt check-sanitize indent check-format rv32i rv32i-check rv32i-prebuilt check-rv32i check-prebuilt bench bench-forth bench-rv32i rv32i-release check-rtos wasm wasm-serve check-wasm check-analyze
 
 BIN := $(OUT)/muxleq
 RVOPT := $(OUT)/rvopt
@@ -39,7 +39,7 @@ help: ## List public make targets.
 $(OUT):
 	$(Q)mkdir -p $@
 
-$(BIN): muxleq.c $(STAGE0_C) | $(OUT)
+$(BIN): muxleq.c muxleq-core.h $(STAGE0_C) | $(OUT)
 	$(VECHO) "  CC+LD\t$@\n"
 	$(Q)$(MUXLEQ_CC) $(CFLAGS) -I$(OUT) -o $@ muxleq.c
 
@@ -48,7 +48,7 @@ FORCE:
 # Standalone RV32I->MUXLEQ optimizer. Built outside the image, so it costs zero
 # self-host cells; not a prerequisite of the default build. The dump/check
 # textual-IR round-trip is exercised (under ASan) by the sanitize target.
-$(RVOPT): rvopt.c | $(OUT)
+$(RVOPT): rvopt.c muxleq-core.h | $(OUT)
 	$(VECHO) "  CC+LD\t$@\n"
 	$(Q)$(CC) $(CFLAGS) -o $@ rvopt.c
 
@@ -116,12 +116,39 @@ RVOPT_INDIRECT_CALL_ENC := \
 	05d00893,00000073,03000593,00100613, \
 	04000893,00000073,00008067,00000013, \
 	00000043,00000000
+# --timer/Zicsr, hand-assembled so it needs no cross toolchain. The RTOS suite
+# is otherwise the only cover for CSR read/write, mtvec resolution, mret, and
+# block-boundary safepoints, and it SKIPS silently when riscv-none-elf-* is
+# absent -- so without this case a green "make check" on a machine with no cross
+# toolchain has tested none of that path (the rvopt fuzzer never reaches it
+# either: it emits no CSR or indirect-jump programs). Sets a compile-time mtvec,
+# round-trips 0x300 through mie, spins a short loop so a block gets a safepoint,
+# then writes 'C'.
+RVOPT_CSR_TIMER_ENC := \
+	00000297,04828293,30529073,30000293, \
+	30429073,30402373,30000393,02731263, \
+	00300e13,fffe0e13,fe0e1ee3,00100513, \
+	04c00593,00100613,04000893,00000073, \
+	05d00893,00000073,30200073,00000043
 RVOPT_INDIRECT_CALL_IMM_ENC := \
 	01c00293,02502e23,03c02303,ffc30313, \
 	004300e7,05d00893,00000073,00100513, \
 	03800593,00100613,04000893,00000073, \
 	00008067,00000013,00000043,00000000
 PACK_WORDS = python3 -c 'import sys, struct; sys.stdout.buffer.write(b"".join(struct.pack("<I", int(w, 16)) for w in sys.argv[1].split(",")))'
+
+# In "check", not check-mux: the RTOS suite is the only other cover for CSR
+# read/write, mtvec resolution, mret and block-boundary safepoints, and it skips
+# silently without riscv-none-elf-*, while check-mux runs only under check-all.
+check-csr-timer: $(BIN) $(RVOPT) ## Check --timer CSR/mtvec/mret/safepoint lowering.
+	$(Q)if command -v python3 >/dev/null 2>&1; then \
+	    $(PACK_WORDS) "$(RVOPT_CSR_TIMER_ENC)" > $(TMPDIR)/rvopt-csr-timer.bin \
+	        && $(RVOPT) mux --timer $(TMPDIR)/rvopt-csr-timer.bin > $(TMPDIR)/rvopt-csr-timer.dec 2>&1 \
+	        && $(RUN) ./$(BIN) $(TMPDIR)/rvopt-csr-timer.dec > $(TMPDIR)/rvopt-csr-timer.out 2>&1 \
+	        && printf C | cmp -s - $(TMPDIR)/rvopt-csr-timer.out \
+	        || { echo "check-csr-timer: --timer CSR/mtvec/safepoint lowering FAILED"; exit 1; }; \
+	    $(PRINTF) "check-csr-timer: CSR/mtvec/mret/safepoint lowering "; $(call notice, [OK]); \
+	else $(PRINTF) "check-csr-timer: "; $(call notice, [SKIP: no python3]); fi
 
 # Standalone native-image emission: run a hand-written smoke image (MOVE, SUBLEQ
 # arithmetic + branch-to-halt, PUT at the 32-bit encoding), a high-address
@@ -443,7 +470,7 @@ run: $(BIN) ## Run the interactive VM.
 # is absent. The generated $(MUXLEQ_FTH) is not linted; its modules are.
 # Derived from the same pathspec .ci/check-format.sh checks, so "make indent"
 # formats exactly what CI enforces (tracked C/include sources outside tests/).
-CFMT_SRC := $(shell git ls-files -- '*.c' '*.inc' ':!tests/')
+CFMT_SRC := $(shell git ls-files -- '*.c' '*.h' '*.inc' ':!tests/')
 PYFMT_SRC := $(wildcard scripts/*.py)
 FORTH_SRC := $(MUXLEQ_FORTH_MODULES) $(wildcard tests/*.fth)
 # clang-format output is version-sensitive, so the project pins version 20.
@@ -476,6 +503,44 @@ indent: ## Format C/Python and lint Forth sources.
 check-format: ## Verify C formatting and trailing newlines (no reformat).
 	$(Q).ci/check-newline.sh
 	$(Q).ci/check-format.sh
+
+# Static analysis beyond the compiler's own warnings. Everything here is
+# currently clean, so the point of the target is to keep it that way: these
+# findings are cheap to introduce and invisible without a tool that looks.
+# Deliberate exceptions carry inline "cppcheck-suppress" comments with a reason,
+# which --inline-suppr honors. Each member skips when its tool is missing, so
+# this never blocks a build that lacks them.
+ANALYZE_SRC := muxleq.c rvopt.c wasm/muxleq-wasm.c
+check-analyze: $(STAGE0_C) ## Run clang --analyze, cppcheck, and shellcheck.
+	$(Q)printf 'int main(void) { return 0; }\n' > $(TMPDIR)/analyze-probe.c
+	$(Q)if ! $(MUXLEQ_CC) --analyze -o /dev/null $(TMPDIR)/analyze-probe.c \
+	        >/dev/null 2>&1; then \
+	    $(PRINTF) "check-analyze: $(MUXLEQ_CC) has no --analyze "; \
+	    $(call notice, [SKIP]); \
+	else \
+	    for f in $(ANALYZE_SRC); do \
+	        if ! $(MUXLEQ_CC) --analyze -Xanalyzer -analyzer-output=text \
+	                -std=c99 -I. -I$(OUT) -o /dev/null $$f \
+	                2>$(TMPDIR)/analyze.err \
+	            || grep -q "warning:" $(TMPDIR)/analyze.err; then \
+	            $(PRINTF) "check-analyze: $$f\n"; \
+	            cat $(TMPDIR)/analyze.err; exit 1; \
+	        fi; \
+	    done; \
+	    $(PRINTF) "check-analyze: clang static analyzer "; $(call notice, [OK]); \
+	fi
+	$(Q)if command -v cppcheck >/dev/null 2>&1; then \
+	    cppcheck --enable=warning,style,performance,portability --inline-suppr \
+	        --std=c99 -I. -I$(OUT) --quiet --error-exitcode=1 \
+	        $(ANALYZE_SRC) muxleq-core.h 2>$(TMPDIR)/cppcheck.err \
+	        || { cat $(TMPDIR)/cppcheck.err; exit 1; }; \
+	    if [ -s $(TMPDIR)/cppcheck.err ]; then cat $(TMPDIR)/cppcheck.err; exit 1; fi; \
+	    $(PRINTF) "check-analyze: cppcheck "; $(call notice, [OK]); \
+	else $(PRINTF) "check-analyze: cppcheck absent "; $(call notice, [SKIP]); fi
+	$(Q)if command -v shellcheck >/dev/null 2>&1; then \
+	    shellcheck -S style $$(git ls-files '*.sh') || exit 1; \
+	    $(PRINTF) "check-analyze: shellcheck "; $(call notice, [OK]); \
+	else $(PRINTF) "check-analyze: shellcheck absent "; $(call notice, [SKIP]); fi
 
 $(STAGE0_C): $(STAGE0_DEC) | $(OUT)
 	$(Q)sed 's/$$/,/' $^ > $@
@@ -580,11 +645,11 @@ check-golden-raytracer: $(BIN) tests/expected/raytracer.png ## Byte-exact 64x32 
 	$(Q)$(PRINTF) "check-golden-raytracer: 64x32 RGB888 PNG "; $(call notice, [OK])
 # The pre-commit gate: byte-exact 32-bit golden diff, pty editor screen, 32-bit
 # image sanity smokes, the 32-bit self-hosting proof, and RV32I coverage.
-check: check-golden check-golden-see check-golden-pty check-eforth-stage0 check-eforth-repl check-bootstrap check-rv32i check-rtos ## Run the fast pre-commit gate.
+check: check-csr-timer check-golden check-golden-see check-golden-pty check-eforth-stage0 check-eforth-repl check-bootstrap check-rv32i check-rtos check-wasm ## Run the fast pre-commit gate.
 
 # Deep pre-release gate: the standard check plus wide native-image fuzz,
 # loader rejection, the prebuilt-script contract test, and ASan+UBSan.
-check-all: check check-mux check-loader-rejects check-prebuilt check-fuzz-rvopt check-sanitize ## Run deep validation.
+check-all: check check-mux check-loader-rejects check-prebuilt check-fuzz-rvopt check-analyze check-sanitize ## Run deep validation.
 
 # bootstrapping
 check-bootstrap: $(STAGE0_DEC) $(STAGE1_DEC) ## Prove self-host bootstrap is byte-exact.
@@ -659,8 +724,89 @@ check-sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loa
 	    fi; \
 	else $(PRINTF) "check-sanitize rvopt emit fuzz: python3 absent, skipping\n"; fi
 
+# WebAssembly build: the browser tutorial in wasm/. wasm/muxleq-wasm.c wraps
+# the shared interpreter (muxleq-core.h) in a resumable, non-blocking host, so
+# the page never has to block a tab on a keystroke. The module imports nothing,
+# which is why no JS glue file is generated or needed.
+WASM := $(OUT)/muxleq.wasm
+WASM_SRC := wasm/muxleq-wasm.c muxleq-core.h $(STAGE0_C)
+
+$(WASM): $(WASM_SRC) | $(OUT)
+	$(VECHO) "  EMCC\t$@\n"
+	$(Q)emcc $(CFLAGS) -I. -I$(OUT) --no-entry -sSTANDALONE_WASM=1 \
+	    -sINITIAL_MEMORY=1048576 -sALLOW_MEMORY_GROWTH=0 \
+	    -o $@ wasm/muxleq-wasm.c
+
+# Globbed, not listed: a page asset added to wasm/ and forgotten here fails as a
+# blank editor in the browser and nowhere else.
+WASM_PAGE := $(wildcard wasm/*.html wasm/*.css wasm/*.js wasm/*.fth)
+
+wasm: ## Build the WebAssembly module for the browser tutorial (needs emcc).
+	$(Q)if command -v emcc >/dev/null 2>&1; then \
+	    $(MAKE) $(WASM) || exit 1; \
+	    cp $(WASM_PAGE) $(OUT)/ || exit 1; \
+	    $(PRINTF) "wasm: $(OUT)/ ready to serve "; $(call notice, [OK]); \
+	else $(PRINTF) "wasm: emcc absent "; $(call notice, [SKIP]); fi
+
+wasm-serve: wasm ## Serve the tutorial at http://localhost:8000/ (needs python3).
+	$(Q)cd $(OUT) && python3 -m http.server 8000
+
+# Two independent gates. The first needs no wasm toolchain at all: the same
+# host file built natively must produce byte-identical output to the reference
+# VM, which is what proves the resumable loop did not change any semantics.
+# The second runs the real module and checks the browser-facing contract,
+# including that every runnable example in the tutorial still works.
+MUXWASM_HOST := $(OUT)/muxwasm-host
+WASM_DIFF_TESTS := sieve crc arith ascii calendar bigf
+WASM_PORT ?= 8127
+CHROME := $(shell command -v chromium 2>/dev/null || command -v google-chrome 2>/dev/null || \
+    ls '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' 2>/dev/null)
+
+$(MUXWASM_HOST): $(WASM_SRC) | $(OUT)
+	$(VECHO) "  CC+LD\t$@\n"
+	$(Q)$(MUXLEQ_CC) $(CFLAGS) -I. -I$(OUT) -o $@ wasm/muxleq-wasm.c
+
+check-wasm: $(BIN) $(MUXWASM_HOST) ## Check the resumable host and the browser tutorial.
+	$(Q)for t in $(WASM_DIFF_TESTS); do \
+	    $(RUN) ./$(BIN) < tests/$$t.fth > $(OUT)/$$t.ref 2>&1; \
+	    $(RUN) ./$(MUXWASM_HOST) < tests/$$t.fth > $(OUT)/$$t.wasm 2>&1; \
+	    if ! diff -q $(OUT)/$$t.ref $(OUT)/$$t.wasm >/dev/null; then \
+	        $(PRINTF) "check-wasm: $$t differs from the reference VM\n"; \
+	        diff $(OUT)/$$t.ref $(OUT)/$$t.wasm | head -20; exit 1; \
+	    fi; \
+	done
+	$(Q)$(PRINTF) "check-wasm: resumable host matches the VM on $(words $(WASM_DIFF_TESTS)) programs "; $(call notice, [OK])
+	$(Q)if command -v emcc >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then \
+	    $(MAKE) $(WASM) >/dev/null && \
+	    node wasm/test.mjs $(WASM) > $(OUT)/wasm-test.log 2>&1 && \
+	    node wasm/test-examples.mjs $(WASM) > $(OUT)/wasm-examples.log 2>&1 \
+	        || { cat $(OUT)/wasm-test.log $(OUT)/wasm-examples.log; exit 1; }; \
+	    $(PRINTF) "check-wasm: browser runtime and tutorial examples "; $(call notice, [OK]); \
+	else $(PRINTF) "check-wasm: emcc or node absent, module checks "; $(call notice, [SKIP]); fi
+	$(Q)if [ -n "$(CHROME)" ] && command -v emcc >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then \
+	    if ! python3 -c "import socket,sys; s=socket.socket(); \
+	        sys.exit(0 if s.connect_ex(('127.0.0.1', $(WASM_PORT))) else 1)"; then \
+	        $(PRINTF) "check-wasm: port $(WASM_PORT) is busy; set WASM_PORT=N "; \
+	        $(call notice, [SKIP]); exit 0; \
+	    fi; \
+	    $(MAKE) wasm >/dev/null || exit 1; \
+	    (cd $(OUT) && exec python3 -m http.server $(WASM_PORT) >/dev/null 2>&1) & \
+	    server=$$!; \
+	    sleep 1; \
+	    "$(CHROME)" --headless --disable-gpu --no-sandbox --virtual-time-budget=60000 \
+	        --dump-dom http://localhost:$(WASM_PORT)/browser-test.html \
+	        > $(OUT)/browser-test.out 2>/dev/null; \
+	    kill $$server 2>/dev/null; wait $$server 2>/dev/null; \
+	    if grep -q '<title>PASS</title>' $(OUT)/browser-test.out; then \
+	        $(PRINTF) "check-wasm: editor widget in a real browser "; $(call notice, [OK]); \
+	    else \
+	        $(PRINTF) "check-wasm: editor widget failed in the browser\n"; \
+	        sed -n 's/.*<title>\(.*\)<\/title>.*/\1/p' $(OUT)/browser-test.out; exit 1; \
+	    fi; \
+	else $(PRINTF) "check-wasm: no headless Chrome, editor widget "; $(call notice, [SKIP]); fi
+
 clean: ## Remove built binaries.
-	$(RM) $(BIN) $(RVOPT)
+	$(RM) $(BIN) $(RVOPT) $(WASM) $(MUXWASM_HOST)
 
 # The rm -rf $(OUT) below covers build/rv32i; the extra recursive step drops the
 # only generated tree that lives outside build/: the riscv-tests in-tree .elf

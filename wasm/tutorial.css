@@ -1,0 +1,345 @@
+/* Styling for the eForth-on-MUXLEQ tutorial. Adapted from the Easy Forth book
+   by Nick Morgan, with the layout redone for a single static page. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #24292e;
+  --muted: #6a737d;
+  --rule: #e1e4e8;
+  --accent: #0366d6;
+  --code-bg: #f6f8fa;
+  --editor-bg: #fbfcfd;
+  --stack-bg: #eef2f6;
+  --fresh-bg: #dcf5e3;
+  --fresh-edge: #46a758;
+  --sel-bg: #dceafd;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #c9d1d9;
+    --muted: #8b949e;
+    --rule: #21262d;
+    --accent: #58a6ff;
+    --code-bg: #161b22;
+    --editor-bg: #10151c;
+    --stack-bg: #161b22;
+    --fresh-bg: #14301f;
+    --fresh-edge: #3fb950;
+    --sel-bg: #12253d;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 20px 80px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.6 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+.wrapper { max-width: 780px; margin: 0 auto; }
+
+header {
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 32px;
+  padding: 40px 0 24px;
+}
+
+header h1 { font-size: 30px; margin: 0 0 8px; }
+header p { color: var(--muted); margin: 4px 0; }
+
+h2 {
+  font-size: 24px;
+  margin: 48px 0 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+
+h3 { font-size: 18px; margin: 28px 0 12px; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre, .editor, .stack, .transcript-preview {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+code {
+  background: var(--code-bg);
+  border-radius: 4px;
+  font-size: 88%;
+  padding: 2px 5px;
+}
+
+pre {
+  background: var(--code-bg);
+  border-radius: 6px;
+  font-size: 14px;
+  overflow-x: auto;
+  padding: 12px 14px;
+}
+
+pre code { background: none; padding: 0; }
+
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  border-bottom: 1px solid var(--rule);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+td code { white-space: nowrap; }
+
+blockquote {
+  border-left: 3px solid var(--rule);
+  color: var(--muted);
+  margin: 20px 0;
+  padding: 0 0 0 16px;
+}
+
+.toc {
+  background: var(--code-bg);
+  border-radius: 6px;
+  margin-bottom: 32px;
+  padding: 16px 20px;
+}
+.toc ol { margin: 0; padding-left: 20px; }
+.toc li { margin: 2px 0; }
+
+/* -- the interactive editor -------------------------------------------- */
+
+.editor {
+  background: var(--editor-bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  font-size: 14px;
+  margin: 20px 0 28px;
+  padding: 8px;
+  position: relative;
+}
+
+/* -- the stack viewer -------------------------------------------------- */
+
+.stack-viewer {
+  background: var(--stack-bg);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  padding: 14px 8px 5px;
+}
+
+.stack-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 26px;
+}
+
+/* Cells run bottom of the stack to top, left to right, which is the order the
+   ( n1 n2 -- sum ) notation reads in. */
+.stack-cell {
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  padding: 1px 9px;
+  position: relative;
+  transition: background-color 0.45s ease, border-color 0.45s ease;
+}
+
+.stack-cell:hover { border-color: var(--accent); }
+
+/* The top is the one beginners misread, so it is labelled, not just implied. */
+.stack-cell.top {
+  border-color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.stack-cell.top::after {
+  color: var(--accent);
+  content: "top";
+  font-size: 9px;
+  left: 0;
+  letter-spacing: 0.04em;
+  position: absolute;
+  right: 0;
+  text-align: center;
+  top: -11px;
+}
+
+/* Whatever the last line pushed, so a change is visible without re-reading. */
+.stack-cell.fresh {
+  animation: stack-land 0.5s ease;
+  background: var(--fresh-bg);
+  border-color: var(--fresh-edge);
+}
+
+@keyframes stack-land {
+  from { transform: translateY(-5px); opacity: 0.25; }
+  to { transform: none; opacity: 1; }
+}
+
+.stack-cell.selected { background: var(--sel-bg); border-color: var(--accent); }
+
+.stack-empty, .stack-more, .stack-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stack-note { margin-left: auto; padding-left: 10px; white-space: nowrap; }
+
+.stack-detail {
+  border-top: 1px dashed var(--rule);
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 4px 16px;
+  margin-top: 5px;
+  padding-top: 5px;
+}
+
+.stack-bits { color: var(--accent); letter-spacing: 0.02em; }
+
+.editor-tools {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.step-toggle {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+
+.step-toggle input { margin-right: 2px; vertical-align: -1px; }
+
+.editor-body { display: flex; gap: 8px; }
+
+.transcript {
+  flex: 1;
+  height: 260px;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.editor.small .transcript { height: 120px; }
+
+.lines p { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.code { color: var(--fg); }
+.output { color: var(--muted); }
+
+.canvas {
+  background: #12141c;
+  border-radius: 4px;
+  flex: none;
+  height: 240px;
+  image-rendering: pixelated;
+  width: 240px;
+}
+
+.editor .input {
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  color: var(--fg);
+  font: inherit;
+  margin-top: 4px;
+  outline: 0;
+  padding: 4px 0 0;
+  resize: none;
+  width: 100%;
+}
+
+/* While a program is running the caret would be misleading: keystrokes are
+   going to the program, not into a line being edited. */
+.editor .input.busy { color: transparent; text-shadow: none; caret-color: transparent; }
+.editor .input.busy::placeholder { color: var(--muted); }
+
+.editor .reset {
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 1px 8px;
+}
+.editor .reset:hover { color: var(--fg); }
+
+/* A non-interactive illustration of what an editor should look like. */
+.transcript-preview {
+  background: var(--code-bg);
+  border-radius: 6px;
+  font-size: 14px;
+  margin: 16px 0;
+  padding: 10px 14px;
+  white-space: pre-wrap;
+}
+
+.stack {
+  background: var(--stack-bg);
+  border-radius: 4px;
+  font-size: 14px;
+  margin: 14px 0 18px;
+  padding: 14px 8px 5px;
+}
+
+/* -- a stack effect drawn as before and after -------------------------- */
+
+.effect { margin: 18px 0 22px; }
+
+.effect figcaption {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.effect-row { display: flex; gap: 12px; }
+
+.effect-side { flex: 1 1 0; min-width: 0; }
+
+.effect-label {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+
+/* The pictures are the live viewer's own boxes; only the framing differs. */
+.effect-row .stack { margin: 0; }
+
+/* Each picture would otherwise repeat "depth N". In a pair the comparison is
+   the point, not the count. */
+.effect-row .stack-note { display: none; }
+
+.effect-arrow {
+  align-self: center;
+  color: var(--accent);
+  flex: none;
+  padding-top: 16px;
+  text-align: center;
+}
+
+.effect-arrow::after { content: "\2192"; display: block; }
+
+@media (max-width: 640px) {
+  .editor-body { flex-direction: column; }
+  .canvas { width: 100%; height: auto; aspect-ratio: 1; }
+  /* Stacked vertically, an arrow pointing right would point at nothing. */
+  .effect-row { flex-direction: column; }
+  .effect-arrow { align-self: flex-start; padding-top: 0; }
+  .effect-arrow::after { content: "\2193"; }
+}

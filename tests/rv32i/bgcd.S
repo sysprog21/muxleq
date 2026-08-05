@@ -76,4 +76,4 @@ pairs:
 pairs_end:
 
 .text                         # back to code: print_dec's instructions belong in .text, not .rodata
-.include "print_dec.S"        # shared decimal printer (defines print_dec + buf)
+.include "print-dec.S"        # shared decimal printer (defines print_dec + buf)

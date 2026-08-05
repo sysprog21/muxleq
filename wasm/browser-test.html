@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pending</title>
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<!-- Drives the editor widget the way a reader would: type a line, press Enter,
+     read the stack viewer. Nothing else covers editor.js, which is the entire
+     user-facing surface of the tutorial.
+
+     Run headless and read the document title:
+       chrome --headless --virtual-time-budget=20000 --dump-dom browser-test.html
+     The title ends up "PASS" or "FAIL: ...". -->
+<div class="editor" id="plain"></div>
+<div class="editor" id="canvas" data-canvas></div>
+<div class="editor" id="missing" data-src="no-such-file.fth"></div>
+<pre id="log"></pre>
+
+<script type="module">
+const log = (m) => (document.getElementById("log").textContent += m + "\n");
+const failures = [];
+
+function check(what, got, want) {
+  const ok = String(got) === String(want);
+  if (!ok) failures.push(`${what}: got ${JSON.stringify(String(got))}, want ${want}`);
+  log(`${ok ? "ok  " : "FAIL"} ${what}`);
+}
+
+// Editors are created asynchronously once the module compiles, and each line
+// takes some interpreting, so every step waits for the widget to go quiet.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function settled(el, ms = 8000) {
+  const input = () => el.querySelector(".input");
+  for (let t = 0; t < ms; t += 25) {
+    if (input() && !input().classList.contains("busy")) return input();
+    await sleep(25);
+  }
+  throw new Error("editor never settled");
+}
+
+async function type(el, text) {
+  const input = await settled(el);
+  input.value = text;
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await settled(el);
+}
+
+// Read the stack the way a reader sees it: the cells, left to right.
+const stack = (el) =>
+  [...el.querySelectorAll(".stack-viewer .stack-cell")]
+    .map((c) => c.textContent)
+    .join(" ");
+const note = (el) => el.querySelector(".stack-viewer .stack-note").textContent;
+const transcript = (el) => el.querySelector(".lines").textContent;
+// Each submitted line is its own <p>, and textContent would run them together.
+const lines = (el) =>
+  [...el.querySelectorAll(".lines p")].map((p) => p.textContent).join("\n");
+const el_text = (el) => el.querySelector(".stack-viewer").textContent;
+
+try {
+  const plain = document.getElementById("plain");
+  await settled(plain);
+
+  await type(plain, "1 2 3");
+  check("stack viewer follows pushes", stack(plain), "1 2 3");
+
+  await type(plain, "+ *");
+  check("stack viewer follows arithmetic", stack(plain), "5");
+
+  await type(plain, ". cr");
+  check("output reaches the transcript", /5/.test(transcript(plain)), "true");
+  check("stack empties", stack(plain), "");
+  check("empty stack says so", /stack empty/.test(el_text(plain)), "true");
+
+  // A definition spanning two lines must not report a stack in between.
+  await type(plain, ": twice 2 * ;");
+  await type(plain, "21 twice");
+  check("colon definition runs", stack(plain), "42");
+
+  // A terminal echoes the Enter you press, so a program's output starts below
+  // what you typed. Appending it to the same line glued them into one word.
+  await type(plain, ': shout ." loud" ;');
+  await type(plain, "shout");
+  const lastLine = [...plain.querySelectorAll(".lines p")].pop();
+  check("output starts below the echoed line", lastLine.textContent, "shout\nloud");
+
+  await type(plain, "nosuchword");
+  check("error shows in transcript", /\?/.test(transcript(plain)), "true");
+  // The error handler resets eForth's prompt hook; the page must put the stack
+  // reporter back, or every later line would report nothing.
+  await type(plain, "7 8");
+  check("stack viewer survives an error", /7 8$/.test(stack(plain)), "true");
+
+  // A second editor is a second machine.
+  const canvas = document.getElementById("canvas");
+  await settled(canvas);
+  await type(canvas, "twice");
+  check("editors are independent", /\?/.test(transcript(canvas)), "true");
+
+  await type(canvas, ": plot ( colour x y -- ) 24 * + cells graphics + ! ;");
+  await type(canvas, "5 3 4 plot");
+  const ctx = canvas.querySelector(".canvas").getContext("2d");
+  const px = canvas.querySelector(".canvas").width / 24;
+  const dot = ctx.getImageData(3 * px + 2, 4 * px + 2, 1, 1).data;
+  check("a stored cell reaches the canvas", `${dot[0]},${dot[1]},${dot[2]}`, "245,165,36");
+
+  // The stack effect of the line just run, in Starting Forth's notation,
+  // computed from the two states rather than written by hand.
+  await type(plain, "3 4");
+  await type(plain, "+");
+  check("stack effect is reported", /\( 3 4 -- 7 \)/.test(note(plain)), "true");
+  const depth = Number((note(plain).match(/depth (\d+)/) || [])[1]);
+  check("depth matches the cells drawn", depth, stack(plain).split(" ").filter(Boolean).length);
+
+  // Clicking a cell opens the other readings of those 32 bits.
+  const cells = () => plain.querySelectorAll(".stack-viewer .stack-cell");
+  check("top cell is marked", cells()[cells().length - 1].classList.contains("top"), "true");
+  cells()[cells().length - 1].click();
+  const detail = () => plain.querySelector(".stack-detail");
+  check("clicking a cell shows its bits", /hex \$00000007/.test(detail().textContent), "true");
+  check("binary is shown", /00000111/.test(detail().textContent), "true");
+  cells()[cells().length - 1].click();
+  check("clicking again closes it", plain.querySelector(".stack-detail"), "null");
+
+  // -1 is the case worth explaining, and the detail row is where it is explained.
+  await type(plain, "drop drop drop -1");
+  const last = () => { const c = cells(); return c[c.length - 1]; };
+  last().click();
+  check("true is shown as every bit set", /every bit set/.test(detail().textContent), "true");
+  check("unsigned form is shown", /unsigned 4294967295/.test(detail().textContent), "true");
+  last().click();
+
+  // Step mode feeds a line one word at a time, which is what makes the stack
+  // states visible instead of jumping straight to the answer.
+  const stepBox = plain.querySelector(".step");
+  stepBox.checked = true;
+  const input = await settled(plain);
+  input.value = "8 9 +";
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await sleep(400);
+  check("step mode pauses between words", stack(plain).endsWith("8"), "true");
+  await sleep(1400);
+  check("step mode finishes the line", stack(plain).endsWith("17"), "true");
+  check("each word is echoed on its own", /(^|\n)8\n9\n\+/.test(lines(plain)), "true");
+  // The point of stepping: the last word's own effect, which is the figure
+  // Starting Forth draws for "3 4 +".
+  check("step reports each word's effect", /\( 8 9 -- 17 \)/.test(note(plain)), "true");
+  stepBox.checked = false;
+
+  // Reset must stop the machine it replaces. An abandoned instance used to keep
+  // its animation frame and go on writing into the session that replaced it.
+  // Asserted on the instance rather than on timing: headless Chrome fast-forwards
+  // timers, so "is it still running" is not answerable here.
+  const canvas2 = document.getElementById("canvas");
+  const replaced = canvas2.__editor.forth;
+  check("the editor has a machine before reset", replaced.dead, "false");
+  canvas2.querySelector(".reset").click();
+  await settled(canvas2);
+  check("reset stops the machine it replaced", replaced.dead, "true");
+  check("reset installs a different machine", canvas2.__editor.forth !== replaced, "true");
+  check("reset empties the viewer too", stack(canvas2), "");
+
+  // A data-src that does not load must say so once and clearly. Before the
+  // status check, a 404 body was compiled as Forth and buried the real problem
+  // under a screenful of undefined words.
+  const missing = document.getElementById("missing");
+  await settled(missing);
+  const missingText = transcript(missing);
+  check("a failed load is reported", /could not load no-such-file\.fth/.test(missingText), "true");
+  check("the reason is the status, not Forth errors", /HTTP 404/.test(missingText), "true");
+  check("the 404 body is not compiled", /\?/.test(missingText), "false");
+
+  const reset = plain.querySelector(".reset");
+  reset.click();
+  await settled(plain);
+  await type(plain, "21 twice");
+  check("reset gives a fresh machine", /\?/.test(transcript(plain)), "true");
+  check("reset empties the viewer", stack(plain), "");
+} catch (err) {
+  failures.push(String(err));
+}
+
+document.title = failures.length ? `FAIL: ${failures.join(" | ")}` : "PASS";
+log(document.title);
+</script>
+<script type="module" src="editor.js"></script>
+</body>
+</html>

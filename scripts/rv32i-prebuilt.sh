@@ -19,7 +19,7 @@ MUXLEQ="${MUXLEQ:?MUXLEQ must point at the built muxleq}"
 
 # rv32i-count.sh and rv32i-manifest.sh ship beside this script; resolve them
 # from here so the caller's working directory does not matter.
-here="$(CDPATH= cd "$(dirname "$0")" && pwd)"
+here="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
 
 # sysprog21/muxleq publishes the rolling pre-release; override REPO to test a
 # fork.

@@ -9,17 +9,18 @@
 # The skip (77) and refuse (1) cases exit before any lowering, so they need no
 # RISC-V toolchain, no network, and only a placeholder rvopt/muxleq. The pass
 # (0) cases lower real elfs, so they run only when a built rvopt/muxleq and a
-# staged release tree are present (e.g. after rv32i-release). Malicious
-# archives are crafted with python3 when available. A final network-gated case
-# runs the script against the REAL published release (real curl, real assets) to
-# validate the URL, asset names, and format that the mock cannot check.
+# staged release tree are present (e.g. after rv32i-release). Malicious archives
+# are crafted with python3 when available. A final network-gated case runs the
+# script against the REAL published release (real curl, real assets) to validate
+# the URL, asset names, and format that the mock cannot check.
 set -eu
 
-here="$(CDPATH= cd "$(dirname "$0")" && pwd)"
-root="$(CDPATH= cd "$here/.." && pwd)"
+here="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
+root="$(CDPATH='' cd "$here/.." && pwd)"
 script="$root/scripts/rv32i-prebuilt.sh"
-# The oracles below read count.txt through the same helper the script uses, so
-# a change to what a usable count is cannot leave the test predicting the old
+
+# The oracles below read count.txt through the same helper the script uses, so a
+# change to what a usable count is cannot leave the test predicting the old
 # contract. The fixtures, with their own expected exit codes, are what pin the
 # helper itself.
 count_sh="$root/scripts/rv32i-count.sh"
@@ -208,6 +209,9 @@ if [ -d "$staged/riscv-tests" ] && [ -x "$RVOPT_BIN" ] && [ -x "$MUXLEQ_BIN" ]; 
         t="$work/trunc"
         mkdir -p "$t"
         cp -R "$staged" "$t/"
+        # Filenames here are generated rv32ui test names (add.elf, ...), so
+        # they are plain and ls is safe to read.
+        # shellcheck disable=SC2012
         one="$(ls "$t"/rv32i/riscv-tests/*.elf | head -1)"
         find "$t/rv32i/riscv-tests" -name '*.elf' ! -path "$one" -delete
         sh "$manifest" create "$t/rv32i"
@@ -222,6 +226,7 @@ if [ -d "$staged/riscv-tests" ] && [ -x "$RVOPT_BIN" ] && [ -x "$MUXLEQ_BIN" ]; 
         # the script skipping exactly as it should. This case tars the tree as
         # staged, so unlike demos and trunc it cannot re-create the manifest --
         # it has to be handed one that already fits.
+        # shellcheck disable=SC2012  # generated, plain filenames (see above)
         elfs=$(ls "$staged"/riscv-tests/*.elf 2>/dev/null | wc -l | tr -d ' ')
         want=$(sh "$count_sh" "$staged/riscv-tests/count.txt" || true)
         if [ "$elfs" = "$want" ] && sh "$manifest" verify "$staged" >/dev/null 2>&1; then
@@ -359,6 +364,7 @@ if [ -x "$live_rvopt" ] && [ -x "$live_muxleq" ] &&
     live_elfs=$(grep -cE '^rv32i/riscv-tests/[^/]+\.elf$' "$live_list" || true)
     tar -xzOf "$live_tgz" rv32i/riscv-tests/count.txt >"$work/live.count" 2>/dev/null || :
     live_count=$(sh "$count_sh" "$work/live.count" || true)
+
     # A release predating the manifest skips too, so extract and check that here
     # as well: predicting 0 from the elf count alone would fail this test for
     # the whole window between merging this and CI republishing.
