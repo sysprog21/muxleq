@@ -32,7 +32,7 @@ FLAT  = $(OUT)/hello.bin
 
 all: $(PROGS) $(FLAT)
 
-$(addprefix $(OUT)/,fibonacci.o primes.o crc16.o mul.o bgcd.o bsort.o): print_dec.S
+$(addprefix $(OUT)/,fibonacci.o primes.o crc16.o mul.o bgcd.o bsort.o): print-dec.S
 
 $(OUT):
 	mkdir -p $@

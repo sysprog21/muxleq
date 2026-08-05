@@ -1,0 +1,40 @@
+# The build dependencies every job here needs, in one place.
+#
+# Four jobs across two workflows installed the same three packages, so adding a
+# dependency meant remembering four edits. The two genuinely job-specific tools
+# stay opt-in: "time" for the benchmark job, and clang-format/black/shfmt for
+# the formatting job, which pins them by version and hash and so does not belong
+# behind a shared switch.
+name: Set up build dependencies
+description: Install the toolchain the muxleq build and test targets expect.
+
+inputs:
+  gnu-time:
+    description: >-
+      Also install GNU /usr/bin/time, which `make bench` uses. Without it the
+      bench targets still run and still gate on the DureMark checksum, just
+      untimed.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      # The input reaches the shell through env, never by being pasted into the
+      # script text. It is a workflow literal today, so nothing here is
+      # exploitable, but every other run: block in this repo already routes its
+      # dynamic values this way and a uniform rule is the one that survives
+      # someone later wiring an input to something less trustworthy.
+      env:
+        GNU_TIME: ${{ inputs.gnu-time }}
+      run: |
+        sudo apt-get update
+        pkgs="build-essential clang gforth"
+        if [ "$GNU_TIME" = "true" ]; then
+          pkgs="$pkgs time"
+        fi
+        # Word splitting is intended: these are separate package names.
+        # shellcheck disable=SC2086
+        sudo apt-get install -y $pkgs

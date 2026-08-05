@@ -57,7 +57,7 @@ if ! "$CLANG_FORMAT" --version | grep -q 'version 20\.'; then
     "$CLANG_FORMAT" --version >&2
     exit 1
 fi
-collect '*.c' '*.inc' ':!tests/'
+collect '*.c' '*.h' '*.inc' ':!tests/'
 if [ ${#files[@]} -gt 0 ]; then
     for file in "${files[@]}"; do
         if ! "$CLANG_FORMAT" "$file" |

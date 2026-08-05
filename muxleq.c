@@ -22,29 +22,24 @@
 #include <termios.h>
 #include <unistd.h>
 
-#if defined(__GNUC__) || defined(__clang__)
-#define UNUSED __attribute__((unused))
-#define UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-#define UNUSED
-#define UNLIKELY(x) (x)
-#endif
+static int read_host_input(void);
+static int write_host_output(uint32_t out);
 
-/* Editor terminal-mode control. The modal editor emits these sentinels through
- * the normal output path; write_host_output() intercepts them. Kept in sync
- * with the raw-on/raw-off/peek words in forth/65-optional-editor.fth.
+/* The interpreter itself lives in muxleq-core.h, shared with the WebAssembly
+ * build. This host blocks on input and never runs out of budget, so both yield
+ * statuses are unreachable here and mux_exec() returns only MUX_OK or
+ * MUX_ERR_OUTPUT, which are the process exit codes.
  */
-#define EDIT_RAW_ON 0xFF01u
-#define EDIT_RAW_OFF 0xFF00u
-#define EDIT_PEEK 0xFF02u
+#define MUX_GETC() read_host_input()
+#define MUX_PUTC(v) write_host_output(v)
+#include "muxleq-core.h"
+
+/* The EDIT_* sentinels this host intercepts are the image-to-host protocol and
+ * come from muxleq-core.h. This one is not part of it: how long to wait for the
+ * rest of an escape sequence is a tty policy, and a host without a tty has no
+ * use for it.
+ */
 #define EDIT_PEEK_MS 50 /* ttimeoutlen: an arrow burst arrives <50ms apart */
-
-/* Cell 6 is hardwired to 0, so a MUX whose mask address is 6 masks against zero
- * and is therefore a pure MOVE.
- */
-#define ZERO_MASK_ADDR 6u
-
-enum { A = 0, B = 1, C = 2, INSN_SIZE = 3 };
 
 static const uint32_t default_image[] = {
 #include <stage0.c>
@@ -59,7 +54,7 @@ static bool edit_peek_pending = false;
 
 static int read_host_input(void)
 {
-    if (UNLIKELY(edit_peek_pending)) {
+    if (MUX_UNLIKELY(edit_peek_pending)) {
         edit_peek_pending = false;
         if (raw_mode_active) {
             struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
@@ -68,24 +63,29 @@ static int read_host_input(void)
                 pr = poll(&pfd, 1, EDIT_PEEK_MS);
             } while (pr < 0 && errno == EINTR);
             if (pr <= 0 || !(pfd.revents & POLLIN))
-                return 0x100;
+                return (int) EDIT_PEEK_NONE;
         }
     }
-    return getchar();
+
+    /* The core compares against MUX_EOF, and the standard only promises EOF is
+     * some negative value, so translate rather than assume they are the same.
+     */
+    const int c = getchar();
+    return c == EOF ? MUX_EOF : c;
 }
 
 static int write_host_output(uint32_t out)
 {
-    if (UNLIKELY(out == EDIT_RAW_ON)) {
+    if (MUX_UNLIKELY(out == EDIT_RAW_ON)) {
         raw_wanted = 1;
         enter_raw_mode();
-    } else if (UNLIKELY(out == EDIT_RAW_OFF)) {
+    } else if (MUX_UNLIKELY(out == EDIT_RAW_OFF)) {
         raw_wanted = 0;
         leave_raw_mode();
-    } else if (UNLIKELY(out == EDIT_PEEK)) {
+    } else if (MUX_UNLIKELY(out == EDIT_PEEK)) {
         edit_peek_pending = true;
-    } else if (UNLIKELY(putchar((int) (out & 0xFF)) == EOF)) {
-        return 3;
+    } else if (MUX_UNLIKELY(putchar((int) (out & 0xFF)) == EOF)) {
+        return MUX_ERR_OUTPUT;
     }
     return 0;
 }
@@ -99,18 +99,6 @@ static int write_host_output(uint32_t out)
 #error "MUX_MAX_CELLS must be a power of two >= MUX_MIN_CELLS"
 #endif
 
-#define IO_MARKER32 0xFFFFFFFFu
-#define NEG_FLAG32 0x80000000u
-#define ADDR_MASK32 0x7FFFFFFFu
-
-/* A MUX whose mask address is this reserved (never-a-real-cell) value is a
- * native shift-right-by-one: [b] = [a] >> 1. Kept in sync with the SHR1 word in
- * forth/20-target-vm.fth, whose emitted mask cell (0xFFFFFFFE) masks to this
- * address; the eForth shift primitive uses it so a right shift costs one op per
- * bit instead of a full-cell-width bit loop.
- */
-#define SHR1_MARK_ADDR 0x7FFFFFFEu
-
 struct muxleq_image {
     uint32_t *m;
     uint32_t mask;
@@ -120,7 +108,7 @@ struct muxleq_image {
 /* Print "muxleq: <message>" to stderr and exit non-zero. Process teardown
  * reclaims the image and any open file, so callers need not free before dying.
  */
-static void die(const char *fmt, ...)
+MUX_NORETURN static void die(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -209,110 +197,6 @@ static struct muxleq_image load_muxleq(const char *path)
     return img;
 }
 
-/* A negative c selects MUX over SUBLEQ, but c == IO_MARKER32 is a SUBLEQ jump
- * target, not a MUX, so that value must fall through. The guard is load-bearing
- * and shared by exec_alu() and run()'s MOVE gate; keep them in sync here.
- */
-static inline bool is_mux(uint32_t c)
-{
-    return (c & NEG_FLAG32) && c != IO_MARKER32;
-}
-
-/* Execute one non-I/O instruction (a, b, c) and return the next pc. A MOVE
- * (mask address ZERO_MASK_ADDR) skips the general mask formula's dead read of
- * the destination; SHR1 is the reserved native right-shift; everything else is
- * a mask MUX or a SUBLEQ. The caller has already ruled out I/O.
- */
-static inline uint32_t exec_alu(uint32_t *m32,
-                                uint32_t mask32,
-                                uint32_t a,
-                                uint32_t b,
-                                uint32_t c,
-                                uint32_t pc)
-{
-    if (is_mux(c)) {
-        const uint32_t maddr = c & ADDR_MASK32;
-        if (maddr == ZERO_MASK_ADDR) { /* the common case: a MOVE */
-            m32[b & mask32] = m32[a & mask32];
-        } else if (maddr == SHR1_MARK_ADDR) {
-            m32[b & mask32] = m32[a & mask32] >> 1;
-        } else {
-            const uint32_t mask = m32[maddr & mask32];
-            m32[b & mask32] =
-                (m32[a & mask32] & ~mask) | (m32[b & mask32] & mask);
-        }
-        return pc + INSN_SIZE;
-    }
-    const uint32_t r = m32[b & mask32] - m32[a & mask32];
-    m32[b & mask32] = r;
-    return (r == 0 || (r & NEG_FLAG32)) ? c : pc + INSN_SIZE;
-}
-
-static int run(const struct muxleq_image *img)
-{
-    uint32_t *m32 = img->m;
-    const uint32_t mask32 = img->mask;
-    uint32_t pc = 0;
-    for (;;) {
-        if (UNLIKELY(pc & NEG_FLAG32))
-            return 0;
-        const uint32_t a = m32[pc & mask32];
-        const uint32_t b = m32[(pc + B) & mask32];
-        const uint32_t c = m32[(pc + C) & mask32];
-        if (a == IO_MARKER32) {
-            const int in = read_host_input();
-            if (UNLIKELY(in == EOF))
-                return 0;
-            m32[b & mask32] = (uint32_t) in;
-            pc += INSN_SIZE;
-        } else if (b == IO_MARKER32) {
-            const int rc = write_host_output(m32[a & mask32]);
-            if (UNLIKELY(rc))
-                return rc;
-            pc += INSN_SIZE;
-        } else if (is_mux(c) && (c & ADDR_MASK32) == ZERO_MASK_ADDR) {
-            /* A MOVE. eForth fakes SUBLEQ's missing indirection by MOVEing a
-             * live address into an operand field of the very next instruction,
-             * then executing it. This idiom is ~23% of all ops (fusing it
-             * measured ~1.5x on the compute goldens). Fuse the pair: do the
-             * MOVE's store, then run that next instruction here, forwarding the
-             * just-written field from a register instead of storing it and
-             * reloading it through the store-to-load stall. The store still
-             * happens, so state stays byte-identical to running the two
-             * instructions in sequence; only the reload is elided.
-             */
-            const uint32_t d = b & mask32, va = m32[a & mask32];
-            m32[d] = va;
-
-            /* pc is unmasked (bit 31 is the halt flag); only memory accesses
-             * mask. Fuse only when the store hit an operand slot of the next
-             * word and that word is not the halt boundary.
-             */
-            const uint32_t next_pc = pc + INSN_SIZE;
-
-            /* np is the masked next pc and, since A == 0, also its a-field
-             * addr. (d - np) & mask32 is d's distance from np mod size, so <
-             * INSN_SIZE means the MOVE's store landed on one of the next word's
-             * 3 fields.
-             */
-            const uint32_t np = next_pc & mask32;
-            if (!(next_pc & NEG_FLAG32) && ((d - np) & mask32) < INSN_SIZE) {
-                const uint32_t nbs = (np + B) & mask32, ncs = (np + C) & mask32;
-                const uint32_t na = d == np ? va : m32[np];
-                const uint32_t nb = d == nbs ? va : m32[nbs];
-                const uint32_t nc = d == ncs ? va : m32[ncs];
-                if (na != IO_MARKER32 && nb != IO_MARKER32) {
-                    pc = exec_alu(m32, mask32, na, nb, nc, next_pc);
-                    continue;
-                }
-            }
-            pc = next_pc;
-        } else {
-            pc = exec_alu(m32, mask32, a, b, c, pc);
-        }
-    }
-}
-
 static struct termios cooked_termios;
 static bool tty_interactive = false;
 
@@ -351,13 +235,13 @@ static void install_handler(int sig, void (*handler)(int), int flags)
     sigaction(sig, &sa, NULL);
 }
 
-static void suspend_handler(UNUSED int sig)
+static void suspend_handler(MUX_UNUSED int sig)
 {
     leave_raw_mode();
     raise(SIGSTOP);
 }
 
-static void resume_handler(UNUSED int sig)
+static void resume_handler(MUX_UNUSED int sig)
 {
     if (raw_wanted)
         enter_raw_mode();
@@ -429,7 +313,8 @@ int main(int argc, char **argv)
 
     if (!file)
         img = load_default();
-    const int rc = run(&img);
+    struct mux_state st = {.m = img.m, .mask = img.mask, .pc = 0};
+    const int rc = mux_exec(&st);
     free(img.m);
     return rc;
 }

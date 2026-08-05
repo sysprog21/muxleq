@@ -56,4 +56,4 @@ arr:
     .word 5, 2, 8, 1, 9, 3, 7, 4, 6, 0   # arbitrary shuffle of 0..9
 
 .text                         # back to code: print_dec's instructions belong in .text
-.include "print_dec.S"        # shared decimal printer (defines print_dec + buf)
+.include "print-dec.S"        # shared decimal printer (defines print_dec + buf)

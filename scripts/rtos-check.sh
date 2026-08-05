@@ -1,4 +1,5 @@
 #!/bin/sh
+
 # RV32I RTOS-on-muxleq coverage suite: build each tests/rv32i/rtos/ program,
 # lower it with `rvopt mux`, run it on muxleq, and assert the exact transcript.
 # Coverage builds up from the primitive to the full RTOS:
@@ -9,8 +10,8 @@
 #                       semaphores, priority-inheritance mutex) under two
 #                       scenarios: inversion avoidance (test-rtos.c) and a
 #                       counting semaphore (test-semaphore.c), under preemption
-# SKIPs (exit 0) without a bare-metal RISC-V toolchain (rvopt/muxleq build from C,
-# but the .elf inputs need the cross tools).
+# SKIPs (exit 0) without a bare-metal RISC-V toolchain (rvopt/muxleq build from
+# C, but the .elf inputs need the cross tools).
 #
 # Convention (this harness only; muxleq's global ABI is unchanged):
 #   - RV32I only, no M-extension (no mul/div/rem); verified per fixture.
@@ -20,10 +21,15 @@
 #   - C code builds at -O0: rvopt resolves an ecall's syscall number by
 #     block-local const-prop, so it cannot see an a7 an optimizer hoisted out of
 #     a loop; -O0 keeps each putchar a self-contained call that reloads a7.
+# CFLAGS/ZFLAGS/LDC/LDS hold multi-word compiler and linker flag strings and are
+# passed unquoted on purpose: POSIX sh has no arrays, so word splitting is how
+# they reach the tool as separate arguments. Quoting them would pass one giant
+# argument and break every build below.
+# shellcheck disable=SC2086
 set -eu
 
-here="$(CDPATH= cd "$(dirname "$0")" && pwd)"
-root="$(CDPATH= cd "$here/.." && pwd)"
+here="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
+root="$(CDPATH='' cd "$here/.." && pwd)"
 DIR="$root/tests/rv32i/rtos"
 CROSS="${CROSS:-riscv-none-elf-}"
 if ! command -v "${CROSS}gcc" >/dev/null 2>&1; then
@@ -36,6 +42,7 @@ if ! command -v "${CROSS}gcc" >/dev/null 2>&1; then
 fi
 RVOPT="${RVOPT:-$root/build/rvopt}"
 MUXLEQ="${MUXLEQ:-$root/build/muxleq}"
+
 # Bound each VM run so a --timer/mret/scheduler regression fails fast instead of
 # hanging the gate; use timeout(1)/gtimeout when present, else run unbounded.
 TIMEOUT=""
@@ -92,9 +99,10 @@ LDC="--oformat=elf32-littleriscv -s -n -T $DIR/rtos.ld"     # C: reserves a stac
 LDS="--oformat=elf32-littleriscv -s -n -T $DIR/../rv32i.ld" # asm: no stack
 "$GCC" $CFLAGS -c "$DIR/crt0.S" -o "$TMP/crt0.o"
 
-# ---- 1. context switch: cooperative two-task kernel over ctx-switch.S --------
-# The cooperative kernel IS the context-switch test: the two tasks alternate to
-# "ABABAB!" only if every ctx_switch preserves and restores the callee-saved set.
+# 1. context switch: cooperative two-task kernel over ctx-switch.S The
+# cooperative kernel IS the context-switch test: the two tasks alternate to
+# "ABABAB!" only if every ctx_switch preserves and restores the callee-saved
+# set.
 echo "== context switch =="
 "$GCC" $CFLAGS -c "$DIR/ctx-switch.S" -o "$TMP/ctx.o"
 "$GCC" $CFLAGS -c "$DIR/test-ctx-switch.c" -o "$TMP/ctxsw.o"
@@ -103,7 +111,7 @@ no_mext "$TMP/ctxsw.o" # the only C in this test; the asm fixtures cannot emit M
 "$RVOPT" mux --indirect "$TMP/ctxsw.elf" >"$TMP/ctxsw.dec"
 run "$TMP/ctxsw.dec" 'ABABAB!' "ctxsw"
 
-# ---- 2. Zicsr: CSR read/modify forms + unsupported-CSR rejection -------------
+# 2. Zicsr: CSR read/modify forms + unsupported-CSR rejection
 echo "== CSR =="
 "$AS" -march=rv32i_zicsr -mabi=ilp32 -o "$TMP/csr.o" "$DIR/test-csr.S"
 "$LD" $LDS -o "$TMP/csr.elf" "$TMP/csr.o"
@@ -121,13 +129,15 @@ grep -q 'unsupported CSR' "$TMP/bad.err" || {
 }
 echo "PASS csr_reject   (unsupported CSR fails at emit)"
 
-# ---- 3. timer interrupt + mret + runtime-mtvec rejection --------------------
+# 3. timer interrupt + mret + runtime-mtvec rejection
 echo "== timer =="
 "$AS" -march=rv32i_zicsr -mabi=ilp32 -o "$TMP/timer.o" "$DIR/test-timer.S"
 "$LD" $LDS -o "$TMP/timer.elf" "$TMP/timer.o"
 "$RVOPT" mux --timer "$TMP/timer.elf" >"$TMP/timer.dec"
 run "$TMP/timer.dec" 'TTR' "timer"
-# A runtime (non-constant) mtvec must be rejected, not compiled against a stale vector.
+
+# A runtime (non-constant) mtvec must be rejected, not compiled against a stale
+# vector.
 printf '%s\n' '.text' '.global _start' '_start:' '  lw t0, 0(sp)' \
     '  csrw mtvec, t0' '  li t0,0x80' '  csrs mie,t0' '  csrsi mstatus,8' \
     '1: wfi' '  j 1b' >"$TMP/rt.S"
@@ -144,10 +154,10 @@ grep -q 'compile-time mtvec' "$TMP/rt.err" || {
 }
 echo "PASS mtvec_reject (runtime mtvec fails under --timer)"
 
-# ---- 4. preemptive RTOS core (rtos.c) under two scenarios -------------------
-# The capstone combines context switch (ktrap.S), CSRs, and the timer. The core
-# rtos.c (scheduler, semaphores, priority-inheritance mutex) links against each
-# scenario. 4a proves inheritance avoids inversion; 4b covers the counting sem.
+# 4. preemptive RTOS core (rtos.c) under two scenarios The capstone combines
+# context switch (ktrap.S), CSRs, and the timer. The core rtos.c (scheduler,
+# semaphores, priority-inheritance mutex) links against each scenario. 4a proves
+# inheritance avoids inversion; 4b covers the counting sem.
 echo "== preemptive RTOS =="
 "$GCC" $ZFLAGS -c "$DIR/ktrap.S" -o "$TMP/ktrap.o"
 "$GCC" $ZFLAGS -c "$DIR/rtos.c" -o "$TMP/rtos.o"

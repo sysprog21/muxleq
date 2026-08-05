@@ -1,15 +1,17 @@
-#!/bin/sh
+#!/usr/bin/env bash
+
 # Install the xPack GNU RISC-V bare-metal toolchain (riscv-none-elf-), which
 # matches the project default RVCROSS prefix, so make check and friends build
 # the RV32I programs from source with no RVCROSS override. Adds the toolchain to
-# PATH for later CI steps and skips the download when the cache already holds the
-# requested version. Bump XPACK_RISCV_VERSION (and XPACK_RISCV_SHA256) together
-# to move to a newer release.
+# PATH for later CI steps and skips the download when the cache already holds
+# the requested version. Bump XPACK_RISCV_VERSION (and XPACK_RISCV_SHA256)
+# together to move to a newer release.
 set -eu
 
 VERSION="${XPACK_RISCV_VERSION:-15.2.0-1}"
 ARCH="${XPACK_RISCV_ARCH:-linux-x64}"
 DEST="${XPACK_RISCV_DIR:-$HOME/riscv-none-elf-gcc}"
+
 # SHA-256 of xpack-riscv-none-elf-gcc-15.2.0-1-linux-x64.tar.gz from the xPack
 # release notes. Override alongside XPACK_RISCV_VERSION / XPACK_RISCV_ARCH.
 SHA256="${XPACK_RISCV_SHA256:-aaaa8060c914851a3e5ee1ba82cc3d6f80972f90638a05c6e823a37557a33758}"

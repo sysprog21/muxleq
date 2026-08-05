@@ -38,7 +38,7 @@ done:
     li   a0, 0
     ecall
 
-.include "print_dec.S"        # shared decimal printer (defines print_dec + buf)
+.include "print-dec.S"        # shared decimal printer (defines print_dec + buf)
 
 .section .bss
 sieve: .space N + 1
