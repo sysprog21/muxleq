@@ -10,7 +10,7 @@
 <div class="wrapper">
 
 <header>
-  <h1>eForth on MUXLEQ</h1>
+  <h1>eForth on <a href="https://github.com/sysprog21/muxleq">MUXLEQ</a></h1>
   <p>A Forth tutorial you can type into, running a real eForth on a
      two-instruction virtual machine compiled to WebAssembly.</p>
   <p>Adapted from <a href="https://github.com/ruv/easyforth">Easy Forth</a> by
@@ -37,21 +37,39 @@
 
 <p>Forth is a language with almost no syntax. There are no expressions, no
 operator precedence, and barely any keywords. There is a stack, and there are
-words that do things to it. That is nearly the whole language, which is why it
-fits on machines that have no business running a language at all.</p>
+words that act on it. That is nearly the whole language, which is why it fits on
+machines that have no business running a language at all.</p>
 
-<p>The machine underneath this page is one of those. MUXLEQ is a
-one-instruction computer: memory is an array of 32-bit cells, and the only thing
-it can do is subtract one cell from another and branch if the result went
-non-positive. A second form of the same instruction copies bits through a mask.
-That is the entire instruction set, and an eForth system is built on top of
-it.</p>
+<p>The machine underneath this page is one of those. MUXLEQ is memory, two
+instruction forms, and one reserved escape. Memory is a flat array of 32-bit
+cells, and an instruction is three consecutive cells. The first form, SUBLEQ,
+subtracts one cell from another and branches if the result came out
+non-positive, which on its own is enough to compute anything. The second, MUX,
+copies bits from one cell to another through a mask, which makes a move a single
+instruction and shortens the subtract-and-branch sequences the boolean
+operations would otherwise need. One reserved mask address escapes to a native
+right shift, the one useful thing neither form can do cheaply. There are no
+registers, no call instruction, and no indirect addressing: code that needs a
+pointer writes the address into the operand field of the instruction about to
+run. <a href="#underneath">The last chapter</a> gives the whole instruction set
+in a dozen lines, and the
+<a href="https://github.com/sysprog21/muxleq/blob/main/docs/manual.md">reference
+manual</a> documents the machine, its image format, and how the system is
+built.</p>
 
-<p>The interpreter you are about to type into is the same C program that runs
-from a terminal, compiled to WebAssembly, running the same eForth image. It is
-about 27 KB of WebAssembly and it imports nothing from the browser. This is not a
-Forth-flavoured toy written in JavaScript: when a word misbehaves here it
-misbehaves the same way on the command line.</p>
+<p>eForth is what makes such a machine usable. It is a compact Forth designed to
+be brought up on unlikely targets: about two dozen primitives written in machine
+code, and everything above them, the interpreter, the compiler, the decompiler, a
+screen editor, more than 250 words in all, written in Forth itself. On MUXLEQ
+that comes to roughly 6,600 cells. The image also carries the cross compiler that
+produced it, so the system can rebuild itself from its own Forth sources, and the
+rebuilt image coming out byte-identical is how the project knows the compiler is
+correct.</p>
+
+<p>What you are about to type into is that pair, unchanged: the same C
+interpreter that runs from a terminal, compiled to WebAssembly, running the same
+eForth image. This is not a Forth-flavored toy written in JavaScript; when a word
+misbehaves here it misbehaves the same way on the command line.</p>
 
 <p>Every editor on this page gets its own machine. A word you define in one does
 not exist in the next, so you can experiment freely. The <code>reset</code>
@@ -298,7 +316,7 @@ already compiled against it keeps using the old one; new code picks up the new
 one. Try defining <code>square</code> twice and calling <code>cube</code>.</p>
 
 <p>Type <code>words</code> in any editor to see everything the system knows.
-There are several hundred, all of them built out of the same two machine
+There are more than 250, all of them built out of the same two machine
 instructions.</p>
 
 <h2 id="printing">Printing</h2>
@@ -457,24 +475,24 @@ far. Watch it move as you define words.</p>
 
 <p>The editor below has a 24 by 24 display next to it. The display is not a
 device: it is 576 consecutive cells of ordinary Forth memory, and this page
-paints whatever colour numbers it finds in them. <code>graphics</code> pushes
+paints whatever color numbers it finds in them. <code>graphics</code> pushes
 the address of the first cell. Cell 0 is the top left corner, and the rows run
 left to right.</p>
 
-<p>Colour 0 is the background and 1 through 15 are colours. Storing into a cell
+<p>Color 0 is the background and 1 through 15 are colors. Storing into a cell
 is all it takes:</p>
 
-<pre><code>: plot ( colour x y -- ) 24 * + cells graphics + ! ;
+<pre><code>: plot ( color x y -- ) 24 * + cells graphics + ! ;
 3 5 5 plot</code></pre>
 
 <div class="editor" data-canvas></div>
 
 <p>Everything else is ordinary Forth. A horizontal line is a loop over
-<code>plot</code>, filling the screen is a loop over that, and a colour ramp is
+<code>plot</code>, filling the screen is a loop over that, and a color ramp is
 two nested loops:</p>
 
-<pre><code>: hline ( colour y -- ) 24 0 do 2dup i swap plot loop 2drop ;
-: flood ( colour -- ) 24 0 do dup i hline loop drop ;
+<pre><code>: hline ( color y -- ) 24 0 do 2dup i swap plot loop 2drop ;
+: flood ( color -- ) 24 0 do dup i hline loop drop ;
 4 flood
 : ramp 24 0 do 24 0 do j i + 15 and i j plot loop loop ;
 ramp</code></pre>
@@ -530,8 +548,8 @@ worth more than one segment.</p>
 <h2 id="underneath">Underneath: two instructions</h2>
 
 <p>Everything on this page, the interpreter, the compiler, the decompiler, the
-number formatter, runs on a machine with one instruction and one addressing
-mode.</p>
+number formatter, runs on the machine sketched at the top: two instruction
+forms, one addressing mode, no indirection.</p>
 
 <p>Memory is an array of 32-bit cells, addressed by cell number. An instruction
 is three consecutive cells, <code>a</code>, <code>b</code> and <code>c</code>,
@@ -548,17 +566,16 @@ held at the address in the low bits of <code>c</code>:</p>
 <pre class="pseudo"><code>Mem[b] = (Mem[a] &amp; ~m) | (Mem[b] &amp; m)</code></pre>
 
 <p>Two mask addresses are special. Cell 6 always holds zero, so a mask fetched
-from it selects all of <code>Mem[a]</code>, making the instruction a plain
-move, which is the single most common operation in the image. The reserved
-address <code>$7FFFFFFE</code> means shift right by one, so shifting costs one
-instruction per bit instead of a loop. Input, output and halt are spelled with
-<code>-1</code> in the <code>a</code>, <code>b</code> and <code>c</code> field
-respectively.</p>
+from it selects all of <code>Mem[a]</code>, making the instruction a plain move,
+which pure SUBLEQ needs a multi-instruction sequence for. The reserved address
+<code>$7FFFFFFE</code> means shift right by one, turning a bit-serial loop into
+one instruction. Input, output and halt are spelled with <code>-1</code> in the
+<code>a</code>, <code>b</code> and <code>c</code> field respectively.</p>
 
-<p>There is no indirect addressing, so a Forth built on this cannot fetch
-through a pointer the way you would expect. It gets there by writing the address
-into the operand field of the next instruction and then running it. The image
-modifies itself constantly, and that is the normal case rather than a trick.</p>
+<p>With no indirect addressing, a Forth built on this cannot fetch through a
+pointer the way you would expect. It gets there by writing the address into the
+operand field of the next instruction and then running it. The image modifies
+itself constantly, and that is the normal case here rather than a trick.</p>
 
 <p>You can see the result. <code>see</code> decompiles a word back into the
 words it was built from:</p>
@@ -577,13 +594,15 @@ see cube</code></pre>
 29020 |  *
  ;</div>
 
-<p>The entire eForth image is about 6,600 cells, or 26 KB, and it contains its
-own cross compiler: the system can rebuild itself from the Forth sources in
-<code>forth/</code>. The WebAssembly module that runs it is 27 KB and imports
-nothing at all from the browser, because a machine this simple needs nothing
-from its host except a byte in and a byte out.</p>
+<p>A machine this simple asks nothing of its host but a byte in and a byte out,
+which is why the WebAssembly module running all of the above imports nothing at
+all from the browser. The
+<a href="https://github.com/sysprog21/muxleq/blob/main/docs/manual.md">reference
+manual</a> has the rest: the image layout, the self-modifying-operand rules, and
+the bootstrap that rebuilds the image from the Forth sources in
+<code>forth/</code>.</p>
 
-<p>Try <code>here .</code> to see how much of it you have used, and
+<p>Try <code>here .</code> to see how much of the image you have used, and
 <code>words</code> to see what you got for it.</p>
 
 <footer>

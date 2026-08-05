@@ -24,102 +24,73 @@ self-hosting eForth image; given a FILE it loads and runs that standalone
 MUXLEQ image instead: `./build/muxleq image.dec`.
 
 ## Introduction
-This repository contains a full toolchain for the MUXLEQ architecture, including:
+This repository contains a full toolchain for the MUXLEQ architecture:
 1. An assembler for the MUXLEQ instruction set.
 2. A virtual machine built upon the assembler.
-3. A cross-compiler that targets the VM with a version of the eForth programming language.
+3. A cross-compiler that targets the VM with a version of the eForth language.
 4. `rvopt`, a standalone RV32I-to-MUXLEQ compiler for wide native MUXLEQ images.
 
-The system is self-hosted, meaning the eForth environment can compile new versions of itself from source,
-allowing for seamless modification and extension.
-
-SUBLEQ is a Turing-complete One-Instruction Set Computer (OISC).
-While esoteric, its ability to run a high-level language like Forth is a powerful demonstration of computational minimalism.
-This project serves as an experimental platform for exploring the execution of high-level languages on a minimal hardware-like foundation.
+SUBLEQ is a Turing-complete One-Instruction Set Computer (OISC). Running a
+high-level language on one is a demonstration of computational minimalism, and
+this project is a platform for exploring how far that goes. The system is
+self-hosted: the eForth environment compiles new versions of itself from source,
+so it can be modified and extended from within.
 
 ## Getting Started
-This project requires a C compiler, Gforth, and GNU Make.
+[eForth on MUXLEQ](https://sysprog21.github.io/muxleq/) runs this same VM and this
+same eForth image in a browser, as an interactive tutorial with a live stack
+viewer, a 24x24 display mapped onto Forth memory, and a playable snake. Its text
+is adapted from [Easy Forth](https://github.com/ruv/easyforth) by Nick Morgan and
+rewritten for a real eForth: the words this system actually has, the throw codes
+it actually produces, and a closing chapter on the two instructions everything
+above it is built from. The sources are `wasm/`, and a push to the default branch
+that touches them republishes the page.
+
+Building locally needs a C compiler, Gforth, and GNU Make.
 * macOS: `brew install gforth`
 * Ubuntu/Debian: `sudo apt-get install gforth build-essential`
 
-Build the VM and start the eForth interpreter:
 ```shell
-$ make run
+$ make run       # build build/muxleq, then start the eForth interpreter
 ```
 
-An example session:
+Forth calls its commands "words," and a session is just words applied to a stack:
 ```
-words
-21 21 + . cr
-: hello ." Hello, World!" cr ;
-hello
+words                            \ list every word in the dictionary
+21 21 + . cr                     \ RPN: push 21, push 21, add, print "42"
+: hello ." Hello, World!" cr ;   \ define a word
+hello                            \ run it by naming it
 bye
 ```
 
-In Forth, executable commands are called "words."
-The `words` command lists all defined functions in the dictionary.
-Forth uses Reverse Polish Notation (RPN), so `21 21 + . cr` pushes 21,
-then 21, adds them, prints the result, and adds a carriage return.
-
-New words are defined with `: <name> <definition> ;`.
-Once defined, the word `hello` can be executed by typing its name.
-
-### The browser tutorial
-
-`wasm/` holds an interactive Forth tutorial that runs the same VM and the same
-eForth image in a browser, with a live stack viewer, a 24x24 display mapped onto
-Forth memory, and a playable snake:
-
-```shell
-$ make wasm-serve      # needs emcc; then open http://localhost:8000/
-```
-
-The module is about 27 KB and imports nothing from the host, because the
-interpreter is shared verbatim with the native VM through
-[`muxleq-core.h`](muxleq-core.h). The only difference is the host: a browser tab
-cannot block on a keystroke, so the WebAssembly build interprets a bounded slice
-and returns, resuming where it left off. `make check-wasm` proves that
-rewrite changed nothing, by building the same host natively and diffing its
-output against the reference VM, and then checks the page itself: the runtime,
-every runnable example in the tutorial, and the editor widget driven by
-synthetic keystrokes in headless Chrome.
-
-The text is adapted from [Easy Forth](https://github.com/ruv/easyforth) by Nick
-Morgan, rewritten for a real eForth: it teaches the words this system actually
-has, reports errors as the throw codes it actually produces, and ends with a
-chapter on the two instructions everything above it is built from.
-
 ### Testing, benchmarking, and internals
 
-- `make check` runs the pre-commit gate: byte-exact 32-bit golden-output tests,
-  the PTY editor golden, 32-bit eForth smokes, and the self-hosting bootstrap.
-- `make check-all` runs `make check` plus wide native-image fuzz, loader rejection,
-  and ASan/UBSan validation.
-- `make check-wasm` validates the WebAssembly build and the browser tutorial. It
-  skips whatever is missing (emcc, node, headless Chrome) rather than failing.
-- `make check-analyze` runs clang `--analyze`, cppcheck, and shellcheck over the C
-  and shell sources, all of which are clean. Deliberate exceptions carry inline
-  suppressions with a reason. Part of `check-all`; skips absent tools.
-- `rvopt` is a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat binary to a native
-  MUXLEQ image running on the two ops directly, with no interpreter layer:
-  `rvopt mux prog > prog.dec` then `./build/muxleq prog.dec`.
-  See [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
+- `make check` is the pre-commit gate: byte-exact golden output, the `see` and
+  PTY-editor goldens, eForth smokes, CSR/timer lowering, RV32I and RTOS coverage,
+  the WebAssembly build, and the self-hosting bootstrap. `make check-all` adds
+  wide native-image emission, loader rejection, the prebuilt-release contract
+  test, differential `rvopt` fuzzing, static analysis (clang `--analyze`,
+  cppcheck, shellcheck, all clean), and ASan/UBSan. Members whose tools are
+  absent (emcc, node, headless Chrome) skip rather than fail. `make help` lists
+  every target; `make bench` times the eForth kernels and rvopt-lowered
+  DureMark.
+- `rvopt` is a standalone ahead-of-time compiler that lowers an RV32I ELF32/flat
+  binary to a native MUXLEQ image running on the two ops directly, with no
+  interpreter layer: `rvopt mux prog > prog.dec`, then `./build/muxleq prog.dec`.
+  Two opt-in flags serve kernel-style code, `--indirect` for computed jump
+  targets and `--timer` for block-boundary timer interrupts, which is what the
+  RTOS experiment in [`tests/rv32i/rtos/`](tests/rv32i/rtos) runs on. See
+  [`docs/rvopt-native-muxleq.md`](docs/rvopt-native-muxleq.md).
 - RV32I test programs: freestanding RISC-V demos, benchmarks, and the official
-  rv32ui conformance suite live in [`tests/rv32i/`](tests/rv32i). `make rv32i`
-  cross-builds the demo, unopt, and DureMark programs into `build/rv32i`;
-  `make rv32i-check` additionally lowers the demo, unopt, and DureMark programs
-  with `rvopt mux`, runs them on the VM, and runs the rv32ui conformance suite.
-  DureMark asserts its deterministic checksum, so it gates rvopt lowering and VM
-  execution end to end. Both need a bare-metal
-  `riscv-none-elf-*` toolchain, such as the
-  [xPack GNU RISC-V toolchain](https://xpack-dev-tools.github.io/riscv-none-elf-gcc-xpack/).
-  CI builds and runs everything with the xPack toolchain on every push. On the
-  default branch it also stages just the files the release carries into
-  `build/rv32i-release`, records their digests in `rv32i/MANIFEST.sha256`, and
-  publishes that tree as a rolling `rv32i-latest` pre-release, replaced whenever
-  the staged payload changes; every run additionally uploads the build tree as
-  the `rv32i-binaries` workflow artifact. Either lets you download prebuilt
-  images without a cross toolchain installed.
+  rv32ui conformance suite live in [`tests/rv32i/`](tests/rv32i). DureMark
+  asserts a deterministic checksum, so it gates rvopt lowering and VM execution
+  end to end. `make check-rv32i` builds them from source when a bare-metal
+  `riscv-none-elf-*` toolchain is installed, such as the
+  [xPack GNU RISC-V toolchain](https://xpack-dev-tools.github.io/riscv-none-elf-gcc-xpack/),
+  and otherwise falls back to prebuilt images, so no cross toolchain is required.
+  Those come from the rolling `rv32i-latest` pre-release, which CI republishes
+  from the default branch whenever the payload changes, with per-file digests in
+  `rv32i/MANIFEST.sha256`; every run also uploads a `rv32i-binaries` artifact.
 - [`docs/manual.md`](docs/manual.md) is the reference manual: the instruction set, memory image and
   self-modifying-operand rules, the build/bootstrap pipeline, the interpreter, and the eForth
   environment.
@@ -183,17 +154,12 @@ while not (pc & 0x80000000): # run until the PC's high bit is set (halt)
             pc = c                  # Branch
 ```
 
-MUX with constants `0` and `-1` can implement any boolean function:
-- AND: Use selector = second operand
-- OR: Use selector = ~first operand
-- XOR: Combine multiple MUX operations
-- NOT: MUX with swapped true/false values
+MUX with constants `0` and `-1` implements any boolean function: AND selects on
+the second operand, OR on the complement of the first, NOT swaps the true and
+false values, and XOR combines several MUX steps. Each takes dozens of
+instructions in pure SUBLEQ. A mask of `0` likewise gives a single-instruction
+MOVE in place of SUBLEQ's multi-instruction copy sequence.
 
-The above are expensive in pure SUBLEQ (requiring dozens of instructions).
-
-Setting the mask to 0 makes a single-instruction MOVE, replacing SUBLEQ's
-multi-instruction copy sequence. Boolean masking through MUX likewise collapses
-bit-twiddling that pure SUBLEQ would build from many subtract-and-branch steps.
 Because MUX is a *same-lane* selector, though, it cannot move a bit between
 positions (it cannot shift). That gap is what the native-primitive mechanism
 below fills.
@@ -261,7 +227,7 @@ bootstrap succeeds.
 `MUXLEQ` is available under a permissive
 [MIT](https://opensource.org/license/mit)-style license.
 Use of this source code is governed by a MIT license that can be found
-in the [LICENSE](LICENSE) file. 
+in the [LICENSE](LICENSE) file.
 It was originally written by [Richard James Howe](https://github.com/howerj).
 
 ## Reference

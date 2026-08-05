@@ -203,7 +203,7 @@ export class Forth {
   pump(capMs = 30) {
     if (this.dead || this.running) return false;
     this.running = true;
-    // Defence in depth for the flag itself: every ordinary exit below clears it,
+    // Defense in depth for the flag itself: every ordinary exit below clears it,
     // but an exception thrown anywhere in the loop would otherwise leave it set
     // and every later pump() would return false at the guard above, with the
     // widget stuck reporting that a program is still running.

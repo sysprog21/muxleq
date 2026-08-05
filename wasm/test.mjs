@@ -140,7 +140,7 @@ check("a stopped machine refuses to run", doomed.pump(50), false);
 // The viewer needs the numeric base to make sense of what .s printed, and the
 // signed value behind each item so it can show the same bits other ways. The
 // underflow earlier in this run left residue below, hence the slice: that is
-// eForth's behaviour, not a bug in the report.
+// eForth's behavior, not a bug in the report.
 line("decimal 255 -1");
 check("report carries the base", report.base, 10);
 check("report carries values", report.values.slice(-2).join(","), "255,-1");
