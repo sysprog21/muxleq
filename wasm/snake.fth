@@ -2,7 +2,7 @@
 \ Adapted from the Easy Forth book's snake by Nick Morgan.
 \
 \ The board is the "graphics" block: one cell per pixel, and the page paints
-\ whatever colour number it finds there. Nothing is pushed to the host, so the
+\ whatever color number it finds there. Nothing is pushed to the host, so the
 \ whole game is just stores into Forth memory.
 
 24 constant width
@@ -34,8 +34,8 @@ $82 constant k-right
 $83 constant k-down
 
 : xy ( x y -- addr )  width * + cells graphics + ;
-: draw ( colour x y -- )  xy ! ;
-: colour@ ( x y -- colour )  xy @ ;
+: draw ( color x y -- )  xy ! ;
+: color@ ( x y -- color )  xy @ ;
 
 : seg-x ( i -- addr )  cells snake-x + ;
 : seg-y ( i -- addr )  cells snake-y + ;
@@ -96,7 +96,7 @@ $83 constant k-down
   begin
     width 4 - random 2 +  apple-x !
     height 4 - random 2 + apple-y !
-    apple-x @ apple-y @ colour@ bg =
+    apple-x @ apple-y @ color@ bg =
   until ;
 
 : show-apple ( -- )  fruit apple-x @ apple-y @ draw ;
@@ -115,7 +115,7 @@ $83 constant k-down
 
 \ The head has already moved when this runs, so whatever is under it is what it
 \ just ran into. The apple is cleared first, so only a wall or the body is left.
-: crashed? ( -- flag )  snake-x @ snake-y @ colour@ bg <> ;
+: crashed? ( -- flag )  snake-x @ snake-y @ color@ bg <> ;
 
 \ show-snake before place-apple: the retry loop tests the screen, so the snake
 \ has to be on it or the very first apple can still land on a segment.

@@ -8,7 +8,7 @@
 //
 // Boxes run left to right, bottom of the stack to top, which is the order the
 // notation itself reads: in ( n1 n2 -- sum ) the rightmost item is the topmost.
-// The top is labelled anyway, because that is the thing beginners get wrong.
+// The top is labeled anyway, because that is the thing beginners get wrong.
 //
 // Click a cell for the other readings of those 32 bits. That is the shortest
 // route to understanding why true is -1 here.

@@ -155,7 +155,7 @@ blockquote {
 
 .stack-cell:hover { border-color: var(--accent); }
 
-/* The top is the one beginners misread, so it is labelled, not just implied. */
+/* The top is the one beginners misread, so it is labeled, not just implied. */
 .stack-cell.top {
   border-color: var(--accent);
   box-shadow: inset 0 -2px 0 var(--accent);

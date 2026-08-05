@@ -100,7 +100,7 @@ try {
   await type(canvas, "twice");
   check("editors are independent", /\?/.test(transcript(canvas)), "true");
 
-  await type(canvas, ": plot ( colour x y -- ) 24 * + cells graphics + ! ;");
+  await type(canvas, ": plot ( color x y -- ) 24 * + cells graphics + ! ;");
   await type(canvas, "5 3 4 plot");
   const ctx = canvas.querySelector(".canvas").getContext("2d");
   const px = canvas.querySelector(".canvas").width / 24;
