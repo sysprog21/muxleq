@@ -7,8 +7,8 @@
 #              rv32i-latest pre-release and runs them through rvopt+muxleq
 #   sanitize : make check-sanitize (ASan/UBSan over the interpreter and emitters)
 #   deep     : wide native-image validation, multi-seed rvopt differential
-#              fuzz (make check-fuzz-rvopt), loader rejection, and the offline
-#              prebuilt-script contract test
+#              fuzz (make check-fuzz-rvopt), loader rejection, the offline
+#              prebuilt-script contract test, and static analysis
 #   rv32i    : cross-build the tests/rv32i programs with the xPack RISC-V
 #              toolchain, run them + the rv32ui conformance suite through
 #              rvopt+muxleq, time the benchmarks (make bench), upload the
@@ -17,8 +17,14 @@
 #              published tarball includes the rv32ui .elf inputs, so the
 #              toolchain-less "check" job above can run the full suite too.
 #
-# check, sanitize, and deep cover the local check-all gate. No job depends on
-# another, so all five run concurrently.
+# check, sanitize, and deep cover the local check-all gate. check-analyze's two
+# version-sensitive tools are handled explicitly rather than left to whatever a
+# runner image ships, since unpinned shellcheck once failed this build on a
+# finding no contributor could reproduce: shellcheck is pinned by version and
+# hash in the deep job, and cppcheck is turned off there by passing CPPCHECK=,
+# so an image that starts shipping it cannot silently begin gating the build.
+# clang --analyze runs against the clang the setup action installs. No job
+# depends on another, so all five run concurrently.
 name: ci
 
 on:
@@ -112,6 +118,21 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install dependencies
         uses: ./.github/actions/setup-build
+      - name: Install pinned shellcheck
+        # check-analyze runs shellcheck, whose findings drift between releases
+        # exactly as clang-format's output does: the runner image ships an older
+        # one that reports an SC2015 that 0.11.0 does not. Pinning it to the
+        # version contributors get from a current distro or brew is what makes a
+        # local "make check-analyze" predict this job. Hashed like the format
+        # job's shfmt, so a re-published asset cannot change what CI runs.
+        run: |
+          sc_sha=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo "$sc_sha  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 0755 /tmp/shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
+          shellcheck --version
       - name: Wide native-image validation
         # REPO points the prebuilt-script live smoke at this repo's own release,
         # so a fork tests its own artifacts (or skips) rather than upstream's.
@@ -120,6 +141,7 @@ jobs:
         run: |
           make check-mux check-loader-rejects check-prebuilt
           make check-fuzz-rvopt
+          make CPPCHECK= check-analyze
 
   rv32i:
     runs-on: ubuntu-24.04

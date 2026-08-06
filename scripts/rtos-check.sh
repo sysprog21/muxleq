@@ -86,11 +86,14 @@ run() { # dec-file expected-output label
     printf 'PASS %-12s cells=%-6s wall=%sms\n' "$3" "$(wc -l <"$1" | tr -d ' ')" "$ms"
 }
 no_mext() { # elf: fail if it contains an RV32M instruction
-    "$OBJDUMP" -d "$1" | grep -Eq '\b(mul|mulh|div|divu|rem|remu)\b' &&
-        {
-            echo "FAIL $1: emitted an M-extension instruction"
-            exit 1
-        } || :
+    # Spelled as an if rather than "A && { ...; } || :" so the no-match case
+    # still returns 0 under set -e without the trailing no-op. The old form was
+    # correct (the braces exit, so the ":" was unreachable when the grep hit)
+    # but it is the exact shape SC2015 warns about, and older shellchecks say so.
+    if "$OBJDUMP" -d "$1" | grep -Eq '\b(mul|mulh|div|divu|rem|remu)\b'; then
+        echo "FAIL $1: emitted an M-extension instruction"
+        exit 1
+    fi
 }
 
 CFLAGS="-march=rv32i -mabi=ilp32 -ffreestanding -nostdlib -O0 -Wall"
