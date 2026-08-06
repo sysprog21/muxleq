@@ -153,10 +153,16 @@ check-csr-timer: $(BIN) $(RVOPT) ## Check --timer CSR/mtvec/mret/safepoint lower
 # Standalone native-image emission: run a hand-written smoke image (MOVE, SUBLEQ
 # arithmetic + branch-to-halt, PUT at the 32-bit encoding), a high-address
 # image, and wide differential fuzz.
-check-mux: $(BIN) $(RVOPT) ## Verify wide 32-bit-cell native emission.
-	$(Q)$(RUN) ./$(BIN) tests/mux-smoke.dec > $(TMPDIR)/mux-smoke.out 2>&1 \
-	    && cmp -s tests/expected/mux-smoke.out $(TMPDIR)/mux-smoke.out \
-	    || { echo "check-mux: wide-VM smoke output mismatch"; exit 1; }
+check-mux: $(BIN) $(RVOPT) scripts/gen-mux-smoke.fth ## Verify wide 32-bit-cell native emission.
+	$(Q)if ! command -v gforth >/dev/null 2>&1; then \
+	    $(PRINTF) "check-mux: smoke image [SKIP: no gforth]\n"; \
+	else \
+	    gforth scripts/gen-mux-smoke.fth > $(TMPDIR)/mux-smoke.dec \
+	        || { echo "check-mux: smoke image generation failed"; exit 1; }; \
+	    $(RUN) ./$(BIN) $(TMPDIR)/mux-smoke.dec > $(TMPDIR)/mux-smoke.out 2>&1 \
+	        && cmp -s tests/expected/mux-smoke.out $(TMPDIR)/mux-smoke.out \
+	        || { echo "check-mux: wide-VM smoke output mismatch"; exit 1; }; \
+	fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 scripts/gen-mux-high-image.py > $(TMPDIR)/mux-high.dec \
 	        && $(RUN) ./$(BIN) $(TMPDIR)/mux-high.dec > $(TMPDIR)/mux-high.out 2>&1 \
@@ -275,23 +281,31 @@ check-eforth-repl: $(BIN) ## Smoke-test the 32-bit-cell eForth REPL.
 	    || { echo "check-eforth-repl: max search-order smoke failed"; exit 1; }
 	$(Q)$(PRINTF) "check-eforth-repl: 32-bit eForth REPL smokes "; $(call notice, [OK])
 
-check-loader-rejects: $(BIN) tests/loader-bad-token.dec tests/loader-out-of-range.dec ## Verify malformed image rejection.
+# The two shapes load_muxleq() must reject: a token that is not a number, and a
+# value one past the widest cell. Deferred, not simply expanded, so it picks up
+# TMPDIR at recipe time; both consumers below call it so the malformed data has
+# one spelling.
+GEN_LOADER_REJECTS = printf '0\nbad\n' > $(TMPDIR)/loader-bad-token.dec && \
+                     printf '4294967296\n' > $(TMPDIR)/loader-out-of-range.dec
+
+check-loader-rejects: $(BIN) ## Verify malformed image rejection.
+	$(Q)$(GEN_LOADER_REJECTS)
 	$(Q)for flag in -r -x -s -p; do \
 	    ! ./$(BIN) $$flag >/dev/null 2>$(TMPDIR)/loader.err \
 	        && grep -q 'unknown option' $(TMPDIR)/loader.err \
 	        || { echo "check-loader-rejects: $$flag did not report unknown option"; exit 1; }; \
 	done
-	$(Q)for f in tests/loader-bad-token.dec tests/loader-out-of-range.dec; do \
-	    ! ./$(BIN) $$f >/dev/null 2>$(TMPDIR)/loader.err \
+	$(Q)for f in $(TMPDIR)/loader-bad-token.dec $(TMPDIR)/loader-out-of-range.dec; do \
+	    ! $(RUN) ./$(BIN) $$f >/dev/null 2>$(TMPDIR)/loader.err \
 	        && grep -q 'bad cell' $(TMPDIR)/loader.err \
 	        || { echo "check-loader-rejects: accepted $$f"; exit 1; }; \
 	done
 	$(Q)printf '6 4294967295 0 4 4 4294967295 010\n' > $(TMPDIR)/loader-dec010.dec; \
-	    ./$(BIN) $(TMPDIR)/loader-dec010.dec > $(TMPDIR)/loader.out \
+	    $(RUN) ./$(BIN) $(TMPDIR)/loader-dec010.dec > $(TMPDIR)/loader.out \
 	        && printf '\n' | cmp -s - $(TMPDIR)/loader.out \
 	        || { echo "check-loader-rejects: parsed leading-zero decimal as non-decimal"; exit 1; }
 	$(Q)printf '6 4294967295 0 4 4 4294967295 0x0A\n' > $(TMPDIR)/loader-hex.dec; \
-	    ./$(BIN) $(TMPDIR)/loader-hex.dec > $(TMPDIR)/loader.out \
+	    $(RUN) ./$(BIN) $(TMPDIR)/loader-hex.dec > $(TMPDIR)/loader.out \
 	        && printf '\n' | cmp -s - $(TMPDIR)/loader.out \
 	        || { echo "check-loader-rejects: rejected 0x-prefixed cell"; exit 1; }
 	$(Q)$(MUXLEQ_CC) $(CFLAGS) -DMUX_MAX_CELLS=131072 -I$(OUT) \
@@ -460,19 +474,36 @@ run: $(BIN) ## Run the interactive VM.
 	$(Q)./$(BIN)
 
 # Source formatter and lint. C sources are reformatted in place with
-# clang-format (the project .clang-format), Python scripts with black. The Forth
-# half lints the forth/ modules and the .fth tests: it catches the multi-line
+# clang-format (the project .clang-format), Python scripts with black, shell
+# scripts with shfmt. The Forth half lints the forth/ modules and the .fth tests:
+# it catches the multi-line
 # "( )" comment that compiles under gforth yet breaks the self-host bootstrap
 # with -13, plus hard tabs, and strips trailing whitespace with --fix. Reflowing
 # Forth leading whitespace is opt-in (scripts/forth-indent.py --reindent), NOT
 # run here, because the metacompiler's label and fall-through idioms are hand-
 # tuned and do not nest mechanically. Each half degrades to a skip when its tool
 # is absent. The generated $(MUXLEQ_FTH) is not linted; its modules are.
-# Derived from the same pathspec .ci/check-format.sh checks, so "make indent"
-# formats exactly what CI enforces (tracked C/include sources outside tests/).
-CFMT_SRC := $(shell git ls-files -- '*.c' '*.h' '*.inc' ':!tests/')
-PYFMT_SRC := $(wildcard scripts/*.py)
-FORTH_SRC := $(MUXLEQ_FORTH_MODULES) $(wildcard tests/*.fth)
+# Every list below is the pathspec .ci/check-format.sh collects for that
+# language, so "make indent" can actually produce a tree "make check-format"
+# accepts. It could not before: shell was enforced by CI and formatted by
+# nothing here, so a contributor who edited a .sh and ran indent still failed
+# the format job. Asking git rather than globbing a directory list is the other
+# half of that, and is what already went wrong once (a wildcard over forth/ and
+# tests/ silently left wasm/snake.fth unlinted).
+#
+# Asking git also means these are empty outside a checkout (a source tarball, a
+# "git archive" export), where every consumer would otherwise report success
+# having examined no files. Both consumers refuse an empty list rather than
+# claim a vacuous [OK]; check-analyze never ran there anyway, since its
+# shellcheck half enumerates the same way.
+#
+# Version pinning is NOT mirrored: CI requires black 26.5.1 and shfmt 3.13.1
+# exactly, while indent runs whatever is installed, and only clang-format is
+# version-gated here. A contributor on a different black still gets rejected by
+# CI, just later than they should be.
+CFMT_SRC := $(wildcard $(shell git ls-files -- '*.c' '*.h' '*.inc' ':!tests/' 2>/dev/null))
+PYFMT_SRC := $(wildcard $(shell git ls-files -- '*.py' ':!tests/' ':!externals/' 2>/dev/null))
+FORTH_SRC := $(wildcard $(shell git ls-files -- '*.fth' ':!externals/' 2>/dev/null))
 # clang-format output is version-sensitive, so the project pins version 20.
 # Detect a clang-format-20 binary first, otherwise accept a plain clang-format
 # only when it reports major version 20. A present but wrong-versioned
@@ -480,7 +511,10 @@ FORTH_SRC := $(MUXLEQ_FORTH_MODULES) $(wildcard tests/*.fth)
 CLANG_FORMAT := $(shell command -v clang-format-20 2>/dev/null || \
     { command -v clang-format >/dev/null 2>&1 && \
       clang-format --version | grep -q 'version 20\.' && command -v clang-format; })
-indent: ## Format C/Python and lint Forth sources.
+SHFMT_SRC := $(wildcard $(shell git ls-files -- '*.sh' ':!tests/' ':!externals/' 2>/dev/null))
+indent: ## Format C/Python/shell and lint Forth sources.
+	$(Q)test -n "$(strip $(CFMT_SRC))$(strip $(FORTH_SRC))" || { \
+	    echo "indent: no sources enumerated; needs a git checkout"; exit 1; }
 	$(Q)if [ -n "$(CLANG_FORMAT)" ]; then \
 	    $(CLANG_FORMAT) -i $(CFMT_SRC) || exit 1; \
 	    $(PRINTF) "indent: $(notdir $(CLANG_FORMAT)) C sources "; $(call notice, [OK]); \
@@ -491,6 +525,10 @@ indent: ## Format C/Python and lint Forth sources.
 	    black -q $(PYFMT_SRC) || exit 1; \
 	    $(PRINTF) "indent: black Python sources "; $(call notice, [OK]); \
 	else $(PRINTF) "indent: black absent, skipping Python sources\n"; fi
+	$(Q)if command -v shfmt >/dev/null 2>&1; then \
+	    shfmt -w $(SHFMT_SRC) || exit 1; \
+	    $(PRINTF) "indent: shfmt shell sources "; $(call notice, [OK]); \
+	else $(PRINTF) "indent: shfmt absent, skipping shell sources\n"; fi
 	$(Q)if command -v python3 >/dev/null 2>&1; then \
 	    python3 scripts/forth-indent.py --fix $(FORTH_SRC) >/dev/null; \
 	    python3 scripts/forth-indent.py $(FORTH_SRC) || exit 1; \
@@ -510,8 +548,24 @@ check-format: ## Verify C formatting and trailing newlines (no reformat).
 # Deliberate exceptions carry inline "cppcheck-suppress" comments with a reason,
 # which --inline-suppr honors. Each member skips when its tool is missing, so
 # this never blocks a build that lacks them.
-ANALYZE_SRC := muxleq.c rvopt.c wasm/muxleq-wasm.c
+#
+# Asked of git rather than hand-listed, and with the same pathspec CFMT_SRC
+# uses, so a new top-level .c is analyzed the day it is added. A hand-written
+# list fails silently here: the file still builds, still gets formatted, still
+# passes CI, and simply is never looked at. Headers are not translation units,
+# so they stay out; cppcheck picks up muxleq-core.h explicitly below.
+ANALYZE_SRC := $(wildcard $(shell git ls-files -- '*.c' ':!tests/' 2>/dev/null))
+# cppcheck findings drift between releases the way clang-format output does, so
+# whether it runs is a decision, not an accident of what a machine happens to
+# have installed. Locally it runs when present. CI passes CPPCHECK= to turn it
+# off explicitly, rather than relying on the runner image never shipping it: an
+# image that started shipping cppcheck would otherwise silently begin gating the
+# build on an unpinned tool, which is how the shellcheck half broke.
+CPPCHECK ?= $(shell command -v cppcheck 2>/dev/null)
 check-analyze: $(STAGE0_C) ## Run clang --analyze, cppcheck, and shellcheck.
+	$(Q)test -n "$(strip $(ANALYZE_SRC))" || { \
+	    echo "check-analyze: no sources enumerated; needs a git checkout"; \
+	    exit 1; }
 	$(Q)printf 'int main(void) { return 0; }\n' > $(TMPDIR)/analyze-probe.c
 	$(Q)if ! $(MUXLEQ_CC) --analyze -o /dev/null $(TMPDIR)/analyze-probe.c \
 	        >/dev/null 2>&1; then \
@@ -529,14 +583,14 @@ check-analyze: $(STAGE0_C) ## Run clang --analyze, cppcheck, and shellcheck.
 	    done; \
 	    $(PRINTF) "check-analyze: clang static analyzer "; $(call notice, [OK]); \
 	fi
-	$(Q)if command -v cppcheck >/dev/null 2>&1; then \
-	    cppcheck --enable=warning,style,performance,portability --inline-suppr \
+	$(Q)if [ -n "$(CPPCHECK)" ]; then \
+	    $(CPPCHECK) --enable=warning,style,performance,portability --inline-suppr \
 	        --std=c99 -I. -I$(OUT) --quiet --error-exitcode=1 \
 	        $(ANALYZE_SRC) muxleq-core.h 2>$(TMPDIR)/cppcheck.err \
 	        || { cat $(TMPDIR)/cppcheck.err; exit 1; }; \
 	    if [ -s $(TMPDIR)/cppcheck.err ]; then cat $(TMPDIR)/cppcheck.err; exit 1; fi; \
 	    $(PRINTF) "check-analyze: cppcheck "; $(call notice, [OK]); \
-	else $(PRINTF) "check-analyze: cppcheck absent "; $(call notice, [SKIP]); fi
+	else $(PRINTF) "check-analyze: cppcheck skipped "; $(call notice, [SKIP]); fi
 	$(Q)if command -v shellcheck >/dev/null 2>&1; then \
 	    shellcheck -S style $$(git ls-files '*.sh') || exit 1; \
 	    $(PRINTF) "check-analyze: shellcheck "; $(call notice, [OK]); \
@@ -672,8 +726,9 @@ TMPDIR := $(shell mktemp -d)
 SANFLAGS := -O2 -std=c99 -fsanitize=address,undefined -fno-sanitize-recover=all -g
 SAN_RUN = ASAN_OPTIONS=detect_leaks=0 $(TIMEOUT) $(if $(TIMEOUT),120) $(TMPDIR)/muxleq.san
 SANITIZE_FILES := tasker sieve collatz does eof recurse
-check-sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loader-out-of-range.dec ## Run ASan/UBSan validation.
+check-sanitize: $(STAGE0_C) $(BIN) $(RVOPT) ## Run ASan/UBSan validation.
 	$(Q)$(MUXLEQ_CC) $(SANFLAGS) -I$(OUT) -o $(TMPDIR)/muxleq.san muxleq.c
+	$(Q)$(GEN_LOADER_REJECTS)
 	$(Q)$(PRINTF) "check-sanitize editor (pty) ... "; \
 	    if ! command -v python3 >/dev/null 2>&1; then $(PRINTF) "[SKIP: no python3]\n"; \
 	    else \
@@ -691,10 +746,10 @@ check-sanitize: $(STAGE0_C) $(BIN) $(RVOPT) tests/loader-bad-token.dec tests/loa
 	    fi; \
 	)
 	$(Q)$(PRINTF) "check-sanitize loader rejects ... "; \
-	    ! $(SAN_RUN) tests/loader-bad-token.dec >/dev/null 2>$(TMPDIR)/san.err \
+	    ! $(SAN_RUN) $(TMPDIR)/loader-bad-token.dec >/dev/null 2>$(TMPDIR)/san.err \
 	        && grep -q 'bad cell' $(TMPDIR)/san.err \
 	        && ! grep -Eq 'ERROR: AddressSanitizer|runtime error:' $(TMPDIR)/san.err \
-	        && ! $(SAN_RUN) tests/loader-out-of-range.dec >/dev/null 2>$(TMPDIR)/san.err \
+	        && ! $(SAN_RUN) $(TMPDIR)/loader-out-of-range.dec >/dev/null 2>$(TMPDIR)/san.err \
 	        && grep -q 'bad cell' $(TMPDIR)/san.err \
 	        && ! grep -Eq 'ERROR: AddressSanitizer|runtime error:' $(TMPDIR)/san.err \
 	        || { $(PRINTF) "SANITIZER ERROR\n"; cat $(TMPDIR)/san.err; exit 1; }; \
